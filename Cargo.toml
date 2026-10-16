@@ -1,15 +1,25 @@
 [package]
 name = "capturecraft"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "CaptureCraft: open-source screen capture and annotation tool in pure Rust"
 repository = "https://github.com/TSA3000/capturecraft"
 
 [dependencies]
-xcap = "0.9.8"
 anyhow = "1"
+arboard = "3.7"
+softbuffer = "0.4.8"
+winit = "0.30.13"
+xcap = "0.9.8"
+
+# Keep debug builds responsive (image scaling runs per resize)
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 lto = true

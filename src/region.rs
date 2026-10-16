@@ -51,6 +51,22 @@ impl Region {
         );
         (!clipped.is_empty()).then_some(clipped)
     }
+
+    /// Maps the region from a `from` (width, height) space to a `to` space,
+    /// rounding outward so no selected pixel is lost.
+    /// Used to convert overlay window pixels to captured image pixels.
+    pub fn scale(self, from: (u32, u32), to: (u32, u32)) -> Self {
+        if from == to || from.0 == 0 || from.1 == 0 {
+            return self;
+        }
+        let floor = |v: u32, f: u32, t: u32| (v as u64 * t as u64 / f as u64) as u32;
+        let ceil = |v: u32, f: u32, t: u32| (v as u64 * t as u64).div_ceil(f as u64) as u32;
+        let x0 = floor(self.x, from.0, to.0);
+        let y0 = floor(self.y, from.1, to.1);
+        let x1 = ceil(self.x + self.width, from.0, to.0);
+        let y1 = ceil(self.y + self.height, from.1, to.1);
+        Self::new(x0, y0, x1 - x0, y1 - y0)
+    }
 }
 
 impl fmt::Display for Region {
@@ -132,6 +148,29 @@ mod tests {
     #[test]
     fn clamp_empty_is_none() {
         assert_eq!(Region::new(10, 10, 0, 50).clamp_to(1920, 1080), None);
+    }
+
+    #[test]
+    fn scale_same_size_is_identity() {
+        let r = Region::new(10, 20, 30, 40);
+        assert_eq!(r.scale((1920, 1080), (1920, 1080)), r);
+    }
+
+    #[test]
+    fn scale_2x() {
+        assert_eq!(
+            Region::new(10, 20, 30, 40).scale((960, 540), (1920, 1080)),
+            Region::new(20, 40, 60, 80)
+        );
+    }
+
+    #[test]
+    fn scale_rounds_outward() {
+        // 1.5x: x 1..2 -> 1.5..3.0 -> floor/ceil -> 1..3
+        assert_eq!(
+            Region::new(1, 1, 1, 1).scale((2, 2), (3, 3)),
+            Region::new(1, 1, 2, 2)
+        );
     }
 
     #[test]

@@ -26,9 +26,14 @@ sudo apt-get install pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1
 ## Usage
 
 ```sh
-capturecraft            # saves capture.png
+capturecraft                          # freeze screen, drag to select → capture.png + clipboard
 capturecraft shot.png
+capturecraft --full                   # whole primary screen, no overlay
+capturecraft --region 100,100,640,480 # fixed region, no overlay
+capturecraft --no-clipboard
 ```
+
+Overlay: **drag** to select, **click** for full screen, **Esc** / right-click to cancel.
 
 ## License
 
