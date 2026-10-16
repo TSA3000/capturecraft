@@ -1,5 +1,6 @@
 //! CaptureCraft core: screen capture primitives.
 
+pub mod app;
 mod autostart;
 pub mod config;
 mod draw;
@@ -56,8 +57,66 @@ pub fn capture_primary_region(region: Region) -> Result<RgbaImage> {
 
 /// Freezes all monitors, shows the drag-to-select overlay and returns the
 /// selected part. `None` if the user cancelled.
-pub fn capture_interactive() -> Result<Option<RgbaImage>> {
-    overlay::select_interactive()
+pub fn capture_interactive(
+    mode: config::SelectMode,
+    style: config::Overlay,
+) -> Result<Option<RgbaImage>> {
+    overlay::select_interactive(mode, style)
+}
+
+/// Path of another CaptureCraft binary in the same folder as this one.
+pub fn sibling_exe(name: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// 32x32 RGBA app icon: blue rounded square with white corner brackets.
+pub fn icon_rgba() -> (Vec<u8>, u32, u32) {
+    const S: i32 = 32;
+    let mut rgba = Vec::with_capacity((S * S * 4) as usize);
+    for y in 0..S {
+        for x in 0..S {
+            // Rounded corners (radius 6)
+            let (cx, cy) = (x.clamp(6, S - 7), y.clamp(6, S - 7));
+            let inside = (x - cx).pow(2) + (y - cy).pow(2) <= 36;
+            let near = |v: i32, edge: i32| (edge..edge + 3).contains(&v);
+            let in_corner = |v: i32| (7..14).contains(&v) || (S - 14..S - 7).contains(&v);
+            let bracket = (in_corner(x) && (near(y, 7) || near(y, S - 10)))
+                || (in_corner(y) && (near(x, 7) || near(x, S - 10)));
+            let px = match (inside, bracket) {
+                (false, _) => [0, 0, 0, 0],
+                (true, true) => [255, 255, 255, 255],
+                (true, false) => [0x3B, 0x82, 0xF6, 255],
+            };
+            rgba.extend_from_slice(&px);
+        }
+    }
+    (rgba, S as u32, S as u32)
+}
+
+/// One capture end to end: optional delay, overlay (or full screen),
+/// save to `output_dir`, and copy to the clipboard.
+/// Returns the saved path, or `None` if the user cancelled.
+pub fn run_capture(
+    config: &config::Config,
+    mode: config::SelectMode,
+    delay: std::time::Duration,
+) -> Result<Option<std::path::PathBuf>> {
+    std::thread::sleep(delay);
+    let img = match mode {
+        config::SelectMode::Fullscreen => capture_primary()?,
+        m => match capture_interactive(m, config.overlay.clone())? {
+            Some(img) => img,
+            None => return Ok(None),
+        },
+    };
+    let path = tray::save_capture(&img, &config.output_dir)?;
+    if config.clipboard
+        && let Err(e) = copy_to_clipboard(&img)
+    {
+        eprintln!("warning: {e:#}");
+    }
+    Ok(Some(path))
 }
 
 /// Crops `region` (image pixels) out of `img`, clipped to the image bounds.

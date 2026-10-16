@@ -1,24 +1,25 @@
 //! Background mode: tray icon + global hotkey that opens the overlay.
 //! Captures are saved to the output folder and copied to the clipboard.
 
-use crate::config::{Config, config_dir, config_path};
+use crate::config::{Config, Overlay, SelectMode, config_dir, config_path};
 use crate::overlay::{Outcome, Session};
-use crate::{RgbaImage, autostart, copy_image};
+use crate::{RgbaImage, autostart, copy_image, icon_rgba};
 use anyhow::{Context, Result, anyhow, bail};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{
-    Icon, MouseButton as TrayButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-};
+use tray_icon::{Icon, MouseButton as TrayButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
 pub struct TrayOptions {
+    pub selection: SelectMode,
+    pub overlay: Overlay,
     /// Hotkeys tried in order, e.g. `PrintScreen`, `ctrl+shift+s`.
     pub hotkeys: Vec<String>,
     pub output_dir: PathBuf,
@@ -28,6 +29,8 @@ pub struct TrayOptions {
 impl From<Config> for TrayOptions {
     fn from(c: Config) -> Self {
         Self {
+            selection: c.selection,
+            overlay: c.overlay,
             hotkeys: c.hotkeys,
             output_dir: c.output_dir,
             clipboard: c.clipboard,
@@ -77,6 +80,8 @@ pub fn run(opts: TrayOptions) -> Result<()> {
         ui: None,
         session: None,
         clipboard: None,
+        config_mtime: config_mtime(),
+        last_config_check: Instant::now(),
         error: None,
     };
     event_loop.run_app(&mut app)?;
@@ -94,6 +99,29 @@ fn single_instance_lock() -> Result<File> {
     }
     Ok(file)
 }
+
+/// True if a tray instance currently holds the lock.
+pub fn is_running() -> bool {
+    let path = config_dir().join("tray.lock");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    {
+        Ok(file) => file.try_lock().is_err(),
+        Err(_) => false,
+    }
+}
+
+fn config_mtime() -> Option<SystemTime> {
+    std::fs::metadata(config_path())
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// How often the tray checks config.toml for changes (e.g. from the window).
+const CONFIG_POLL: Duration = Duration::from_secs(2);
 
 /// Registers the first hotkey from `candidates` that is free.
 /// Returns the registered hotkey and its text.
@@ -122,7 +150,9 @@ struct Ui {
     manager: GlobalHotKeyManager,
     hotkey: Option<(HotKey, String)>,
     _tray: TrayIcon,
+    window: MenuItem,
     capture: MenuItem,
+    last: MenuItem,
     folder: MenuItem,
     settings: MenuItem,
     reload: MenuItem,
@@ -146,6 +176,8 @@ struct TrayApp {
     session: Option<Session>,
     /// Kept open so clipboard content survives on Linux.
     clipboard: Option<arboard::Clipboard>,
+    config_mtime: Option<SystemTime>,
+    last_config_check: Instant,
     error: Option<anyhow::Error>,
 }
 
@@ -163,7 +195,9 @@ impl TrayApp {
             ),
         }
 
+        let window = MenuItem::new("Open CaptureCraft…", true, None);
         let capture = MenuItem::new("Capture", true, None);
+        let last = MenuItem::new("Open last capture", true, None);
         let folder = MenuItem::new("Open captures folder", true, None);
         let settings = MenuItem::new("Edit settings…", true, None);
         let reload = MenuItem::new("Reload settings", true, None);
@@ -171,7 +205,9 @@ impl TrayApp {
         let quit = MenuItem::new("Quit CaptureCraft", true, None);
         let menu = Menu::new();
         menu.append_items(&[
+            &window,
             &capture,
+            &last,
             &folder,
             &PredefinedMenuItem::separator(),
             &settings,
@@ -193,7 +229,9 @@ impl TrayApp {
             manager,
             hotkey,
             _tray: tray,
+            window,
             capture,
+            last,
             folder,
             settings,
             reload,
@@ -219,6 +257,7 @@ impl TrayApp {
 
     /// Re-reads config.toml and re-registers the hotkey.
     fn reload(&mut self) {
+        self.config_mtime = config_mtime();
         let config = match Config::load_or_create() {
             Ok(c) => c,
             Err(e) => {
@@ -236,6 +275,7 @@ impl TrayApp {
             }
             ui.hotkey = register_first(&ui.manager, &self.opts.hotkeys);
             ui.capture.set_text(ui.capture_label());
+            ui.autostart.set_checked(autostart::is_enabled());
             println!("settings reloaded");
         }
         self.apply_clipboard_setting();
@@ -255,7 +295,14 @@ impl TrayApp {
         if self.session.is_some() {
             return;
         }
-        match Session::start(event_loop) {
+        if self.opts.selection == SelectMode::Fullscreen {
+            match crate::capture_primary() {
+                Ok(img) => self.handle_capture(img),
+                Err(e) => eprintln!("capture failed: {e:#}"),
+            }
+            return;
+        }
+        match Session::start(event_loop, self.opts.selection, self.opts.overlay.clone()) {
             Ok(s) => self.session = Some(s),
             Err(e) => eprintln!("capture failed: {e:#}"),
         }
@@ -299,14 +346,22 @@ impl ApplicationHandler<UserEvent> for TrayApp {
             {
                 self.start_capture(event_loop);
             }
-            UserEvent::Tray(TrayIconEvent::Click {
+            // Double click opens the window; a single left click would fire
+            // first and start a capture, so it is deliberately not bound.
+            UserEvent::Tray(TrayIconEvent::DoubleClick {
                 button: TrayButton::Left,
-                button_state: MouseButtonState::Up,
                 ..
-            }) => self.start_capture(event_loop),
+            }) => open_window(),
             UserEvent::Menu(e) => {
-                if e.id == ui.capture.id() {
+                if e.id == ui.window.id() {
+                    open_window();
+                } else if e.id == ui.capture.id() {
                     self.start_capture(event_loop);
+                } else if e.id == ui.last.id() {
+                    match crate::app::newest_capture(&self.opts.output_dir) {
+                        Some(path) => open_path(&path),
+                        None => eprintln!("no captures yet in {}", self.opts.output_dir.display()),
+                    }
                 } else if e.id == ui.folder.id() {
                     open_path(&self.opts.output_dir);
                 } else if e.id == ui.settings.id() {
@@ -316,11 +371,28 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                 } else if e.id == ui.autostart.id() {
                     self.toggle_autostart();
                 } else if e.id == ui.quit.id() {
+                    // Quit means the whole app, so take the window with it.
+                    close_app_window();
                     event_loop.exit();
                 }
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Pick up changes made in the window (or by hand) to config.toml.
+        if self.ui.is_some() && self.last_config_check.elapsed() >= CONFIG_POLL {
+            self.last_config_check = Instant::now();
+            if config_mtime() != self.config_mtime {
+                self.reload();
+            }
+        }
+        // An open overlay may need an earlier wake-up than the config poll.
+        let overlay_wake = self.session.as_mut().and_then(Session::tick);
+        let config_wake = Instant::now() + CONFIG_POLL;
+        let wake = overlay_wake.map_or(config_wake, |at| at.min(config_wake));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -352,47 +424,70 @@ pub fn save_capture(img: &RgbaImage, dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Starts the settings window (`capturecraft-app` next to this exe).
+fn open_window() {
+    let exe = crate::sibling_exe("capturecraft-app");
+    let mut cmd = std::process::Command::new(&exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    if let Err(e) = cmd.spawn() {
+        eprintln!("failed to start {}: {e}", exe.display());
+    }
+}
+
+/// Asks an open CaptureCraft window to close, so "Quit" ends everything.
+#[cfg(windows)]
+fn close_app_window() {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
+    use windows::core::HSTRING;
+    let title = HSTRING::from(crate::app::window_title());
+    if let Ok(hwnd) = unsafe { FindWindowW(None, &title) }
+        && hwnd != HWND::default()
+    {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn close_app_window() {}
+
 /// Opens a folder or file with the OS default handler.
-fn open_path(path: &Path) {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        // `explorer` opens folders; `cmd /c start` opens files with the
-        // associated app (e.g. config.toml in your editor).
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/c", "start", ""]);
-        c
-    };
+///
+/// On Windows this goes through the shell API rather than `cmd /c start`,
+/// which would flash a console window.
+#[cfg(windows)]
+pub(crate) fn open_path(path: &Path) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, w};
+    let file = HSTRING::from(path.as_os_str());
+    let result = unsafe { ShellExecuteW(None, w!("open"), &file, None, None, SW_SHOWNORMAL) };
+    // ShellExecuteW reports failure as a "handle" of 32 or less.
+    if result.0 as usize <= 32 {
+        eprintln!("failed to open {}", path.display());
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn open_path(path: &Path) {
     #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut cmd = std::process::Command::new("xdg-open");
-    if let Err(e) = cmd.arg(path).spawn() {
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
+    if let Err(e) = std::process::Command::new(program).arg(path).spawn() {
         eprintln!("failed to open {}: {e}", path.display());
     }
 }
 
-/// 32x32 viewfinder icon: blue rounded square with white corner brackets.
 fn app_icon() -> Result<Icon> {
-    const S: i32 = 32;
-    let mut rgba = Vec::with_capacity((S * S * 4) as usize);
-    for y in 0..S {
-        for x in 0..S {
-            // Rounded corners (radius 6)
-            let (cx, cy) = (x.clamp(6, S - 7), y.clamp(6, S - 7));
-            let inside = (x - cx).pow(2) + (y - cy).pow(2) <= 36;
-            let near = |v: i32, edge: i32| (edge..edge + 3).contains(&v);
-            let in_corner = |v: i32| (7..14).contains(&v) || (S - 14..S - 7).contains(&v);
-            let bracket = (in_corner(x) && (near(y, 7) || near(y, S - 10)))
-                || (in_corner(y) && (near(x, 7) || near(x, S - 10)));
-            let px = match (inside, bracket) {
-                (false, _) => [0, 0, 0, 0],
-                (true, true) => [255, 255, 255, 255],
-                (true, false) => [0x3B, 0x82, 0xF6, 255],
-            };
-            rgba.extend_from_slice(&px);
-        }
-    }
-    Icon::from_rgba(rgba, S as u32, S as u32).map_err(|e| anyhow!("bad icon: {e}"))
+    let (rgba, w, h) = icon_rgba();
+    Icon::from_rgba(rgba, w, h).map_err(|e| anyhow!("bad icon: {e}"))
 }
 
 #[cfg(test)]

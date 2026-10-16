@@ -3,40 +3,37 @@
 //! All monitors are captured first, then each is shown dimmed in its own
 //! borderless fullscreen window. Selections can span monitors.
 //!
-//! - Left drag: select a region (across monitors too)
-//! - Left click (no drag): capture the monitor under the cursor
+//! In Region mode the overlay follows the cursor: while it moves, the window
+//! underneath is highlighted and a click captures it; after a second without
+//! movement it switches to pixel picking (magnifier) and a drag selects a
+//! free region. Window mode always snaps.
+//!
+//! - Left drag: select a region (across monitors too) — Region mode only
+//! - Left click (no drag): capture the highlighted window, or the monitor
+//!   under the cursor if there is none
 //! - Arrow keys: move the cursor 1 px (Shift: 10 px), also while dragging
 //! - Enter (while dragging): finish
 //! - Esc / right click: cancel
 
+use crate::config::{Overlay, SelectMode};
 use crate::draw::{Canvas, GLYPH_H, darken, rgb, text_width};
 use crate::{Region, RgbaImage, crop};
 use anyhow::{Context as _, Result, anyhow, bail};
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
 use xcap::image::imageops;
 
-/// Brightness (out of 256) of everything outside the selection.
-const DIM: u32 = 140;
-const BORDER: u32 = 0x003B_82F6;
-const BORDER_PX: u32 = 2;
-/// Drags smaller than this count as a click.
-const MIN_DRAG: u32 = 3;
-const ZOOM: u32 = 8;
-/// Magnifier shows (2 * MAG_RADIUS + 1)^2 source pixels.
-const MAG_RADIUS: i32 = 7;
-const MAG_OFFSET: i32 = 24;
-const LABEL_SCALE: u32 = 2;
-const LABEL_BG: u32 = 0x0020_2020;
 const WHITE: u32 = 0x00FF_FFFF;
+const LABEL_BG: u32 = 0x0020_2020;
 
 /// Rectangle in global (virtual desktop) physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +69,19 @@ impl Rect {
         })
     }
 
+    pub fn union(&self, other: &Rect) -> Rect {
+        let x0 = self.x.min(other.x) as i64;
+        let y0 = self.y.min(other.y) as i64;
+        let x1 = (self.x as i64 + self.w as i64).max(other.x as i64 + other.w as i64);
+        let y1 = (self.y as i64 + self.h as i64).max(other.y as i64 + other.h as i64);
+        Rect {
+            x: x0 as i32,
+            y: y0 as i32,
+            w: (x1 - x0) as u32,
+            h: (y1 - y0) as u32,
+        }
+    }
+
     pub fn contains(&self, p: (i32, i32)) -> bool {
         let (x, y) = (p.0 as i64, p.1 as i64);
         x >= self.x as i64
@@ -89,9 +99,13 @@ pub enum Outcome {
 
 /// Runs the overlay once in its own event loop.
 /// Returns the selected image, or `None` if cancelled.
-pub fn select_interactive() -> Result<Option<RgbaImage>> {
+pub fn select_interactive(mode: SelectMode, style: Overlay) -> Result<Option<RgbaImage>> {
     let event_loop = EventLoop::new()?;
-    let mut app = OneShot::default();
+    let mut app = OneShot {
+        mode,
+        style,
+        ..Default::default()
+    };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error {
         return Err(e);
@@ -104,6 +118,8 @@ pub fn select_interactive() -> Result<Option<RgbaImage>> {
 
 #[derive(Default)]
 struct OneShot {
+    mode: SelectMode,
+    style: Overlay,
     started: bool,
     session: Option<Session>,
     outcome: Option<Outcome>,
@@ -116,13 +132,21 @@ impl ApplicationHandler for OneShot {
             return;
         }
         self.started = true;
-        match Session::start(event_loop) {
+        match Session::start(event_loop, self.mode, self.style.clone()) {
             Ok(s) => self.session = Some(s),
             Err(e) => {
                 self.error = Some(e);
                 event_loop.exit();
             }
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let wake = self.session.as_mut().and_then(Session::tick);
+        event_loop.set_control_flow(match wake {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -146,13 +170,26 @@ pub struct Session {
     cursor: (i32, i32),
     drag_start: Option<(i32, i32)>,
     modifiers: Modifiers,
+    mode: SelectMode,
+    style: Overlay,
+    /// Visible top-level windows (global physical px), topmost first.
+    windows: Vec<Rect>,
+    /// Window highlighted when the mouse button went down; a click (no drag)
+    /// captures this, whatever the cursor has done since.
+    press_target: Option<Rect>,
+    /// When the cursor last moved (drives the idle switch in Region mode).
+    last_move: Instant,
+    /// Idle state the screens were last drawn with.
+    idle_drawn: bool,
 }
 
 impl Session {
     /// Captures every monitor, then opens the overlay windows.
-    pub fn start(event_loop: &ActiveEventLoop) -> Result<Self> {
+    pub fn start(event_loop: &ActiveEventLoop, mode: SelectMode, style: Overlay) -> Result<Self> {
         let monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
         let single = monitors.len() == 1;
+        // Window positions are taken at the same moment as the screenshots.
+        let windows = list_windows(&monitors, style.min_window);
 
         // Capture everything before any overlay window is visible.
         let mut frozen = Vec::new();
@@ -166,9 +203,13 @@ impl Session {
             bail!("no monitor could be captured");
         }
 
+        let cursor = match mode {
+            SelectMode::Window => CursorIcon::Pointer,
+            _ => CursorIcon::Crosshair,
+        };
         let screens = frozen
             .into_iter()
-            .map(|(monitor, img)| Screen::new(event_loop, monitor, img))
+            .map(|(monitor, img)| Screen::new(event_loop, monitor, img, cursor, &style))
             .collect::<Result<Vec<_>>>()?;
         for s in &screens {
             s.window.request_redraw();
@@ -180,6 +221,12 @@ impl Session {
             cursor: (0, 0),
             drag_start: None,
             modifiers: Modifiers::default(),
+            mode,
+            style,
+            windows,
+            press_target: None,
+            last_move: Instant::now(),
+            idle_drawn: false,
         })
     }
 
@@ -197,10 +244,15 @@ impl Session {
             WindowEvent::ModifiersChanged(m) => self.modifiers = m,
             WindowEvent::CursorMoved { position, .. } => {
                 let r = self.screens[idx].rect;
-                self.cursor = (
+                let moved = (
                     r.x + position.x.round() as i32,
                     r.y + position.y.round() as i32,
                 );
+                if moved != self.cursor {
+                    self.cursor = moved;
+                    self.last_move = Instant::now();
+                    self.idle_drawn = false;
+                }
                 self.request_redraw_all();
             }
             WindowEvent::MouseInput {
@@ -208,7 +260,10 @@ impl Session {
                 button: MouseButton::Left,
                 ..
             } => match state {
-                ElementState::Pressed => self.drag_start = Some(self.cursor),
+                ElementState::Pressed => {
+                    self.drag_start = Some(self.cursor);
+                    self.press_target = self.hovered_window();
+                }
                 ElementState::Released if self.drag_start.is_some() => {
                     return Some(self.finish());
                 }
@@ -241,7 +296,9 @@ impl Session {
         };
         let (dx, dy) = match key {
             Key::Named(NamedKey::Escape) => return Some(Outcome::Cancelled),
-            Key::Named(NamedKey::Enter) if self.drag_start.is_some() => {
+            Key::Named(NamedKey::Enter)
+                if self.drag_start.is_some() || self.mode == SelectMode::Window =>
+            {
                 return Some(self.finish());
             }
             Key::Named(NamedKey::ArrowLeft) => (-step, 0),
@@ -253,6 +310,8 @@ impl Session {
         let target = (self.cursor.0 + dx, self.cursor.1 + dy);
         if let Some(screen) = self.screens.iter().find(|s| s.rect.contains(target)) {
             self.cursor = target;
+            self.last_move = Instant::now();
+            self.idle_drawn = false;
             let local = PhysicalPosition::new(target.0 - screen.rect.x, target.1 - screen.rect.y);
             // Not supported on Wayland; the overlay still follows `self.cursor`.
             let _ = screen.window.set_cursor_position(local);
@@ -261,24 +320,93 @@ impl Session {
         None
     }
 
+    /// True once the cursor has been still long enough for pixel picking.
+    fn is_idle(&self) -> bool {
+        self.mode == SelectMode::Region && self.last_move.elapsed() >= self.style.zoom_delay()
+    }
+
+    /// Redraws when the idle state flips; returns when to wake up next.
+    pub fn tick(&mut self) -> Option<Instant> {
+        if self.mode != SelectMode::Region {
+            return None;
+        }
+        let idle = self.is_idle();
+        if idle != self.idle_drawn {
+            self.idle_drawn = idle;
+            self.request_redraw_all();
+        }
+        (!idle).then(|| self.last_move + self.style.zoom_delay())
+    }
+
     fn request_redraw_all(&self) {
         for s in &self.screens {
             s.window.request_redraw();
         }
     }
 
+    /// Dragged rectangle (Region mode only).
     fn selection(&self) -> Option<Rect> {
+        if self.mode != SelectMode::Region {
+            return None;
+        }
         self.drag_start.map(|s| Rect::from_points(s, self.cursor))
     }
 
+    fn is_dragging(&self) -> bool {
+        let min = self.style.min_drag;
+        self.selection().is_some_and(|r| r.w >= min && r.h >= min)
+    }
+
+    /// Window under the cursor, clipped to the screens.
+    fn hovered_window(&self) -> Option<Rect> {
+        self.windows
+            .iter()
+            .find(|w| w.contains(self.cursor))
+            .and_then(|w| self.clip_to_screens(*w))
+    }
+
+    /// Bounding box of the parts of `r` that are on some screen.
+    fn clip_to_screens(&self, r: Rect) -> Option<Rect> {
+        self.screens
+            .iter()
+            .filter_map(|s| s.rect.intersect(&r))
+            .reduce(|a, b| a.union(&b))
+    }
+
+    /// What is highlighted right now: the drag, else the hovered window.
+    /// In Window mode an empty spot highlights the whole monitor, which is
+    /// also what a click there captures.
+    fn highlight(&self) -> Option<Rect> {
+        if self.is_dragging() {
+            return self.selection();
+        }
+        match (self.hovered_window(), self.mode) {
+            (Some(w), _) => Some(w),
+            (None, SelectMode::Window) => self.monitor_under_cursor(),
+            (None, _) => None,
+        }
+    }
+
+    fn monitor_under_cursor(&self) -> Option<Rect> {
+        self.screens
+            .iter()
+            .find(|s| s.rect.contains(self.cursor))
+            .map(|s| s.rect)
+    }
+
     fn finish(&self) -> Outcome {
-        match self.selection() {
-            Some(sel) if sel.w >= MIN_DRAG && sel.h >= MIN_DRAG => match self.compose(sel) {
+        let target = if self.is_dragging() {
+            self.selection()
+        } else {
+            self.press_target.or_else(|| self.hovered_window())
+        };
+        match target {
+            Some(rect) => match self.compose(rect) {
                 Some(img) => Outcome::Selected(img),
                 None => Outcome::Cancelled,
             },
-            // Plain click: whole monitor under the cursor.
-            _ => {
+            // No window under the cursor: whole monitor.
+            None => {
                 let screen = self
                     .screens
                     .iter()
@@ -324,13 +452,22 @@ impl Session {
     }
 
     fn redraw(&mut self, idx: usize) {
-        let sel = self.selection().filter(|r| r.w > 0 && r.h > 0);
+        let sel = self.highlight().filter(|r| r.w > 0 && r.h > 0);
         let label = match sel {
             Some(r) => format!("{} × {}", r.w, r.h),
             None => format!("{}, {}", self.cursor.0, self.cursor.1),
         };
+        // The magnifier belongs to free-hand picking: while dragging, or
+        // once the cursor has been still long enough.
+        let magnify =
+            self.mode == SelectMode::Region && (self.is_idle() || self.drag_start.is_some());
+        // With dim_on_drag, hovering leaves the screen bright and only the
+        // frame marks the target; dragging dims everything outside it.
+        let dim = !(self.style.dim_on_drag
+            && self.mode == SelectMode::Region
+            && self.drag_start.is_none());
         let cursor = self.cursor;
-        self.screens[idx].draw(sel, cursor, &label);
+        self.screens[idx].draw(sel, cursor, &label, magnify, dim);
     }
 }
 
@@ -341,6 +478,7 @@ struct Screen {
     frozen: RgbaImage,
     window: Rc<Window>,
     surface: Surface<Rc<Window>, Rc<Window>>,
+    style: Overlay,
     /// `frozen` scaled to the window size, 0x00RRGGBB.
     bright: Vec<u32>,
     /// Dimmed copy of `bright`.
@@ -352,6 +490,8 @@ impl Screen {
         event_loop: &ActiveEventLoop,
         monitor: MonitorHandle,
         frozen: RgbaImage,
+        cursor: CursorIcon,
+        style: &Overlay,
     ) -> Result<Self> {
         let pos = monitor.position();
         let size = monitor.size();
@@ -362,7 +502,7 @@ impl Screen {
             .with_position(pos)
             .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor))));
         let window = Rc::new(event_loop.create_window(attrs)?);
-        window.set_cursor(CursorIcon::Crosshair);
+        window.set_cursor(cursor);
 
         let context =
             Context::new(window.clone()).map_err(|e| anyhow!("softbuffer context: {e}"))?;
@@ -379,6 +519,7 @@ impl Screen {
             frozen,
             window,
             surface,
+            style: style.clone(),
             bright: Vec::new(),
             dim: Vec::new(),
         };
@@ -399,7 +540,8 @@ impl Screen {
         self.rect.w = size.width;
         self.rect.h = size.height;
         self.bright = scale_to_buffer(&self.frozen, size.width, size.height);
-        self.dim = self.bright.iter().map(|&c| darken(c, DIM)).collect();
+        let factor = self.style.dim_factor();
+        self.dim = self.bright.iter().map(|&c| darken(c, factor)).collect();
     }
 
     /// Converts a global rect on this screen to frozen-image pixels.
@@ -413,7 +555,14 @@ impl Screen {
         .scale((self.rect.w, self.rect.h), self.frozen.dimensions())
     }
 
-    fn draw(&mut self, sel: Option<Rect>, cursor: (i32, i32), label: &str) {
+    fn draw(
+        &mut self,
+        sel: Option<Rect>,
+        cursor: (i32, i32),
+        label: &str,
+        magnify: bool,
+        dim: bool,
+    ) {
         let r = self.rect;
         let (w, h) = (r.w as usize, r.h as usize);
         let mut buf = match self.surface.buffer_mut() {
@@ -427,10 +576,10 @@ impl Screen {
             return;
         }
 
-        buf.copy_from_slice(&self.dim);
+        buf.copy_from_slice(if dim { &self.dim } else { &self.bright });
 
         // Selection at full brightness
-        if let Some(part) = sel.and_then(|s| s.intersect(&r)) {
+        if dim && let Some(part) = sel.and_then(|s| s.intersect(&r)) {
             let x0 = (part.x - r.x) as usize;
             let x1 = x0 + part.w as usize;
             let y0 = (part.y - r.y) as usize;
@@ -446,11 +595,16 @@ impl Screen {
             height: h,
         };
         if let Some(s) = sel {
-            canvas.stroke_rect(s.x - r.x, s.y - r.y, s.w, s.h, BORDER_PX, BORDER);
+            let (x, y) = (s.x - r.x, s.y - r.y);
+            canvas.stroke_rect(x, y, s.w, s.h, self.style.border_width, self.style.border());
         }
         if r.contains(cursor) {
             let local = (cursor.0 - r.x, cursor.1 - r.y);
-            draw_magnifier(&mut canvas, &self.bright, local, label);
+            if magnify {
+                draw_magnifier(&mut canvas, &self.bright, local, label, &self.style);
+            } else if let Some(s) = sel {
+                draw_label(&mut canvas, (s.x - r.x, s.y - r.y), s.h, label, &self.style);
+            }
         }
 
         if let Err(e) = buf.present() {
@@ -459,29 +613,59 @@ impl Screen {
     }
 }
 
+/// Size badge just outside the top-left corner of a snapped rectangle
+/// (inside it, if there is no room above).
+fn draw_label(
+    canvas: &mut Canvas<'_>,
+    corner: (i32, i32),
+    rect_height: u32,
+    label: &str,
+    style: &Overlay,
+) {
+    let w = text_width(label, style.label_scale) + 12;
+    let h = GLYPH_H * style.label_scale + 8;
+    let x = corner.0.max(0);
+    let above = corner.1 - h as i32 - 4;
+    let y = if above >= 0 {
+        above
+    } else {
+        corner.1 + rect_height as i32 + 4
+    };
+    canvas.fill_rect(x, y, w, h, LABEL_BG);
+    canvas.stroke_rect(x, y, w, h, 1, style.border());
+    canvas.text(x + 6, y + 4, label, style.label_scale, WHITE);
+}
+
 /// Magnified view around the cursor plus a label (size or coordinates).
-fn draw_magnifier(canvas: &mut Canvas<'_>, src: &[u32], cursor: (i32, i32), label: &str) {
+fn draw_magnifier(
+    canvas: &mut Canvas<'_>,
+    src: &[u32],
+    cursor: (i32, i32),
+    label: &str,
+    style: &Overlay,
+) {
     let (w, h) = (canvas.width as i32, canvas.height as i32);
-    let side = (2 * MAG_RADIUS + 1) as u32 * ZOOM;
-    let label_w = text_width(label, LABEL_SCALE) + 12;
-    let label_h = GLYPH_H * LABEL_SCALE + 8;
+    let (zoom, radius, offset) = (style.zoom, style.zoom_radius, style.zoom_offset);
+    let side = (2 * radius + 1) as u32 * zoom;
+    let label_w = text_width(label, style.label_scale) + 12;
+    let label_h = GLYPH_H * style.label_scale + 8;
     let box_w = (side + 4).max(label_w) as i32;
     let box_h = (side + 4 + label_h + 2) as i32;
 
     // Bottom-right of the cursor, flipped near screen edges.
-    let mut x = cursor.0 + MAG_OFFSET;
-    let mut y = cursor.1 + MAG_OFFSET;
+    let mut x = cursor.0 + offset;
+    let mut y = cursor.1 + offset;
     if x + box_w > w {
-        x = cursor.0 - MAG_OFFSET - box_w;
+        x = cursor.0 - offset - box_w;
     }
     if y + box_h > h {
-        y = cursor.1 - MAG_OFFSET - box_h;
+        y = cursor.1 - offset - box_h;
     }
 
     // Zoomed pixels with a white frame
     canvas.fill_rect(x, y, side + 4, side + 4, WHITE);
-    for dy in -MAG_RADIUS..=MAG_RADIUS {
-        for dx in -MAG_RADIUS..=MAG_RADIUS {
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
             let (sx, sy) = (cursor.0 + dx, cursor.1 + dy);
             let color = if (0..w).contains(&sx) && (0..h).contains(&sy) {
                 src[(sy * w + sx) as usize]
@@ -489,21 +673,21 @@ fn draw_magnifier(canvas: &mut Canvas<'_>, src: &[u32], cursor: (i32, i32), labe
                 0
             };
             canvas.fill_rect(
-                x + 2 + (dx + MAG_RADIUS) * ZOOM as i32,
-                y + 2 + (dy + MAG_RADIUS) * ZOOM as i32,
-                ZOOM,
-                ZOOM,
+                x + 2 + (dx + radius) * zoom as i32,
+                y + 2 + (dy + radius) * zoom as i32,
+                zoom,
+                zoom,
                 color,
             );
         }
     }
-    let center = MAG_RADIUS * ZOOM as i32 + 2;
-    canvas.stroke_rect(x + center, y + center, ZOOM, ZOOM, 1, BORDER);
+    let center = radius * zoom as i32 + 2;
+    canvas.stroke_rect(x + center, y + center, zoom, zoom, 1, style.border());
 
     // Label
     let ly = y + side as i32 + 6;
     canvas.fill_rect(x, ly, label_w.max(side + 4), label_h, LABEL_BG);
-    canvas.text(x + 6, ly + 4, label, LABEL_SCALE, WHITE);
+    canvas.text(x + 6, ly + 4, label, style.label_scale, WHITE);
 }
 
 /// Nearest-neighbour scale of an RGBA image into a 0x00RRGGBB buffer.
@@ -520,6 +704,141 @@ fn scale_to_buffer(img: &RgbaImage, w: u32, h: u32) -> Vec<u32> {
         }
     }
     out
+}
+
+/// Visible, non-minimized top-level windows in global physical pixels,
+/// topmost first. Tiny windows (tooltips etc.) are skipped.
+fn list_windows(monitors: &[MonitorHandle], min_size: u32) -> Vec<Rect> {
+    // xcap reports points (logical) on macOS; elsewhere physical pixels.
+    let scales: Vec<(Rect, f64)> = if cfg!(target_os = "macos") {
+        monitors
+            .iter()
+            .map(|m| {
+                let s = m.scale_factor();
+                let (p, z) = (m.position(), m.size());
+                let logical = Rect {
+                    x: (p.x as f64 / s).round() as i32,
+                    y: (p.y as f64 / s).round() as i32,
+                    w: (z.width as f64 / s).round() as u32,
+                    h: (z.height as f64 / s).round() as u32,
+                };
+                (logical, s)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut windows: Vec<(i32, Rect)> = xcap::Window::all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|w| {
+            if w.is_minimized().unwrap_or(true) || is_own_window(&w) {
+                return None;
+            }
+            let rect = Rect {
+                x: w.x().ok()?,
+                y: w.y().ok()?,
+                w: w.width().ok()?,
+                h: w.height().ok()?,
+            };
+            if rect.w < min_size || rect.h < min_size {
+                return None;
+            }
+            Some((w.z().unwrap_or(0), to_physical(rect, &scales)))
+        })
+        .collect();
+    windows.sort_by(|a, b| b.0.cmp(&a.0));
+    windows.into_iter().map(|(_, r)| r).collect()
+}
+
+/// True for CaptureCraft's own windows: they must never be snap targets.
+/// Matched by process, never by title — a user window may well be *called*
+/// "capturecraft" (a terminal, an editor, a folder) and must still snap.
+fn is_own_window(w: &xcap::Window) -> bool {
+    if w.pid().is_ok_and(|pid| pid == std::process::id()) {
+        return true;
+    }
+    let app = w.app_name().unwrap_or_default().to_ascii_lowercase();
+    let app = app.strip_suffix(".exe").unwrap_or(&app);
+    matches!(
+        app,
+        "capturecraft" | "capturecraft-app" | "capturecraft-tray"
+    )
+}
+
+/// Prints the snap targets as the overlay sees them (for `--list-windows`).
+pub fn debug_list_windows() -> Result<()> {
+    let event_loop = EventLoop::new()?;
+    let mut app = DebugList;
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+struct DebugList;
+
+impl ApplicationHandler for DebugList {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(e) = print_windows(event_loop) {
+            eprintln!("{e:#}");
+        }
+        event_loop.exit();
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+fn print_windows(event_loop: &ActiveEventLoop) -> Result<()> {
+    let monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
+    for m in &monitors {
+        let (p, s) = (m.position(), m.size());
+        println!(
+            "monitor {:?}: {},{} {}x{} scale {}",
+            m.name().unwrap_or_default(),
+            p.x,
+            p.y,
+            s.width,
+            s.height,
+            m.scale_factor()
+        );
+    }
+    println!("--- snap targets (topmost first) ---");
+    for (i, r) in list_windows(&monitors, Overlay::default().min_window)
+        .iter()
+        .enumerate()
+    {
+        println!("{i:>2}: {},{} {}x{}", r.x, r.y, r.w, r.h);
+    }
+    println!("--- raw xcap windows ---");
+    for w in xcap::Window::all()?.iter() {
+        println!(
+            "z={:<4} {},{} {}x{} min={} own={} {:?} / {:?}",
+            w.z().unwrap_or(-1),
+            w.x().unwrap_or(0),
+            w.y().unwrap_or(0),
+            w.width().unwrap_or(0),
+            w.height().unwrap_or(0),
+            w.is_minimized().unwrap_or(false),
+            is_own_window(w),
+            w.app_name().unwrap_or_default(),
+            w.title().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// Converts a logical rect to physical using the scale of the monitor that
+/// contains its top-left corner. Unchanged if no monitor matches.
+fn to_physical(r: Rect, scales: &[(Rect, f64)]) -> Rect {
+    match scales.iter().find(|(m, _)| m.contains((r.x, r.y))) {
+        Some((_, s)) => Rect {
+            x: (r.x as f64 * s).round() as i32,
+            y: (r.y as f64 * s).round() as i32,
+            w: (r.w as f64 * s).round() as u32,
+            h: (r.h as f64 * s).round() as u32,
+        },
+        None => r,
+    }
 }
 
 /// Captures the monitor behind a winit `MonitorHandle` with xcap.
@@ -630,6 +949,60 @@ mod tests {
     }
 
     #[test]
+    fn rect_union() {
+        let a = Rect {
+            x: -10,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        let b = Rect {
+            x: 5,
+            y: 5,
+            w: 10,
+            h: 10,
+        };
+        assert_eq!(
+            a.union(&b),
+            Rect {
+                x: -10,
+                y: 0,
+                w: 25,
+                h: 15
+            }
+        );
+    }
+
+    #[test]
+    fn to_physical_scales_on_matching_monitor() {
+        let scales = [(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1440,
+                h: 900,
+            },
+            2.0,
+        )];
+        let r = Rect {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 50,
+        };
+        assert_eq!(
+            to_physical(r, &scales),
+            Rect {
+                x: 20,
+                y: 40,
+                w: 200,
+                h: 100
+            }
+        );
+        assert_eq!(to_physical(r, &[]), r);
+    }
+
+    #[test]
     fn rect_contains() {
         let r = Rect {
             x: -10,
@@ -663,7 +1036,7 @@ mod tests {
                 width: w,
                 height: h,
             };
-            draw_magnifier(&mut canvas, &src, cursor, "994 × 645");
+            draw_magnifier(&mut canvas, &src, cursor, "994 × 645", &Overlay::default());
             assert!(buf.contains(&WHITE), "nothing drawn for cursor {cursor:?}");
         }
     }
