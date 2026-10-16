@@ -2,9 +2,16 @@
 name = "capturecraft"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 description = "CaptureCraft: open-source screen capture and annotation tool in pure Rust"
+repository = "https://github.com/TSA3000/capturecraft"
 
 [dependencies]
 xcap = "0.9.8"
 anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
