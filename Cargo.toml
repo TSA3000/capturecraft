@@ -1,0 +1,10 @@
+[package]
+name = "capturecraft"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "CaptureCraft: open-source screen capture and annotation tool in pure Rust"
+
+[dependencies]
+xcap = "0.9.8"
+anyhow = "1"
