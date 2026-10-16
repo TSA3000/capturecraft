@@ -119,6 +119,48 @@ fn glyph(ch: char) -> Option<[u8; 7]> {
     })
 }
 
+/// Draws `text` straight into an RGBA image with the 5x7 font.
+/// Used by the editor, which works on image pixels rather than a buffer.
+pub fn text_mono(
+    img: &mut crate::RgbaImage,
+    x: i32,
+    y: i32,
+    text: &str,
+    scale: u32,
+    color: [u8; 3],
+) {
+    let mut cx = x;
+    for ch in text.chars() {
+        if let Some(rows) = glyph(ch) {
+            for (gy, bits) in rows.iter().enumerate() {
+                for gx in 0..GLYPH_W {
+                    if bits & (1 << (GLYPH_W - 1 - gx)) == 0 {
+                        continue;
+                    }
+                    for py in 0..scale {
+                        for px in 0..scale {
+                            let ix = cx + (gx * scale + px) as i32;
+                            let iy = y + (gy as u32 * scale + py) as i32;
+                            if ix >= 0
+                                && iy >= 0
+                                && ix < img.width() as i32
+                                && iy < img.height() as i32
+                            {
+                                img.put_pixel(
+                                    ix as u32,
+                                    iy as u32,
+                                    xcap::image::Rgba([color[0], color[1], color[2], 255]),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx += text_advance(scale) as i32;
+    }
+}
+
 /// Packs RGB into 0x00RRGGBB.
 pub fn rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32

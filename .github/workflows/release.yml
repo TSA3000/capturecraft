@@ -44,11 +44,11 @@ jobs:
           mkdir "$NAME"
           BIN="target/${{ matrix.target }}/release"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "$BIN/capturecraft.exe" "$BIN/capturecraft-tray.exe" "$BIN/capturecraft-app.exe" "$NAME/"
+            cp "$BIN/capturecraft.exe" "$BIN/capturecraft-tray.exe" "$BIN/capturecraft-app.exe" "$BIN/capturecraft-editor.exe" "$NAME/"
             7z a "$NAME.zip" "$NAME" > /dev/null
             echo "ASSET=$NAME.zip" >> "$GITHUB_ENV"
           else
-            cp "$BIN/capturecraft" "$BIN/capturecraft-tray" "$BIN/capturecraft-app" "$NAME/"
+            cp "$BIN/capturecraft" "$BIN/capturecraft-tray" "$BIN/capturecraft-app" "$BIN/capturecraft-editor" "$NAME/"
             tar czf "$NAME.tar.gz" "$NAME"
             echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
           fi
