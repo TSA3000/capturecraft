@@ -49,13 +49,36 @@ A magnifier with the selection size (or cursor coordinates) follows the cursor.
 
 ### Tray mode
 
-- Default hotkey: **Print Screen** (Windows/Linux), **Cmd+Shift+2** (macOS).
+```sh
+capturecraft --tray       # with console output
+capturecraft-tray         # windowless (used by autostart)
+```
+
+- Hotkeys are tried in order — default **Print Screen**, then **Ctrl+Shift+S**
+  (macOS: **Cmd+Shift+2**, then Ctrl+Shift+S). The active one is shown in the tray menu.
 - Captures go to `<Pictures>/CaptureCraft/capture-YYYY-MM-DD_HH-MM-SS.png` and the clipboard.
-- Left-click the tray icon to capture; right-click for the menu.
-- Windows 11: if Print Screen is taken by Snipping Tool, turn off
-  *Settings → Accessibility → Keyboard → Use the Print screen key to open screen capture*,
-  or use `--hotkey`.
-- Linux: global hotkeys work on X11 only; the tray uses StatusNotifierItem (KDE, GNOME with AppIndicator extension).
+- Left-click the tray icon to capture; right-click for the menu:
+  Capture · Open captures folder · Edit settings… · Reload settings · Start with Windows / Open at login · Quit
+- Only one tray instance runs at a time.
+- Linux: global hotkeys work on X11 only; the tray uses StatusNotifierItem.
+
+### Settings
+
+`config.toml` is created on first run:
+
+| OS | Path |
+|----|------|
+| Windows | `%APPDATA%\CaptureCraft\config.toml` |
+| macOS | `~/Library/Application Support/CaptureCraft/config.toml` |
+| Linux | `~/.config/CaptureCraft/config.toml` |
+
+```toml
+hotkeys = ["PrintScreen", "ctrl+shift+s"]
+output_dir = "C:\\Users\\you\\Pictures\\CaptureCraft"
+clipboard = true
+```
+
+Command-line flags (`--hotkey`, `--out-dir`, `--no-clipboard`) override it.
 
 ## License
 

@@ -1,19 +1,23 @@
 [package]
 name = "capturecraft"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "CaptureCraft: open-source screen capture and annotation tool in pure Rust"
 repository = "https://github.com/TSA3000/capturecraft"
+default-run = "capturecraft"
 
 [dependencies]
 anyhow = "1"
 arboard = "3.7"
+auto-launch = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
 global-hotkey = "0.8"
+serde = { version = "1", features = ["derive"] }
 softbuffer = "0.4.8"
+toml = "1"
 winit = "0.30.13"
 xcap = "0.9.8"
 

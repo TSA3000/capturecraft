@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use capturecraft::Region;
-use capturecraft::tray::{self, DEFAULT_HOTKEY, TrayOptions};
+use capturecraft::config::{Config, config_path};
+use capturecraft::tray::{self, TrayOptions};
 use std::path::PathBuf;
 
 fn usage() -> String {
@@ -17,11 +18,11 @@ modes:
   --full, -f         capture the whole primary screen, no overlay
   --region, -r R     capture R = x,y,width,height from the primary screen
 
-options:
-  --hotkey KEY       tray hotkey (default: {DEFAULT_HOTKEY}), e.g. ctrl+shift+s
-  --out-dir DIR      tray output folder (default: {})
+options (override {}):
+  --hotkey KEY       tray hotkey, e.g. ctrl+shift+s
+  --out-dir DIR      tray output folder
   --no-clipboard     don't copy the result to the clipboard",
-        tray::default_output_dir().display()
+        config_path().display()
     )
 }
 
@@ -34,10 +35,10 @@ enum Mode {
 
 fn main() -> Result<()> {
     let mut mode = Mode::Interactive;
-    let mut clipboard = true;
+    let mut no_clipboard = false;
     let mut out: Option<PathBuf> = None;
-    let mut hotkey = DEFAULT_HOTKEY.to_string();
-    let mut out_dir = tray::default_output_dir();
+    let mut hotkey: Option<String> = None;
+    let mut out_dir: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -48,9 +49,9 @@ fn main() -> Result<()> {
                 let value = args.next().context("--region needs a value")?;
                 mode = Mode::Region(value.parse::<Region>().map_err(anyhow::Error::msg)?);
             }
-            "--hotkey" => hotkey = args.next().context("--hotkey needs a value")?,
-            "--out-dir" => out_dir = args.next().context("--out-dir needs a value")?.into(),
-            "--no-clipboard" => clipboard = false,
+            "--hotkey" => hotkey = Some(args.next().context("--hotkey needs a value")?),
+            "--out-dir" => out_dir = Some(args.next().context("--out-dir needs a value")?.into()),
+            "--no-clipboard" => no_clipboard = true,
             "-h" | "--help" => {
                 println!("{}", usage());
                 return Ok(());
@@ -60,14 +61,19 @@ fn main() -> Result<()> {
         }
     }
 
+    let mut config = Config::load_or_create()?;
+    if let Some(h) = hotkey {
+        config.hotkeys = vec![h];
+    }
+    if let Some(d) = out_dir {
+        config.output_dir = d;
+    }
+    if no_clipboard {
+        config.clipboard = false;
+    }
+
     let img = match mode {
-        Mode::Tray => {
-            return tray::run(TrayOptions {
-                hotkey,
-                output_dir: out_dir,
-                clipboard,
-            });
-        }
+        Mode::Tray => return tray::run(TrayOptions::from(config)),
         Mode::Interactive => match capturecraft::capture_interactive()? {
             Some(img) => img,
             None => {
@@ -84,7 +90,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to save {}", out.display()))?;
     println!("saved {} ({}x{})", out.display(), img.width(), img.height());
 
-    if clipboard {
+    if config.clipboard {
         match capturecraft::copy_to_clipboard(&img) {
             Ok(()) => println!("copied to clipboard"),
             Err(e) => eprintln!("warning: {e:#}"),

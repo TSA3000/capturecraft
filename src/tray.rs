@@ -1,13 +1,15 @@
 //! Background mode: tray icon + global hotkey that opens the overlay.
 //! Captures are saved to the output folder and copied to the clipboard.
 
+use crate::config::{Config, config_dir, config_path};
 use crate::overlay::{Outcome, Session};
-use crate::{RgbaImage, copy_image};
-use anyhow::{Context, Result, anyhow};
+use crate::{RgbaImage, autostart, copy_image};
+use anyhow::{Context, Result, anyhow, bail};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{
     Icon, MouseButton as TrayButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
@@ -16,26 +18,21 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::WindowId;
 
-/// Default capture hotkey.
-#[cfg(target_os = "macos")]
-pub const DEFAULT_HOTKEY: &str = "super+shift+2";
-/// Default capture hotkey.
-#[cfg(not(target_os = "macos"))]
-pub const DEFAULT_HOTKEY: &str = "PrintScreen";
-
 pub struct TrayOptions {
-    /// Hotkey string, e.g. `PrintScreen`, `ctrl+shift+s`, `super+shift+2`.
-    pub hotkey: String,
+    /// Hotkeys tried in order, e.g. `PrintScreen`, `ctrl+shift+s`.
+    pub hotkeys: Vec<String>,
     pub output_dir: PathBuf,
     pub clipboard: bool,
 }
 
-/// Default output folder: `<Pictures>/CaptureCraft`.
-pub fn default_output_dir() -> PathBuf {
-    dirs::picture_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("CaptureCraft")
+impl From<Config> for TrayOptions {
+    fn from(c: Config) -> Self {
+        Self {
+            hotkeys: c.hotkeys,
+            output_dir: c.output_dir,
+            clipboard: c.clipboard,
+        }
+    }
 }
 
 enum UserEvent {
@@ -46,10 +43,7 @@ enum UserEvent {
 
 /// Runs CaptureCraft in the background until "Quit" is chosen.
 pub fn run(opts: TrayOptions) -> Result<()> {
-    let hotkey: HotKey = opts
-        .hotkey
-        .parse()
-        .map_err(|e| anyhow!("invalid hotkey '{}': {e}", opts.hotkey))?;
+    let lock = single_instance_lock()?;
     std::fs::create_dir_all(&opts.output_dir)
         .with_context(|| format!("failed to create {}", opts.output_dir.display()))?;
 
@@ -79,11 +73,8 @@ pub fn run(opts: TrayOptions) -> Result<()> {
 
     let mut app = TrayApp {
         opts,
-        hotkey,
-        started: false,
-        _manager: None,
-        _tray: None,
-        menu: None,
+        _lock: lock,
+        ui: None,
         session: None,
         clipboard: None,
         error: None,
@@ -92,21 +83,66 @@ pub fn run(opts: TrayOptions) -> Result<()> {
     app.error.map_or(Ok(()), Err)
 }
 
-#[derive(Clone)]
-struct MenuIds {
-    capture: MenuId,
-    folder: MenuId,
-    quit: MenuId,
+/// Holds an exclusive lock on `<config dir>/tray.lock` while running,
+/// so autostart + a manual start don't fight over the hotkey.
+fn single_instance_lock() -> Result<File> {
+    std::fs::create_dir_all(config_dir())?;
+    let path = config_dir().join("tray.lock");
+    let file = File::create(&path).with_context(|| format!("failed to open {}", path.display()))?;
+    if file.try_lock().is_err() {
+        bail!("CaptureCraft is already running in the tray");
+    }
+    Ok(file)
+}
+
+/// Registers the first hotkey from `candidates` that is free.
+/// Returns the registered hotkey and its text.
+fn register_first(
+    manager: &GlobalHotKeyManager,
+    candidates: &[String],
+) -> Option<(HotKey, String)> {
+    for text in candidates {
+        let hotkey: HotKey = match text.parse() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("warning: invalid hotkey '{text}': {e}");
+                continue;
+            }
+        };
+        match manager.register(hotkey) {
+            Ok(()) => return Some((hotkey, text.clone())),
+            Err(e) => eprintln!("hotkey '{text}' unavailable: {e}"),
+        }
+    }
+    None
+}
+
+/// Tray UI state, created once the event loop is running.
+struct Ui {
+    manager: GlobalHotKeyManager,
+    hotkey: Option<(HotKey, String)>,
+    _tray: TrayIcon,
+    capture: MenuItem,
+    folder: MenuItem,
+    settings: MenuItem,
+    reload: MenuItem,
+    autostart: CheckMenuItem,
+    quit: MenuItem,
+}
+
+impl Ui {
+    fn capture_label(&self) -> String {
+        match &self.hotkey {
+            Some((_, text)) => format!("Capture  ({text})"),
+            None => "Capture  (no hotkey available)".to_string(),
+        }
+    }
 }
 
 struct TrayApp {
     opts: TrayOptions,
-    hotkey: HotKey,
-    started: bool,
-    // Kept alive for the lifetime of the app.
-    _manager: Option<GlobalHotKeyManager>,
-    _tray: Option<TrayIcon>,
-    menu: Option<MenuIds>,
+    _lock: File,
+    ui: Option<Ui>,
     session: Option<Session>,
     /// Kept open so clipboard content survives on Linux.
     clipboard: Option<arboard::Clipboard>,
@@ -116,49 +152,103 @@ struct TrayApp {
 impl TrayApp {
     fn init(&mut self) -> Result<()> {
         let manager = GlobalHotKeyManager::new().context("failed to create hotkey manager")?;
-        match manager.register(self.hotkey) {
-            Ok(()) => println!(
-                "CaptureCraft running — press {} to capture",
-                self.opts.hotkey
-            ),
-            Err(e) => eprintln!(
-                "warning: could not register hotkey '{}': {e}\n\
-                 On Windows 11, turn off Settings > Accessibility > Keyboard > \
-                 \"Use the Print screen key to open screen capture\", \
-                 or start with e.g. --hotkey ctrl+shift+s. The tray icon still works.",
-                self.opts.hotkey
+        let hotkey = register_first(&manager, &self.opts.hotkeys);
+        match &hotkey {
+            Some((_, text)) => println!("CaptureCraft running — press {text} to capture"),
+            None => eprintln!(
+                "warning: none of the hotkeys {:?} could be registered; use the tray icon.\n\
+                 Edit {} to choose another.",
+                self.opts.hotkeys,
+                config_path().display()
             ),
         }
-        self._manager = Some(manager);
 
-        let capture = MenuItem::new(format!("Capture  ({})", self.opts.hotkey), true, None);
+        let capture = MenuItem::new("Capture", true, None);
         let folder = MenuItem::new("Open captures folder", true, None);
+        let settings = MenuItem::new("Edit settings…", true, None);
+        let reload = MenuItem::new("Reload settings", true, None);
+        let autostart = CheckMenuItem::new(autostart::label(), true, autostart::is_enabled(), None);
         let quit = MenuItem::new("Quit CaptureCraft", true, None);
-        let separator = PredefinedMenuItem::separator();
         let menu = Menu::new();
-        menu.append_items(&[&capture, &folder, &separator, &quit])?;
-        self.menu = Some(MenuIds {
-            capture: capture.id().clone(),
-            folder: folder.id().clone(),
-            quit: quit.id().clone(),
-        });
+        menu.append_items(&[
+            &capture,
+            &folder,
+            &PredefinedMenuItem::separator(),
+            &settings,
+            &reload,
+            &autostart,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])?;
 
         let tray = TrayIconBuilder::new()
-            .with_tooltip(format!("CaptureCraft — {}", self.opts.hotkey))
+            .with_tooltip("CaptureCraft")
             .with_icon(app_icon()?)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()
             .context("failed to create tray icon")?;
-        self._tray = Some(tray);
 
-        if self.opts.clipboard {
+        let ui = Ui {
+            manager,
+            hotkey,
+            _tray: tray,
+            capture,
+            folder,
+            settings,
+            reload,
+            autostart,
+            quit,
+        };
+        ui.capture.set_text(ui.capture_label());
+        self.ui = Some(ui);
+        self.apply_clipboard_setting();
+        Ok(())
+    }
+
+    fn apply_clipboard_setting(&mut self) {
+        if !self.opts.clipboard {
+            self.clipboard = None;
+        } else if self.clipboard.is_none() {
             match arboard::Clipboard::new() {
                 Ok(c) => self.clipboard = Some(c),
                 Err(e) => eprintln!("warning: clipboard unavailable: {e}"),
             }
         }
-        Ok(())
+    }
+
+    /// Re-reads config.toml and re-registers the hotkey.
+    fn reload(&mut self) {
+        let config = match Config::load_or_create() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("reload failed: {e:#}");
+                return;
+            }
+        };
+        self.opts = TrayOptions::from(config);
+        if let Err(e) = std::fs::create_dir_all(&self.opts.output_dir) {
+            eprintln!("warning: {}: {e}", self.opts.output_dir.display());
+        }
+        if let Some(ui) = &mut self.ui {
+            if let Some((old, _)) = ui.hotkey.take() {
+                let _ = ui.manager.unregister(old);
+            }
+            ui.hotkey = register_first(&ui.manager, &self.opts.hotkeys);
+            ui.capture.set_text(ui.capture_label());
+            println!("settings reloaded");
+        }
+        self.apply_clipboard_setting();
+    }
+
+    fn toggle_autostart(&self) {
+        let Some(ui) = &self.ui else { return };
+        // muda already flipped the check mark; revert it if the change fails.
+        let wanted = ui.autostart.is_checked();
+        if let Err(e) = autostart::set_enabled(wanted) {
+            eprintln!("{e:#}");
+            ui.autostart.set_checked(!wanted);
+        }
     }
 
     fn start_capture(&mut self, event_loop: &ActiveEventLoop) {
@@ -191,10 +281,9 @@ impl TrayApp {
 
 impl ApplicationHandler<UserEvent> for TrayApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.started {
+        if self.ui.is_some() || self.error.is_some() {
             return;
         }
-        self.started = true;
         if let Err(e) = self.init() {
             self.error = Some(e);
             event_loop.exit();
@@ -202,9 +291,11 @@ impl ApplicationHandler<UserEvent> for TrayApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let Some(ui) = &self.ui else { return };
         match event {
             UserEvent::HotKey(e)
-                if e.id() == self.hotkey.id() && e.state() == HotKeyState::Pressed =>
+                if e.state() == HotKeyState::Pressed
+                    && ui.hotkey.as_ref().is_some_and(|(h, _)| h.id() == e.id()) =>
             {
                 self.start_capture(event_loop);
             }
@@ -214,12 +305,17 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                 ..
             }) => self.start_capture(event_loop),
             UserEvent::Menu(e) => {
-                let Some(ids) = self.menu.clone() else { return };
-                if e.id == ids.capture {
+                if e.id == ui.capture.id() {
                     self.start_capture(event_loop);
-                } else if e.id == ids.folder {
-                    open_folder(&self.opts.output_dir);
-                } else if e.id == ids.quit {
+                } else if e.id == ui.folder.id() {
+                    open_path(&self.opts.output_dir);
+                } else if e.id == ui.settings.id() {
+                    open_path(&config_path());
+                } else if e.id == ui.reload.id() {
+                    self.reload();
+                } else if e.id == ui.autostart.id() {
+                    self.toggle_autostart();
+                } else if e.id == ui.quit.id() {
                     event_loop.exit();
                 }
             }
@@ -256,15 +352,22 @@ pub fn save_capture(img: &RgbaImage, dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn open_folder(dir: &Path) {
+/// Opens a folder or file with the OS default handler.
+fn open_path(path: &Path) {
     #[cfg(target_os = "windows")]
-    let program = "explorer";
+    let mut cmd = {
+        // `explorer` opens folders; `cmd /c start` opens files with the
+        // associated app (e.g. config.toml in your editor).
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", "start", ""]);
+        c
+    };
     #[cfg(target_os = "macos")]
-    let program = "open";
+    let mut cmd = std::process::Command::new("open");
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let program = "xdg-open";
-    if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
-        eprintln!("failed to open {}: {e}", dir.display());
+    let mut cmd = std::process::Command::new("xdg-open");
+    if let Err(e) = cmd.arg(path).spawn() {
+        eprintln!("failed to open {}: {e}", path.display());
     }
 }
 
@@ -297,12 +400,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_hotkey_parses() {
-        assert!(DEFAULT_HOTKEY.parse::<HotKey>().is_ok());
-        assert!("ctrl+shift+s".parse::<HotKey>().is_ok());
-    }
-
-    #[test]
     fn save_capture_never_overwrites() {
         let dir = std::env::temp_dir().join(format!("capturecraft-test-{}", std::process::id()));
         let img = RgbaImage::new(2, 2);
@@ -311,5 +408,10 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.exists() && b.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn icon_builds() {
+        assert!(app_icon().is_ok());
     }
 }

@@ -1,5 +1,7 @@
 //! CaptureCraft core: screen capture primitives.
 
+mod autostart;
+pub mod config;
 mod draw;
 pub mod overlay;
 mod region;
