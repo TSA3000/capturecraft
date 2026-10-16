@@ -748,7 +748,8 @@ fn list_windows(monitors: &[MonitorHandle], min_size: u32) -> Vec<Rect> {
             Some((w.z().unwrap_or(0), to_physical(rect, &scales)))
         })
         .collect();
-    windows.sort_by(|a, b| b.0.cmp(&a.0));
+    // Topmost first: the highest z-order wins a hit test.
+    windows.sort_by_key(|a| std::cmp::Reverse(a.0));
     windows.into_iter().map(|(_, r)| r).collect()
 }
 

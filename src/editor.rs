@@ -528,15 +528,17 @@ fn pixelate(img: &mut RgbaImage, rect: Rect, block: u32) {
                     }
                 }
             }
-            if count > 0 {
-                let avg = [
-                    (sum[0] / count) as u8,
-                    (sum[1] / count) as u8,
-                    (sum[2] / count) as u8,
-                ];
+            // checked_div also covers the empty-cell case, so no guard.
+            let avg = [
+                sum[0].checked_div(count),
+                sum[1].checked_div(count),
+                sum[2].checked_div(count),
+            ];
+            if let [Some(r), Some(g), Some(b)] = avg {
+                let color = [r as u8, g as u8, b as u8];
                 for cy in cell.y0..cell.y1 {
                     for cx in cell.x0..cell.x1 {
-                        blend_pixel(img, cx, cy, avg, 1.0);
+                        blend_pixel(img, cx, cy, color, 1.0);
                     }
                 }
             }
