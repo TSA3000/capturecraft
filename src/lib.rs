@@ -1,7 +1,9 @@
 //! CaptureCraft core: screen capture primitives.
 
+mod draw;
 pub mod overlay;
 mod region;
+pub mod tray;
 
 use anyhow::{Context, Result};
 pub use region::Region;
@@ -50,17 +52,10 @@ pub fn capture_primary_region(region: Region) -> Result<RgbaImage> {
     capture_region(&primary_monitor()?, region)
 }
 
-/// Freezes the primary screen, shows the drag-to-select overlay and returns
-/// the selected part. `None` if the user cancelled.
+/// Freezes all monitors, shows the drag-to-select overlay and returns the
+/// selected part. `None` if the user cancelled.
 pub fn capture_interactive() -> Result<Option<RgbaImage>> {
-    // Create the event loop before capturing: on Windows this makes the
-    // process per-monitor DPI aware, so the capture is in physical pixels.
-    let event_loop = winit::event_loop::EventLoop::new()?;
-    let frozen = capture_primary()?;
-    let Some(region) = overlay::select_region(event_loop, &frozen)? else {
-        return Ok(None);
-    };
-    Ok(crop(&frozen, region))
+    overlay::select_interactive()
 }
 
 /// Crops `region` (image pixels) out of `img`, clipped to the image bounds.
@@ -72,9 +67,15 @@ pub fn crop(img: &RgbaImage, region: Region) -> Option<RgbaImage> {
 /// Copies an image to the system clipboard.
 ///
 /// Note: on Linux the clipboard content is owned by this process and is lost
-/// when it exits, unless a clipboard manager picks it up.
+/// when it exits, unless a clipboard manager picks it up. Tray mode keeps
+/// the clipboard open, so it works there.
 pub fn copy_to_clipboard(img: &RgbaImage) -> Result<()> {
     let mut clipboard = arboard::Clipboard::new().context("failed to open clipboard")?;
+    copy_image(&mut clipboard, img)
+}
+
+/// Copies an image using an existing clipboard handle.
+pub fn copy_image(clipboard: &mut arboard::Clipboard, img: &RgbaImage) -> Result<()> {
     clipboard
         .set_image(arboard::ImageData {
             width: img.width() as usize,
