@@ -29,6 +29,7 @@ sudo apt-get install pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1
 | Binary | What it is |
 |--------|-----------|
 | `capturecraft-app` | Main window (own title bar): Capture button, hotkey, clipboard, autostart, save folder |
+| `capturecraft-editor` | Standalone annotation editor: `capturecraft-editor [image.png]` (no path = newest capture) |
 | `capturecraft-tray` | Background tray + global hotkey (no console; used by autostart) |
 | `capturecraft` | Command line: overlay, `--full`, `--region`, `--tray` |
 
@@ -81,9 +82,75 @@ capturecraft-tray         # windowless (used by autostart)
   (macOS: **Cmd+Shift+2**, then Ctrl+Shift+S). The active one is shown in the tray menu.
 - Captures go to `<Pictures>/CaptureCraft/capture-YYYY-MM-DD_HH-MM-SS.png` and the clipboard.
 - Double-click the tray icon to open the window; right-click for the menu:
-  Capture · Open last capture · Open captures folder · Edit settings… · Reload settings · Start with Windows / Open at login · Quit
-- Only one tray instance runs at a time. **Quit** closes the window too.
+  Capture · Open editor · Open last capture · Open captures folder · Edit settings… · Reload settings · Start with Windows / Open at login · Quit
+- Only one tray instance runs at a time. **Quit** (tray menu, or File › Quit CaptureCraft in either window) closes the capture window, any editor windows and the tray. **Esc** closes just the window you are in.
 - Linux: global hotkeys work on X11 only; the tray uses StatusNotifierItem.
+
+### Editor
+
+The editor is its own program. Turn on **Open in editor** (or `editor = true`)
+and every capture is saved and then opened in it; **Save** writes back to the
+same file. It can also be started on its own:
+
+```sh
+capturecraft-editor               # newest capture
+capturecraft-editor shot.png
+```
+
+
+| Tool | What it does |
+|------|--------------|
+| Arrow | Arrow with a filled head |
+| Box | Rectangle outline |
+| Highlight | Translucent marker |
+| Pixelate | Blocks out faces, names, keys |
+| Blur | Gaussian blur (PhotoCraft's kernel and two-pass convolution) |
+| Step | Numbered badge, counts up by itself |
+| Crop | Trims the image; annotations move with it |
+
+Colour swatches, a size slider, undo/redo (Ctrl+Z / Ctrl+Y), **Save** (Ctrl+S),
+**Copy** (Ctrl+C) and Esc to close.
+
+Built on PhotoCraft v0.9.0 (storytold/photocraft), the sibling craft app:
+`photocraft-geom` is a real dependency, so coordinates are their types; the
+history is their `photocraft-ops` model (labelled snapshots per step, capped
+by state count, redo cleared on the next edit — the Edit menu shows
+"Undo Arrow", "Redo Crop"); the blur is their `photocraft-algo` Gaussian
+kernel and separable two-pass convolution; and the themes are their design
+tokens. The engine/UI split is theirs too: `editor.rs` has no egui in it.
+
+### Menus and preferences
+
+Both windows follow PhotoCraft's menu grammar. The main window shows only the Capture button, the selection mode, clipboard,
+editor and save folder; the hotkey sits under the button and is clicked to
+record a new one. Everything else lives in Preferences. Its menus are **File**
+(Capture, Open last capture, Open captures folder, Exit), **Edit**
+(Preferences, Edit config.toml), **View** (Theme), **Tools** (Open editor,
+Start tray) and **Help** (GitHub, Report an issue, About). The editor adds
+Save, Save as, Copy, Undo and Redo to File and Edit.
+
+**Edit › Preferences** opens a modal popup inside the window: a section list
+beside a page of settings, the shape PhotoCraft's Preferences uses, with the
+sections Snagit keeps. The window behind it is dimmed and inert until it
+closes (Esc, Close, or a click outside):
+
+| Section | Settings |
+|---------|----------|
+| Capture | Selection mode, clipboard, open in editor, zoom delay, dimming |
+| Save | Output folder |
+| Interface | Theme, selection colour, border width, magnifier zoom |
+| Hotkeys | Capture hotkey and its fallback |
+| Advanced | Start tray with app, start with Windows, capture delay, config.toml |
+
+Changes are written to `config.toml` immediately and a running tray picks
+them up within about two seconds.
+
+### Themes
+
+Four palettes ported verbatim from PhotoCraft's design system: **Pro (Dark)**,
+**Pro (Medium Gray)**, **Studio (Dark)** and **Studio (Light)**. Pick one from
+View › Theme, from Preferences › Interface, or the selector in the editor's
+menu bar; it is saved as `theme` in `config.toml`.
 
 ### Settings
 
@@ -101,6 +168,8 @@ hotkeys = ["PrintScreen", "ctrl+shift+s"]
 output_dir = "C:\\Users\\you\\Pictures\\CaptureCraft"
 clipboard = true
 start_tray = true      # start the background tray when the window opens
+editor = false         # open captures in the annotation editor first
+theme = "proMedium"    # pro | proMedium | studio | studioLight
 
 [overlay]
 zoom_delay_ms = 250    # stillness before the magnifier appears (0 = always)

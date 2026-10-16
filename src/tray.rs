@@ -19,6 +19,7 @@ use winit::window::WindowId;
 
 pub struct TrayOptions {
     pub selection: SelectMode,
+    pub editor: bool,
     pub overlay: Overlay,
     /// Hotkeys tried in order, e.g. `PrintScreen`, `ctrl+shift+s`.
     pub hotkeys: Vec<String>,
@@ -30,6 +31,7 @@ impl From<Config> for TrayOptions {
     fn from(c: Config) -> Self {
         Self {
             selection: c.selection,
+            editor: c.editor,
             overlay: c.overlay,
             hotkeys: c.hotkeys,
             output_dir: c.output_dir,
@@ -47,6 +49,7 @@ enum UserEvent {
 /// Runs CaptureCraft in the background until "Quit" is chosen.
 pub fn run(opts: TrayOptions) -> Result<()> {
     let lock = single_instance_lock()?;
+    let _ = std::fs::remove_file(quit_marker());
     std::fs::create_dir_all(&opts.output_dir)
         .with_context(|| format!("failed to create {}", opts.output_dir.display()))?;
 
@@ -123,6 +126,21 @@ fn config_mtime() -> Option<SystemTime> {
 /// How often the tray checks config.toml for changes (e.g. from the window).
 const CONFIG_POLL: Duration = Duration::from_secs(2);
 
+/// Marker a window writes to ask a running tray to quit. A file keeps this
+/// portable: the window cannot post a message into the tray's event loop.
+fn quit_marker() -> PathBuf {
+    config_dir().join("quit")
+}
+
+/// Asks a running tray to exit, and closes the CaptureCraft windows.
+/// Used by File › Quit in both windows.
+pub fn request_quit() {
+    if is_running() {
+        let _ = std::fs::write(quit_marker(), b"quit");
+    }
+    close_app_window();
+}
+
 /// Registers the first hotkey from `candidates` that is free.
 /// Returns the registered hotkey and its text.
 fn register_first(
@@ -152,6 +170,7 @@ struct Ui {
     _tray: TrayIcon,
     window: MenuItem,
     capture: MenuItem,
+    editor: MenuItem,
     last: MenuItem,
     folder: MenuItem,
     settings: MenuItem,
@@ -197,6 +216,7 @@ impl TrayApp {
 
         let window = MenuItem::new("Open CaptureCraft…", true, None);
         let capture = MenuItem::new("Capture", true, None);
+        let editor = MenuItem::new("Open editor", true, None);
         let last = MenuItem::new("Open last capture", true, None);
         let folder = MenuItem::new("Open captures folder", true, None);
         let settings = MenuItem::new("Edit settings…", true, None);
@@ -207,6 +227,7 @@ impl TrayApp {
         menu.append_items(&[
             &window,
             &capture,
+            &editor,
             &last,
             &folder,
             &PredefinedMenuItem::separator(),
@@ -231,6 +252,7 @@ impl TrayApp {
             _tray: tray,
             window,
             capture,
+            editor,
             last,
             folder,
             settings,
@@ -357,6 +379,11 @@ impl ApplicationHandler<UserEvent> for TrayApp {
                     open_window();
                 } else if e.id == ui.capture.id() {
                     self.start_capture(event_loop);
+                } else if e.id == ui.editor.id() {
+                    match crate::app::newest_capture(&self.opts.output_dir) {
+                        Some(path) => crate::open_editor(&path),
+                        None => eprintln!("no captures yet to edit"),
+                    }
                 } else if e.id == ui.last.id() {
                     match crate::app::newest_capture(&self.opts.output_dir) {
                         Some(path) => open_path(&path),
@@ -387,6 +414,13 @@ impl ApplicationHandler<UserEvent> for TrayApp {
             if config_mtime() != self.config_mtime {
                 self.reload();
             }
+        }
+        // A window asked everything to quit.
+        if self.ui.is_some() && quit_marker().exists() {
+            let _ = std::fs::remove_file(quit_marker());
+            close_app_window();
+            event_loop.exit();
+            return;
         }
         // An open overlay may need an earlier wake-up than the config poll.
         let overlay_wake = self.session.as_mut().and_then(Session::tick);
@@ -438,26 +472,47 @@ fn open_window() {
     }
 }
 
-/// Asks an open CaptureCraft window to close, so "Quit" ends everything.
+/// Asks every open CaptureCraft window to close, so "Quit" ends everything:
+/// the capture window and any editor windows.
 #[cfg(windows)]
 fn close_app_window() {
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
-    use windows::core::HSTRING;
-    let title = HSTRING::from(crate::app::window_title());
-    if let Ok(hwnd) = unsafe { FindWindowW(None, &title) }
-        && hwnd != HWND::default()
-    {
-        unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, IsWindowVisible, PostMessageW, WM_CLOSE,
+    };
+    // BOOL is a core type; only the TRUE constant lives in Foundation.
+    use windows::core::BOOL;
+
+    // Editor windows are titled per file, so match on the prefix instead of
+    // looking one window up by its exact title.
+    extern "system" fn close_matching(hwnd: HWND, _: LPARAM) -> BOOL {
+        let mut buffer = [0u16; 256];
+        // SAFETY: `buffer` is a valid, correctly sized slice for the call,
+        // and `hwnd` comes from EnumWindows.
+        let len = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+        if len > 0 && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            let title = String::from_utf16_lossy(&buffer[..len as usize]);
+            if title.starts_with("CaptureCraft") {
+                // SAFETY: posting WM_CLOSE to a window we just enumerated.
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
         }
+        // Keep enumerating.
+        TRUE
+    }
+
+    // SAFETY: the callback only reads the handle it is given and posts to it.
+    unsafe {
+        let _ = EnumWindows(Some(close_matching), LPARAM(0));
     }
 }
 
 #[cfg(not(windows))]
 fn close_app_window() {}
 
-/// Opens a folder or file with the OS default handler.
+/// Opens a folder, file or URL with the OS default handler.
 ///
 /// On Windows this goes through the shell API rather than `cmd /c start`,
 /// which would flash a console window.
@@ -503,6 +558,13 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.exists() && b.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn quit_marker_lives_in_the_config_dir() {
+        let marker = quit_marker();
+        assert!(marker.starts_with(config_dir()));
+        assert_eq!(marker.file_name().and_then(|n| n.to_str()), Some("quit"));
     }
 
     #[test]

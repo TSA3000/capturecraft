@@ -1,6 +1,7 @@
 //! User settings in `<config dir>/CaptureCraft/config.toml`
 //! (Windows: `%APPDATA%\CaptureCraft\config.toml`).
 
+use crate::theme::ThemeKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,9 @@ const HEADER: &str = "\
 # output_dir: where captures are saved.
 # clipboard:  copy every capture to the clipboard.
 # start_tray: start the background tray (and its hotkey) when the window opens.
+# theme:      \"pro\", \"proMedium\", \"studio\" or \"studioLight\" (PhotoCraft's palettes).
+# editor:     open the capture in the annotation editor instead of saving it
+#             straight away (Snagit's \"Preview in Editor\").
 #
 # [overlay] — look and feel of the capture overlay
 # zoom_delay_ms:  cursor must be still this long before the magnifier appears
@@ -71,6 +75,8 @@ pub struct Config {
     pub output_dir: PathBuf,
     pub clipboard: bool,
     pub start_tray: bool,
+    pub editor: bool,
+    pub theme: ThemeKind,
     pub overlay: Overlay,
 }
 
@@ -146,6 +152,8 @@ impl Default for Config {
             output_dir: default_output_dir(),
             clipboard: true,
             start_tray: true,
+            editor: false,
+            theme: ThemeKind::default(),
             overlay: Overlay::default(),
         }
     }
@@ -275,6 +283,22 @@ mod tests {
         let c = Config::parse("[overlay]\nborder_color = \"nope\"\ndim = 0").unwrap();
         assert_eq!(c.overlay.border(), 0x003B_82F6);
         assert_eq!(c.overlay.dim_factor(), 16);
+    }
+
+    #[test]
+    fn theme_parses() {
+        assert_eq!(Config::default().theme, ThemeKind::ProMedium);
+        assert_eq!(
+            Config::parse("theme = \"studio\"").unwrap().theme,
+            ThemeKind::Studio
+        );
+        assert!(Config::parse("theme = \"nope\"").is_err());
+    }
+
+    #[test]
+    fn editor_defaults_off_and_parses() {
+        assert!(!Config::default().editor);
+        assert!(Config::parse("editor = true").unwrap().editor);
     }
 
     #[test]

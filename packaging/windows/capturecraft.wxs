@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CaptureCraft MSI, built with WiX 6 by .github/workflows/release.yml.
+  Version, platform and the binary folder are passed in with -d.
+  Per-user install (InstallScope="perUser"), so no admin rights are needed.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="CaptureCraft"
+           Manufacturer="TSA3000"
+           Version="$(var.Version)"
+           UpgradeCode="7C4F0C8E-3B6E-4C3E-9A1B-2F2A0E6D51A4"
+           Scope="perUser"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of CaptureCraft is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="CaptureCraft" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutFolder" Name="CaptureCraft" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="MainApp" Guid="*">
+        <File Id="app" Source="$(var.Source)\capturecraft-app.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuApp"
+                    Directory="AppShortcutFolder"
+                    Name="CaptureCraft"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Advertise="yes" />
+        </File>
+        <RemoveFolder Id="RemoveShortcutFolder" Directory="AppShortcutFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\CaptureCraft" Name="installed" Type="integer" Value="1" />
+      </Component>
+      <Component Id="Cli" Guid="*">
+        <File Source="$(var.Source)\capturecraft.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Tray" Guid="*">
+        <File Source="$(var.Source)\capturecraft-tray.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Editor" Guid="*">
+        <File Id="editor" Source="$(var.Source)\capturecraft-editor.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuEditor"
+                    Directory="AppShortcutFolder"
+                    Name="CaptureCraft Editor"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Advertise="yes" />
+        </File>
+      </Component>
+      <!-- One file per component: an auto GUID needs a single unversioned
+           file as the keypath. -->
+      <Component Id="Readme" Guid="*">
+        <File Source="$(var.Source)\README.md" KeyPath="yes" />
+      </Component>
+      <Component Id="License" Guid="*">
+        <File Id="license" Name="LICENSE.txt" Source="$(var.Source)\LICENSE" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="CaptureCraft" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+  </Package>
+</Wix>

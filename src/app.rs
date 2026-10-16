@@ -3,6 +3,8 @@
 //! right away; a running tray picks them up within a few seconds.
 
 use crate::config::{Config, SelectMode, config_dir, config_path};
+use crate::prefs_ui::Prefs;
+use crate::theme::{self, ThemeKind};
 use crate::tray::{self, open_path};
 use crate::{autostart, icon_rgba, sibling_exe};
 use anyhow::{Result, anyhow};
@@ -14,17 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
-const PRESETS: &[&str] = &[
-    "PrintScreen",
-    "ctrl+PrintScreen",
-    "alt+PrintScreen",
-    "ctrl+shift+s",
-    "ctrl+shift+2",
-];
 /// Always kept as second choice so a taken hotkey still leaves one working.
 const FALLBACK: &str = "ctrl+shift+s";
+pub const REPO: &str = "https://github.com/TSA3000/capturecraft";
 pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-const SETTINGS_WIDTH: f32 = 380.0;
+const SETTINGS_WIDTH: f32 = 330.0;
 const BUTTON_SIZE: egui::Vec2 = egui::vec2(130.0, 96.0);
 
 /// Opens the window and blocks until it is closed.
@@ -93,6 +89,11 @@ struct App {
     last_tray_check: Instant,
     /// One-time window tweaks that need a real window handle.
     styled: bool,
+    /// Theme applied to the context; re-applied when it changes.
+    applied_theme: Option<ThemeKind>,
+    prefs: Prefs,
+    /// Last minimized state of Preferences, to mirror it onto this window.
+    show_about: bool,
     /// Newest file in the output folder, for "Open last capture".
     last_capture: Option<PathBuf>,
     /// Title-bar icon, uploaded to egui on first use.
@@ -116,6 +117,9 @@ impl App {
             tray_running,
             last_tray_check: Instant::now(),
             styled: false,
+            applied_theme: None,
+            prefs: Prefs::default(),
+            show_about: false,
             last_capture: newest_capture(&output_dir),
             icon: None,
         }
@@ -242,6 +246,8 @@ impl App {
         }
     }
 
+    /// The capture panel's left column: what to capture and where it goes.
+    /// Hotkey, theme, tray and autostart live in Edit › Preferences.
     fn settings(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("settings")
             .num_columns(2)
@@ -263,58 +269,15 @@ impl App {
                 }
                 ui.end_row();
 
-                ui.label("Hotkey");
-                ui.horizontal(|ui| {
-                    let current = self.hotkey();
-                    let mut selected = current.clone();
-                    let text = if self.recording {
-                        "Press keys… (Esc cancels)".to_string()
-                    } else {
-                        current.clone()
-                    };
-                    egui::ComboBox::from_id_salt("hotkey")
-                        .width(190.0)
-                        .selected_text(text)
-                        .show_ui(ui, |ui| {
-                            for preset in PRESETS {
-                                ui.selectable_value(&mut selected, preset.to_string(), *preset);
-                            }
-                            if !PRESETS.contains(&current.as_str()) {
-                                ui.selectable_value(&mut selected, current.clone(), &current);
-                            }
-                        });
-                    if selected != current {
-                        self.set_hotkey(selected);
-                    }
-                    let label = if self.recording {
-                        "Cancel"
-                    } else {
-                        "Record…"
-                    };
-                    if ui.button(label).clicked() {
-                        self.recording = !self.recording;
-                    }
-                });
-                ui.end_row();
-
                 ui.label("Copy to clipboard");
-                if toggle(ui, &mut self.config.clipboard).changed() {
+                if theme::toggle(ui, &mut self.config.clipboard).changed() {
                     self.save();
                 }
                 ui.end_row();
 
-                ui.label("Start tray with app");
-                if toggle(ui, &mut self.config.start_tray).changed() {
+                ui.label("Open in editor");
+                if theme::toggle(ui, &mut self.config.editor).changed() {
                     self.save();
-                }
-                ui.end_row();
-
-                ui.label(autostart::label());
-                if toggle(ui, &mut self.autostart).changed()
-                    && let Err(e) = autostart::set_enabled(self.autostart)
-                {
-                    self.status = format!("{e:#}");
-                    self.autostart = !self.autostart;
                 }
                 ui.end_row();
 
@@ -337,6 +300,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.applied_theme != Some(self.config.theme) {
+            theme::apply(ctx, self.config.theme);
+            self.applied_theme = Some(self.config.theme);
+        }
         if !self.styled {
             self.styled = true;
             // Keep the hotkey working without the user starting the tray.
@@ -344,13 +311,29 @@ impl eframe::App for App {
                 self.start_tray();
             }
         }
+        // Esc closes the window (but not while recording a hotkey, where it
+        // cancels the recording instead).
+        if !self.recording && !self.prefs.open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
         self.poll();
         if self.recording {
             self.record_hotkey(ctx);
         }
         ctx.request_repaint_after(Duration::from_millis(500));
+        if let Some(updated) = self.prefs.show(ctx, &self.config) {
+            self.config = updated;
+            self.applied_theme = None;
+            self.autostart = autostart::is_enabled();
+        }
+        self.about_window(ctx);
 
         let title_height = self.title_bar(ctx);
+        let menu_height = egui::TopBottomPanel::top("menu")
+            .show(ctx, |ui| self.menu_bar(ui))
+            .response
+            .rect
+            .height();
         let status_height = egui::TopBottomPanel::bottom("status")
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -415,11 +398,19 @@ impl eframe::App for App {
 
         // Shrink-wrap the window around the content (no empty space).
         let margin = ctx.style().spacing.window_margin.rightf().max(8.0);
-        let wanted = egui::vec2(
+        // `content` is in screen coordinates, so its top already sits below
+        // the title bar and menu; only the bottom panel is still to come.
+        let _ = (title_height, menu_height);
+        let mut wanted = egui::vec2(
             content.right() + margin,
-            content.bottom() + margin + status_height + title_height,
+            content.bottom() + margin + status_height,
         )
         .round();
+        // Grow while the Preferences popup is open so it is never clipped,
+        // then shrink back to the compact panel when it closes.
+        if self.prefs.open {
+            wanted = wanted.max(crate::prefs_ui::MODAL_SIZE + egui::vec2(60.0, 130.0));
+        }
         let current = ctx.content_rect().size();
         if (wanted - current).abs().max_elem() > 1.0 {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(wanted));
@@ -428,13 +419,134 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Menu bar, in PhotoCraft's grammar: File, Edit, View, Tools, Help.
+    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Capture").clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.start_capture(&ctx);
+                    ui.close();
+                }
+                if ui.button("Open last capture").clicked() {
+                    if let Some(path) = self.last_capture.clone() {
+                        open_path(&path);
+                    }
+                    ui.close();
+                }
+                if ui.button("Open captures folder").clicked() {
+                    let _ = std::fs::create_dir_all(&self.config.output_dir);
+                    open_path(&self.config.output_dir);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Exit\tEsc").clicked() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                }
+                if ui
+                    .button("Quit CaptureCraft")
+                    .on_hover_text("Closes this window, the editor and the tray")
+                    .clicked()
+                {
+                    tray::request_quit();
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                }
+            });
+
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Preferences…").clicked() {
+                    self.prefs.open(&self.config);
+                    ui.close();
+                }
+                if ui.button("Edit config.toml").clicked() {
+                    open_path(&config_path());
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                ui.label(RichText::new("Theme").small());
+                for kind in ThemeKind::ALL {
+                    if ui.radio(self.config.theme == kind, kind.label()).clicked() {
+                        self.config.theme = kind;
+                        self.applied_theme = None;
+                        self.save();
+                        ui.close();
+                    }
+                }
+            });
+
+            ui.menu_button("Tools", |ui| {
+                if ui.button("Open editor").clicked() {
+                    match &self.last_capture {
+                        Some(path) => crate::open_editor(path),
+                        None => self.status = "No captures yet".to_string(),
+                    }
+                    ui.close();
+                }
+                let running = self.tray_running;
+                if ui
+                    .add_enabled(!running, egui::Button::new("Start tray"))
+                    .clicked()
+                {
+                    self.start_tray();
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Help", |ui| {
+                if ui.button("GitHub repository").clicked() {
+                    open_path(std::path::Path::new(REPO));
+                    ui.close();
+                }
+                if ui.button("Report an issue").clicked() {
+                    open_path(std::path::Path::new(&format!("{REPO}/issues")));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("About CaptureCraft").clicked() {
+                    self.show_about = true;
+                    ui.close();
+                }
+            });
+        });
+    }
+
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_about;
+        egui::Window::new("About CaptureCraft")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("CaptureCraft");
+                    ui.label(VERSION);
+                    ui.add_space(6.0);
+                    ui.label("Open-source screen capture and annotation, in pure Rust.");
+                    ui.label(
+                        RichText::new("Themes, history model and blur from PhotoCraft v0.9.0")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(10.0);
+                    if ui.link(REPO).clicked() {
+                        open_path(std::path::Path::new(REPO));
+                    }
+                    ui.label(RichText::new("Apache-2.0").small().weak());
+                });
+            });
+        self.show_about = open;
+    }
+
     /// Custom title bar: app name, drag area, minimize and close.
     /// Returns its height.
     fn title_bar(&mut self, ctx: &egui::Context) -> f32 {
         const HEIGHT: f32 = 32.0;
         egui::TopBottomPanel::top("title_bar")
             .exact_height(HEIGHT)
-            .frame(egui::Frame::NONE.fill(ctx.style().visuals.widgets.noninteractive.bg_fill))
+            .frame(egui::Frame::NONE.fill(theme::tokens(ctx).chrome))
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 // Dragging anywhere on the bar moves the window.
@@ -498,7 +610,28 @@ impl App {
             let ctx = ui.ctx().clone();
             self.start_capture(&ctx);
         }
-        ui.label(RichText::new(self.hotkey()).weak().small());
+
+        // The hotkey under the button: click it to record a new combination.
+        let text = if self.recording {
+            "Press keys… (Esc cancels)".to_string()
+        } else {
+            self.hotkey()
+        };
+        let label = RichText::new(text).small();
+        let label = if self.recording {
+            label.color(ACCENT).strong()
+        } else {
+            label.weak()
+        };
+        let response = ui
+            .add(egui::Label::new(label).sense(egui::Sense::click()))
+            .on_hover_text("Click to record a new hotkey");
+        if response.clicked() {
+            self.recording = !self.recording;
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
     }
 }
 
@@ -552,7 +685,7 @@ fn caption_button(ui: &mut egui::Ui, kind: CaptionButton) -> bool {
         } else {
             ui.visuals().text_color()
         };
-        let stroke = egui::Stroke::new(1.2, color);
+        let stroke = egui::Stroke::new(1.2_f32, color);
         let c = rect.center();
         let r = 4.0;
         let p = ui.painter();
@@ -595,35 +728,8 @@ pub fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
         .map(|(_, path)| path)
 }
 
-/// On/off switch.
-fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let size = egui::vec2(2.0, 1.0) * ui.spacing().interact_size.y;
-    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
-    if response.clicked() {
-        *on = !*on;
-        response.mark_changed();
-    }
-    if ui.is_rect_visible(rect) {
-        let t = ui.ctx().animate_bool(response.id, *on);
-        let radius = 0.5 * rect.height();
-        let bg = if *on {
-            ACCENT
-        } else {
-            ui.visuals().widgets.inactive.bg_fill
-        };
-        ui.painter().rect_filled(rect, radius, bg);
-        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
-        ui.painter().circle_filled(
-            egui::pos2(x, rect.center().y),
-            0.75 * radius,
-            Color32::WHITE,
-        );
-    }
-    response
-}
-
 /// Hotkey list for config: the chosen key first, the fallback second.
-fn hotkey_list(hotkey: &str) -> Vec<String> {
+pub fn hotkey_list(hotkey: &str) -> Vec<String> {
     let mut list = vec![hotkey.to_string()];
     if !hotkey.eq_ignore_ascii_case(FALLBACK) {
         list.push(FALLBACK.to_string());
@@ -742,7 +848,7 @@ mod tests {
 
     #[test]
     fn presets_parse() {
-        for p in PRESETS {
+        for p in crate::prefs_ui::HOTKEYS {
             assert!(p.parse::<HotKey>().is_ok(), "preset {p}");
         }
     }

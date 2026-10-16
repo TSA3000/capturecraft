@@ -3,9 +3,13 @@
 pub mod app;
 mod autostart;
 pub mod config;
-mod draw;
+pub(crate) mod draw;
+pub mod editor;
+pub mod editor_ui;
 pub mod overlay;
+pub mod prefs_ui;
 mod region;
+pub mod theme;
 pub mod tray;
 
 use anyhow::{Context, Result};
@@ -64,6 +68,21 @@ pub fn capture_interactive(
     overlay::select_interactive(mode, style)
 }
 
+/// Opens `path` in the standalone editor.
+pub fn open_editor(path: &std::path::Path) {
+    let exe = sibling_exe("capturecraft-editor");
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    if let Err(e) = cmd.spawn() {
+        eprintln!("failed to start {}: {e}", exe.display());
+    }
+}
+
 /// Path of another CaptureCraft binary in the same folder as this one.
 pub fn sibling_exe(name: &str) -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -115,6 +134,11 @@ pub fn run_capture(
         && let Err(e) = copy_to_clipboard(&img)
     {
         eprintln!("warning: {e:#}");
+    }
+    // The editor is its own program: the capture is on disk first, so it is
+    // never lost if the editor fails to start.
+    if config.editor {
+        open_editor(&path);
     }
     Ok(Some(path))
 }

@@ -37,22 +37,62 @@ jobs:
           key: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package archive
         shell: bash
         run: |
           NAME="capturecraft-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$NAME"
           BIN="target/${{ matrix.target }}/release"
+          cp README.md LICENSE "$NAME/" 2>/dev/null || cp README.md "$NAME/"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "$BIN/capturecraft.exe" "$BIN/capturecraft-tray.exe" "$BIN/capturecraft-app.exe" "$NAME/"
+            cp "$BIN/capturecraft.exe" "$BIN/capturecraft-tray.exe" \
+               "$BIN/capturecraft-app.exe" "$BIN/capturecraft-editor.exe" "$NAME/"
             7z a "$NAME.zip" "$NAME" > /dev/null
             echo "ASSET=$NAME.zip" >> "$GITHUB_ENV"
+            echo "STAGE=$NAME" >> "$GITHUB_ENV"
           else
-            cp "$BIN/capturecraft" "$BIN/capturecraft-tray" "$BIN/capturecraft-app" "$NAME/"
+            cp "$BIN/capturecraft" "$BIN/capturecraft-tray" \
+               "$BIN/capturecraft-app" "$BIN/capturecraft-editor" "$NAME/"
             tar czf "$NAME.tar.gz" "$NAME"
             echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
           fi
 
-      - uses: softprops/action-gh-release@v3
+      # Windows installers: an NSIS .exe and a WiX .msi, for x64 and ARM64.
+      - name: Build Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          $arch = if ("${{ matrix.target }}" -like 'aarch64*') { 'arm64' } else { 'x64' }
+          # Absolute paths: NSIS resolves relative ones against the .nsi file.
+          $stage = (Resolve-Path "${env:STAGE}").Path
+          $out = (Get-Location).Path
+          Get-ChildItem $stage | Select-Object Name
+
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress -y
+            $env:PATH = "$env:PATH;${env:ProgramFiles(x86)}\NSIS;${env:ProgramFiles}\NSIS"
+          }
+          makensis /DVERSION=$version /DARCH=$arch /DSOURCE=$stage /DOUTDIR=$out `
+            packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          echo "SETUP=capturecraft-$version-$arch-setup.exe" >> $env:GITHUB_ENV
+
+          # WiX 6 as a dotnet tool, so the same step works on ARM64 runners.
+          dotnet tool install --global wix --version 6.*
+          $env:PATH = "$env:PATH;$env:USERPROFILE\.dotnet\tools"
+          wix build packaging\windows\capturecraft.wxs `
+            -arch $arch `
+            -d Version=$version -d Source=$stage `
+            -o "$out\capturecraft-$version-$arch.msi"
+          if ($LASTEXITCODE -ne 0) { throw "wix failed" }
+          echo "MSI=capturecraft-$version-$arch.msi" >> $env:GITHUB_ENV
+
+      - name: Publish
+        uses: softprops/action-gh-release@v3
         with:
-          files: ${{ env.ASSET }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.SETUP }}
+            ${{ env.MSI }}
+          fail_on_unmatched_files: false
