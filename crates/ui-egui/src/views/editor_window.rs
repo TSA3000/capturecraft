@@ -17,7 +17,7 @@
 
 use capturecraft_engine::{DocState, Session};
 use capturecraft_format::{Annotation, CanvasBackdrop, Manifest};
-use egui::{Context, DragValue, Frame, Id, Margin, Popup, RichText, Ui, pos2, vec2};
+use egui::{Context, DragValue, Frame, Id, Margin, Popup, RichText, Ui, Vec2, pos2, vec2};
 use serde_json::json;
 
 use crate::UiIntent;
@@ -215,7 +215,14 @@ impl EditorWindow<'_> {
                         .stroke(egui::Stroke::new(1.0, t.chrome_border)),
                 )
                 .show(ui, |ui| {
-                    RightSidebar { doc, tokens: t }.show(ui, editor, &mut intents);
+                    // A child of exactly the drawer's size, clipped: a row
+                    // that is too wide is cut at the edge instead of making
+                    // egui push the whole right panel off the window.
+                    let r = ui.max_rect();
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                    child.set_clip_rect(r.intersect(ui.clip_rect()));
+                    RightSidebar { doc, tokens: t }.show(&mut child, editor, &mut intents);
+                    ui.allocate_rect(r, egui::Sense::hover());
                 });
         }
         egui::CentralPanel::default()
@@ -399,13 +406,16 @@ impl EditorWindow<'_> {
             || "No capture open".to_string(),
             |d| document_file_name(&d.manifest),
         );
-        let label = format!("{name} ▾  -  CaptureCraft Editor");
-        let galley = ui.painter().layout_no_wrap(
-            label.clone(),
-            egui::FontId::proportional(12.0),
-            t.text_dim,
-        );
-        let w = galley.size().x + 16.0;
+        // `name ⌄ - CaptureCraft Editor`; the chevron is drawn (the UI font
+        // has no ▾).
+        let font = egui::FontId::proportional(12.0);
+        let name_g = ui.painter().layout_no_wrap(name, font.clone(), t.text_dim);
+        let app_g = ui
+            .painter()
+            .layout_no_wrap("-  CaptureCraft Editor".into(), font, t.text_dim);
+        let chevron = 8.0;
+        let gap = 6.0;
+        let w = name_g.size().x + gap + chevron + 2.0 * gap + app_g.size().x + 16.0;
         let rect = egui::Rect::from_center_size(full.center(), vec2(w, MENU_H - 6.0));
         // Keep clear of the menus on narrow windows.
         if rect.min.x > full.min.x + 420.0 {
@@ -414,11 +424,21 @@ impl EditorWindow<'_> {
                 ui.painter()
                     .rect_filled(rect, Tokens::corner(t.radius_sm), t.card_hover);
             }
-            ui.painter().galley(
-                pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
-                galley,
-                t.text_dim,
+            let cy = rect.center().y;
+            let mut x = rect.min.x + 8.0;
+            let name_w = name_g.size().x;
+            ui.painter()
+                .galley(pos2(x, cy - name_g.size().y / 2.0), name_g, t.text_dim);
+            x += name_w + gap;
+            icons::paint(
+                ui.painter(),
+                egui::Rect::from_min_size(pos2(x, cy - chevron / 2.0), Vec2::splat(chevron)),
+                Icon::ChevronDown,
+                icon_style(t, resp.hovered(), true),
             );
+            x += chevron + 2.0 * gap;
+            ui.painter()
+                .galley(pos2(x, cy - app_g.size().y / 2.0), app_g, t.text_dim);
             Popup::menu(&resp).show(|ui| {
                 for d in self.session.documents() {
                     let id = d.manifest.id.clone();
@@ -1011,5 +1031,34 @@ mod tests {
         h.frame(Vec::new());
         h.click(Id::new("utility.recent"));
         assert!(h.state.editor.tray.visible);
+    }
+
+    /// Nothing in the drawer is wider than the drawer: an overflowing row
+    /// makes egui push the whole right panel past the window edge.
+    #[test]
+    fn the_drawer_fits_in_every_mode_and_tool() {
+        let mut h = Harness::new();
+        let right = h.screen.max.x;
+        let mut cases = vec![(InspectorMode::Effects, ToolId::Arrow)];
+        cases.extend(ToolId::ALL.map(|t| (InspectorMode::Properties, t)));
+        for (mode, tool) in cases {
+            h.state.editor.sidebar.mode = mode;
+            h.state.editor.toolbar.active = tool;
+            h.frame(Vec::new());
+            h.frame(Vec::new());
+            let over: Vec<egui::Rect> = h.ctx.viewport(|v| {
+                v.prev_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, ws)| ws.iter().map(|w| w.rect))
+                    .filter(|r| r.max.x > right + 0.5)
+                    .collect()
+            });
+            assert!(over.is_empty(), "{mode:?} {tool:?}: {over:?}");
+            if mode == InspectorMode::Effects {
+                let tile = h.rect(Id::new(("sidebar.effect", 0usize)));
+                assert!(tile.min.x >= right - DRAWER_W, "{tile:?}");
+            }
+        }
     }
 }

@@ -196,6 +196,14 @@ impl RightSidebar<'_> {
         let tool = editor.toolbar.active;
         let pending_id = Id::new("sidebar.style_pending");
         let mode = editor.sidebar.mode;
+        // Size sliders and combos to the drawer: PhotoCraft's defaults
+        // (150 / 120 px) make a labelled row wider than it, and egui then
+        // pushes the whole right panel past the window edge.
+        let width = ui.available_width();
+        let spacing = ui.spacing_mut();
+        spacing.slider_width = (width - 130.0).clamp(60.0, 150.0);
+        spacing.combo_width = (width - 120.0).clamp(80.0, 120.0);
+        ui.set_max_width(width);
         let (title, help) = match mode {
             InspectorMode::Effects => (
                 "Effects",
@@ -930,6 +938,7 @@ impl RightSidebar<'_> {
                     }
                 });
             ui.vertical(|ui| {
+                fit_sliders(ui);
                 ui.add_enabled(
                     new_dir != (0, 0),
                     Slider::new(&mut distance, 0.0..=32.0).text("Distance"),
@@ -1065,7 +1074,17 @@ fn margin_changed(before: &CanvasBackdrop, now: f32) -> bool {
 fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
     egui::CollapsingHeader::new(title)
         .default_open(true)
-        .show(ui, body);
+        .show(ui, |ui| {
+            fit_sliders(ui);
+            body(ui);
+        });
+}
+
+/// Slider width that leaves room for the value box and a short label in
+/// what is left of the row.
+fn fit_sliders(ui: &mut Ui) {
+    let w = ui.available_width();
+    ui.spacing_mut().slider_width = (w - 150.0).clamp(40.0, 150.0);
 }
 
 fn color_row(
