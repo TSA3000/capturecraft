@@ -3,7 +3,7 @@
 [![release](https://img.shields.io/github/v/release/TSA3000/capturecraft?label=release)](https://github.com/TSA3000/capturecraft/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/TSA3000/capturecraft/ci.yml?branch=main&label=CI)](https://github.com/TSA3000/capturecraft/actions/workflows/ci.yml)
 [![downloads](https://img.shields.io/github/downloads/TSA3000/capturecraft/total?label=downloads)](https://github.com/TSA3000/capturecraft/releases)
-[![license](https://img.shields.io/github/license/TSA3000/capturecraft?label=license)](LICENSE)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![rust](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](https://www.rust-lang.org)
 
 Open-source screen capture and annotation tool written in pure Rust.
@@ -321,4 +321,5 @@ cargo xtask layers
 
 ## License
 
-Apache-2.0
+CaptureCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
+option, the same as PhotoCraft. Releases up to v0.24.1 were Apache-2.0 only.

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.24.2 (2026-10-20)
+
+- License: MIT OR Apache-2.0 (as PhotoCraft) for the whole workspace, was Apache-2.0 for the
+  `capturecraft` crate. LICENSE is now LICENSE-MIT and LICENSE-APACHE; archives, the NSIS
+  installer and the MSI ship both. Help › About shows the new license.
+
 ## v0.24.1 (2026-10-20)
 
 - Text toolbar stays while a text or callout is typed; a new text takes the picked format.

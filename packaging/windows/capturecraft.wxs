@@ -57,8 +57,11 @@
       <Component Id="Readme" Guid="*">
         <File Source="$(var.Source)\README.md" KeyPath="yes" />
       </Component>
-      <Component Id="License" Guid="*">
-        <File Id="license" Name="LICENSE.txt" Source="$(var.Source)\LICENSE" KeyPath="yes" />
+      <Component Id="LicenseMit" Guid="*">
+        <File Id="license_mit" Name="LICENSE-MIT.txt" Source="$(var.Source)\LICENSE-MIT" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseApache" Guid="*">
+        <File Id="license_apache" Name="LICENSE-APACHE.txt" Source="$(var.Source)\LICENSE-APACHE" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

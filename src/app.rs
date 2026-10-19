@@ -534,7 +534,7 @@ impl App {
                     if ui.link(REPO).clicked() {
                         open_path(std::path::Path::new(REPO));
                     }
-                    ui.label(RichText::new("Apache-2.0").small().weak());
+                    ui.label(RichText::new("MIT OR Apache-2.0").small().weak());
                 });
             });
         self.show_about = open;

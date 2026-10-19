@@ -3,7 +3,7 @@ name = "capturecraft"
 version.workspace = true
 edition = "2024"
 rust-version = "1.89"
-license = "Apache-2.0"
+license.workspace = true
 description = "CaptureCraft: open-source screen capture and annotation tool in pure Rust"
 repository = "https://github.com/TSA3000/capturecraft"
 default-run = "capturecraft"
@@ -49,7 +49,7 @@ members = [".", "crates/*", "xtask"]
 
 [workspace.package]
 # The one CaptureCraft version: every crate (and Help › About) has it.
-version = "0.24.1"
+version = "0.24.2"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

@@ -1,3 +1,15 @@
+# v0.24.2
+
+## Changes
+
+- **New license: MIT OR Apache-2.0**, the same dual license as PhotoCraft. You can use
+  CaptureCraft under either one, at your option. Releases up to v0.24.1 stay Apache-2.0.
+  Both license texts (LICENSE-MIT, LICENSE-APACHE) come with every download and installer.
+
+## Upgrading
+
+- Install over v0.24.1; nothing else to do.
+
 # v0.24.1
 
 ## Changes

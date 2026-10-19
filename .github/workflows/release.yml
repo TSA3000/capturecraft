@@ -45,7 +45,7 @@ jobs:
           NAME="capturecraft-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$NAME"
           BIN="target/${{ matrix.target }}/release"
-          cp README.md LICENSE "$NAME/" 2>/dev/null || cp README.md "$NAME/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$NAME/"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp "$BIN/capturecraft.exe" "$BIN/capturecraft-tray.exe" \
                "$BIN/capturecraft-app.exe" "$BIN/capturecraft-editor.exe" "$NAME/"
