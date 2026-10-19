@@ -495,19 +495,93 @@ pub struct ToolOptions {
     pub shape: ShapeOptions,
     pub blur: BlurOptions,
     pub pixelate: PixelateOptions,
+    pub eraser: EraserOptions,
+    pub magnify: MagnifyOptions,
+    pub spotlight: SpotlightOptions,
 }
 
 /// The Shape tool's outline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShapeOptions {
-    pub ellipse: bool,
+    pub kind: ShapeKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeKind {
+    #[default]
+    Rectangle,
+    Ellipse,
+    /// Click the corners; double-click or Enter closes it.
+    Polygon,
 }
 
 impl ShapeOptions {
-    /// `annotation.addShape`'s `kind`.
+    /// `annotation.addShape`'s `kind` for a dragged shape.
     pub fn kind(self) -> &'static str {
-        if self.ellipse { "ellipse" } else { "rect" }
+        if self.kind == ShapeKind::Ellipse {
+            "ellipse"
+        } else {
+            "rect"
+        }
+    }
+}
+
+/// The Eraser's brush.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EraserOptions {
+    /// Canvas pixels.
+    pub radius: f32,
+    pub hardness: f32,
+}
+
+impl Default for EraserOptions {
+    fn default() -> Self {
+        Self {
+            radius: 12.0,
+            hardness: 0.8,
+        }
+    }
+}
+
+/// The Magnify tool's lens.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MagnifyOptions {
+    pub zoom: f32,
+    /// Lens radius a click places, canvas pixels (a drag sets it).
+    pub radius: f32,
+}
+
+impl MagnifyOptions {
+    pub const ZOOMS: [f32; 4] = [1.5, 2.0, 3.0, 4.0];
+}
+
+impl Default for MagnifyOptions {
+    fn default() -> Self {
+        Self {
+            zoom: 2.0,
+            radius: 80.0,
+        }
+    }
+}
+
+/// The Spotlight tool's target and dimming.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpotlightOptions {
+    pub ellipse: bool,
+    pub dim_opacity: f32,
+}
+
+impl Default for SpotlightOptions {
+    fn default() -> Self {
+        Self {
+            ellipse: false,
+            dim_opacity: 0.55,
+        }
     }
 }
 
@@ -824,6 +898,12 @@ impl ToolId {
             ToolId::Callout => Some("annotation.addCallout"),
             ToolId::Shape | ToolId::Highlighter => Some("annotation.addShape"),
             ToolId::Blur | ToolId::Pixelate => Some("annotation.addBlur"),
+            ToolId::Text => Some("annotation.addText"),
+            ToolId::Pen => Some("annotation.addPen"),
+            ToolId::Eraser => Some("canvas.erase"),
+            ToolId::Magnify => Some("annotation.addMagnifier"),
+            ToolId::Spotlight => Some("annotation.addSpotlight"),
+            ToolId::Crop => Some("canvas.crop"),
             ToolId::CutOut => Some("canvas.cutOut"),
             ToolId::Simplify => Some("smart.simplify"),
             _ => None,
@@ -1343,6 +1423,36 @@ pub struct CanvasViewState {
     /// Pastes since the last copy: each lands a little further away.
     #[serde(skip)]
     pub pastes: u32,
+    /// Text being typed on the canvas (Text tool, double-click a text).
+    #[serde(skip)]
+    pub text_edit: Option<TextEditState>,
+    /// The Shape tool's polygon corners placed so far.
+    #[serde(skip)]
+    pub polygon: Vec<Point>,
+    /// The Crop tool's pending frame, canvas pixels.
+    #[serde(skip)]
+    pub crop: Option<RectF>,
+}
+
+/// Inline text editing: a new text box (`node: None`) or an existing one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextEditState {
+    pub node: Option<NodeId>,
+    /// Canvas pixels.
+    pub rect: RectF,
+    pub text: String,
+    /// The text when editing began (unchanged text commits nothing).
+    pub original: String,
+}
+
+/// What a Crop drag grabbed: a handle (`hx`, `hy` each -1, 0 or 1; 0 is
+/// the middle), the inside (moves the frame) or the outside (draws a new
+/// frame).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CropHit {
+    Handle(i8, i8),
+    Inside,
+    Outside,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1393,6 +1503,17 @@ pub enum ColorTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasGesture {
     Pan,
+    /// A freehand drag of the Pen or Eraser: the pointer trace.
+    Stroke {
+        points: Vec<Point>,
+    },
+    /// Changing the Crop frame: `hit` says which part was grabbed.
+    Crop {
+        hit: CropHit,
+        start: RectF,
+        from: Point,
+        to: Point,
+    },
     /// Drawing a new annotation with the active tool.
     Draw {
         from: Point,
@@ -1488,6 +1609,9 @@ impl Default for CanvasViewState {
             eyedropper: None,
             clipboard: Vec::new(),
             pastes: 0,
+            text_edit: None,
+            polygon: Vec::new(),
+            crop: None,
         }
     }
 }

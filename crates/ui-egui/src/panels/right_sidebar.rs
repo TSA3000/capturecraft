@@ -43,8 +43,8 @@ use crate::UiIntent;
 use crate::icons::{self, Icon};
 use crate::panels::layers_panel::LayersPanel;
 use crate::state::{
-    BlurOptions, ColorTarget, EditorState, ExpandBackdrop, InspectorMode, PixelateOptions,
-    QuickStyle, SelectionFill, SelectionMode, StylePreset, ToolId,
+    BlurOptions, ColorTarget, EditorState, ExpandBackdrop, InspectorMode, MagnifyOptions,
+    PixelateOptions, QuickStyle, SelectionFill, SelectionMode, ShapeKind, StylePreset, ToolId,
 };
 use crate::theme::{Tokens, stroke};
 use crate::widgets::{self, icon_style, tile};
@@ -263,21 +263,8 @@ impl RightSidebar<'_> {
                         );
                         ui.add_space(t.space_sm);
                     }
-                    if tool == ToolId::Shape {
-                        let o = &mut editor.tools.shape;
-                        if let Some(i) = widgets::segmented(
-                            ui,
-                            Id::new("sidebar.shape_kind"),
-                            &[
-                                (Some(Icon::RectangleSelect), "Rectangle"),
-                                (Some(Icon::EllipseSelect), "Ellipse"),
-                            ],
-                            usize::from(o.ellipse),
-                            t,
-                        ) {
-                            o.ellipse = i == 1;
-                        }
-                        ui.add_space(t.space_md);
+                    if self.tool_options(ui, editor, intents) {
+                        return;
                     }
                     let heading = match tool {
                         ToolId::Blur | ToolId::Pixelate => "Strength",
@@ -305,6 +292,121 @@ impl RightSidebar<'_> {
             if let Some(i) = apply_to_selection(editor, tool) {
                 intents.push(i);
             }
+        }
+    }
+
+    /// Options above the Quick Styles; true for tools that have nothing
+    /// else (Eraser, Spotlight, Crop).
+    fn tool_options(
+        &self,
+        ui: &mut Ui,
+        editor: &mut EditorState,
+        intents: &mut Vec<UiIntent>,
+    ) -> bool {
+        let t = self.tokens;
+        let tool = editor.toolbar.active;
+        match tool {
+            ToolId::Shape => {
+                let o = &mut editor.tools.shape;
+                let kinds = [ShapeKind::Rectangle, ShapeKind::Ellipse, ShapeKind::Polygon];
+                let current = kinds.iter().position(|k| *k == o.kind).unwrap_or(0);
+                if let Some(i) = widgets::segmented(
+                    ui,
+                    Id::new("sidebar.shape_kind"),
+                    &[(None, "Rectangle"), (None, "Ellipse"), (None, "Polygon")],
+                    current,
+                    t,
+                ) {
+                    o.kind = kinds.get(i).copied().unwrap_or_default();
+                    editor.canvas.polygon.clear();
+                }
+                if o.kind == ShapeKind::Polygon {
+                    ui.label(
+                        egui::RichText::new(
+                            "Click each corner; double-click or Enter closes it, Esc cancels.",
+                        )
+                        .color(t.text_faint)
+                        .small(),
+                    );
+                }
+                ui.add_space(t.space_md);
+                false
+            }
+            ToolId::Magnify => {
+                let o = &mut editor.tools.magnify;
+                ui.label(egui::RichText::new("Zoom").strong());
+                let zooms = MagnifyOptions::ZOOMS;
+                let labels: Vec<String> = zooms.iter().map(|z| format!("{z}×")).collect();
+                let items: Vec<(Option<Icon>, &str)> =
+                    labels.iter().map(|l| (None, l.as_str())).collect();
+                let current = zooms.iter().position(|z| *z == o.zoom).unwrap_or(1);
+                if let Some(i) =
+                    widgets::segmented(ui, Id::new("sidebar.magnify_zoom"), &items, current, t)
+                {
+                    o.zoom = zooms.get(i).copied().unwrap_or(2.0);
+                }
+                ui.add(Slider::new(&mut o.radius, 20.0..=300.0).text("Lens radius"));
+                ui.add_space(t.space_md);
+                false
+            }
+            ToolId::Eraser => {
+                let o = &mut editor.tools.eraser;
+                section(ui, "Brush", |ui| {
+                    ui.add(
+                        Slider::new(&mut o.radius, 1.0..=200.0)
+                            .text("Size")
+                            .suffix(" px"),
+                    );
+                    ui.add(Slider::new(&mut o.hardness, 0.0..=1.0).text("Hardness"));
+                });
+                ui.label(
+                    egui::RichText::new("Drag over the capture to erase it to transparency. Annotations are not affected.")
+                        .color(t.text_faint)
+                        .small(),
+                );
+                true
+            }
+            ToolId::Spotlight => {
+                let o = &mut editor.tools.spotlight;
+                let current = usize::from(o.ellipse);
+                if let Some(i) = widgets::segmented(
+                    ui,
+                    Id::new("sidebar.spotlight_kind"),
+                    &[(None, "Rectangle"), (None, "Ellipse")],
+                    current,
+                    t,
+                ) {
+                    o.ellipse = i == 1;
+                }
+                ui.add(Slider::new(&mut o.dim_opacity, 0.1..=0.95).text("Dim"));
+                true
+            }
+            ToolId::Crop => {
+                let doc = self.doc;
+                let frame = editor.canvas.crop;
+                if let (Some(r), Some(d)) = (frame, doc) {
+                    ui.label(format!("{} × {} px", r.w.round(), r.h.round()));
+                    ui.add_space(t.space_sm);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked()
+                            && let Some(i) = super::canvas_tools::crop_intent(&d.manifest, r)
+                        {
+                            intents.push(i);
+                            editor.canvas.crop = None;
+                        }
+                        if ui.button("Reset").clicked() {
+                            editor.canvas.crop = None;
+                        }
+                    });
+                }
+                ui.label(
+                    egui::RichText::new("Drag the frame's handles or draw a new frame; Enter or double-click applies, Esc resets. Alt resizes from the centre.")
+                        .color(t.text_faint)
+                        .small(),
+                );
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1266,12 +1368,22 @@ pub fn tool_help(tool: ToolId) -> &'static str {
         }
         ToolId::CutOut => "Drag across the capture to remove a strip and close the gap.",
         ToolId::Simplify => "Replace text and detail with clean shapes in the chosen palette.",
-        ToolId::Shape => "Drag to draw a rectangle or ellipse in the selected style.",
+        ToolId::Shape => "Drag a rectangle or ellipse, or click the corners of a polygon.",
         ToolId::Highlighter => "Drag over text to mark it with a translucent highlighter band.",
         ToolId::Blur => "Drag over private details to blur them; pick the strength below.",
         ToolId::Pixelate => {
             "Drag over private details to pixelate them; pick the block size below."
         }
+        ToolId::Text => {
+            "Click to type, or drag a box; Enter finishes (Shift+Enter for a new line). Double-click a text to edit it."
+        }
+        ToolId::Pen => "Drag to draw a smooth freehand line in the selected style.",
+        ToolId::Eraser => "Drag over the capture to erase pixels.",
+        ToolId::Magnify => {
+            "Click to drop a magnifier, or drag out its size; move its source ring afterwards."
+        }
+        ToolId::Spotlight => "Drag around what matters; everything else is dimmed.",
+        ToolId::Crop => "Adjust the frame, then press Enter to crop.",
         _ => "Pick a Quick Style, then adjust it below. + Add Quick Style saves it.",
     }
 }

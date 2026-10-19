@@ -1060,6 +1060,115 @@ mod tests {
         assert!(h.state.editor.tray.visible);
     }
 
+    /// Pointer and key events on the canvas draw with the new tools.
+    #[test]
+    fn canvas_tools_draw_through_the_engine() {
+        use crate::state::ShapeKind;
+        let mut h = Harness::new();
+        h.frame(Vec::new());
+        let at = |dx: f32, dy: f32| egui::pos2(560.0 + dx, 420.0 + dy);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        fn run(h: &mut Harness, frames: Vec<Vec<egui::Event>>) {
+            for ev in frames {
+                let out = h.frame(ev);
+                for d in crate::dispatch(&mut h.session, out) {
+                    assert!(!matches!(d, crate::Dispatched::Failed { .. }), "{d:?}");
+                }
+            }
+        }
+        let drag = |a: egui::Pos2, b: egui::Pos2| {
+            let mut f = vec![vec![egui::Event::PointerMoved(a)], vec![button(a, true)]];
+            for k in 1..=8 {
+                let t = k as f32 / 8.0;
+                f.push(vec![egui::Event::PointerMoved(a + (b - a) * t)]);
+            }
+            f.push(vec![button(b, false)]);
+            f.push(vec![egui::Event::PointerGone]);
+            f
+        };
+        let click = |p: egui::Pos2| {
+            vec![
+                vec![egui::Event::PointerMoved(p)],
+                vec![button(p, true)],
+                vec![button(p, false)],
+                vec![egui::Event::PointerGone],
+            ]
+        };
+        let kinds = |h: &Harness| -> Vec<&'static str> {
+            h.session
+                .active()
+                .unwrap()
+                .manifest
+                .annotations
+                .iter()
+                .filter_map(|n| n.annotation().map(|a| a.type_name()))
+                .collect()
+        };
+
+        h.state.editor.toolbar.active = ToolId::Pen;
+        run(&mut h, drag(at(-100.0, 0.0), at(100.0, 40.0)));
+        assert_eq!(kinds(&h), ["pen"]);
+
+        h.state.editor.toolbar.active = ToolId::Shape;
+        h.state.editor.tools.shape.kind = ShapeKind::Polygon;
+        for p in [at(0.0, -100.0), at(80.0, -40.0), at(-80.0, -40.0)] {
+            run(&mut h, click(p));
+            // Two separate clicks, not a double-click.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            h.ctx.input_mut(|i| i.pointer = Default::default());
+        }
+        run(
+            &mut h,
+            vec![vec![key(egui::Key::Enter, egui::Modifiers::NONE)]],
+        );
+        assert_eq!(kinds(&h), ["pen", "shape"]);
+
+        h.state.editor.toolbar.active = ToolId::Text;
+        run(&mut h, click(at(-200.0, 150.0)));
+        assert!(h.state.editor.canvas.text_edit.is_some());
+        run(
+            &mut h,
+            vec![
+                vec![egui::Event::Text("Hello".into())],
+                vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+                Vec::new(),
+            ],
+        );
+        assert!(h.state.editor.canvas.text_edit.is_none());
+        assert_eq!(kinds(&h), ["pen", "shape", "callout"]);
+        let text = match h.session.active().unwrap().manifest.annotations[2].annotation() {
+            Some(capturecraft_format::Annotation::Callout(c)) => c.text.text(),
+            _ => String::new(),
+        };
+        assert_eq!(text, "Hello");
+
+        h.state.editor.toolbar.active = ToolId::Crop;
+        h.frame(Vec::new());
+        assert!(h.state.editor.canvas.crop.is_some());
+        // A 400 × 300 frame, dragged by its inside, then Enter.
+        h.state.editor.canvas.crop =
+            Some(capturecraft_format::RectF::new(250.0, 185.0, 400.0, 300.0));
+        run(&mut h, drag(at(0.0, 0.0), at(20.0, 10.0)));
+        run(
+            &mut h,
+            vec![vec![key(egui::Key::Enter, egui::Modifiers::NONE)]],
+        );
+        let size = h.session.active().unwrap().manifest.canvas.size;
+        assert_eq!((size.width, size.height), (400, 300));
+    }
+
     /// The Layers and History tabs and the keyboard shortcuts drive the
     /// engine.
     #[test]

@@ -166,6 +166,24 @@ pub const COMMANDS_USED: &[&str] = &[
     "smart.moveObject",
     "smart.deleteObject",
     "document.setTags",
+    // Edit actions, the Layers and History tabs.
+    "annotation.delete",
+    "annotation.arrange",
+    "annotation.reorder",
+    "annotation.setProps",
+    "annotation.group",
+    "annotation.ungroup",
+    "annotation.paste",
+    "annotation.duplicate",
+    "edit.jump",
+    // Text, Pen, Eraser, Magnify, Spotlight and Crop.
+    "annotation.addText",
+    "annotation.setText",
+    "annotation.addPen",
+    "canvas.erase",
+    "annotation.addMagnifier",
+    "annotation.addSpotlight",
+    "canvas.crop",
 ];
 
 #[cfg(test)]

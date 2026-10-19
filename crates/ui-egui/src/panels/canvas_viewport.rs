@@ -50,14 +50,15 @@ use egui::{
 use photocraft_geom::{Point, Size};
 use serde_json::{Value, json};
 
+use super::canvas_tools;
 use super::gizmo::{
     self, GizmoHandle, NodeFrame, RADIUS_INSET_PT, RESIZE_HANDLES, STEM_PT, corner_radius_of,
     corner_radius_point, handle_point, rotate_handle_point,
 };
 use crate::UiIntent;
 use crate::state::{
-    CanvasGesture, ColorTarget, EditorState, ExpandBackdrop, ResizeDrag, ResizeHandle, StylePreset,
-    ToolId, Zoom,
+    CanvasGesture, ColorTarget, CropHit, EditorState, ExpandBackdrop, ResizeDrag, ResizeHandle,
+    ShapeKind, StylePreset, ToolId, Zoom,
 };
 use crate::theme::{Tokens, stroke};
 
@@ -536,6 +537,36 @@ pub fn draw_intent(editor: &EditorState, from: Point, to: Point) -> Option<UiInt
             p.insert("numbering".into(), json!(o.numbering));
             Some(UiIntent::command("annotation.addStep", Value::Object(p)))
         }
+        ToolId::Magnify => {
+            let o = editor.tools.magnify;
+            // A click drops the default lens; a drag sets its radius.
+            let radius = if dist >= 8.0 {
+                dist
+            } else {
+                f64::from(o.radius)
+            };
+            let mut q = json!({ "center": pt(from), "radius": radius, "zoom": o.zoom });
+            if let Some(s) = &style.stroke {
+                q["border"] = json!(s);
+            }
+            Some(UiIntent::command("annotation.addMagnifier", q))
+        }
+        ToolId::Spotlight => {
+            let b = normalized(from, to);
+            if b.w < MIN_REGION || b.h < MIN_REGION {
+                return None;
+            }
+            let o = editor.tools.spotlight;
+            Some(UiIntent::command(
+                "annotation.addSpotlight",
+                json!({
+                    "bounds": { "x": b.x, "y": b.y, "w": b.w, "h": b.h },
+                    "kind": if o.ellipse { "ellipse" } else { "rect" },
+                    "dim_opacity": o.dim_opacity,
+                }),
+            ))
+        }
+        ToolId::Shape if editor.tools.shape.kind == ShapeKind::Polygon => None,
         ToolId::Shape | ToolId::Highlighter | ToolId::Blur | ToolId::Pixelate => {
             let b = normalized(from, to);
             if b.w < MIN_REGION || b.h < MIN_REGION {
@@ -1140,13 +1171,59 @@ impl CanvasViewport<'_> {
             editor.canvas.hovered = None;
         }
 
+        let full = RectF::new(0.0, 0.0, f64::from(canvas.width), f64::from(canvas.height));
+        if tool == ToolId::Crop {
+            editor.canvas.crop.get_or_insert(full);
+        } else {
+            editor.canvas.crop = None;
+        }
+        if tool != ToolId::Shape || editor.tools.shape.kind != ShapeKind::Polygon {
+            editor.canvas.polygon.clear();
+        }
+        // A click while typing only ends the typing (the text field's
+        // lost focus commits it below).
+        let typing_before = editor.canvas.text_edit.is_some();
+        if resp.double_clicked()
+            && !typing_before
+            && matches!(tool, ToolId::Move | ToolId::Text)
+            && let Some(p) = resp.interact_pointer_pos()
+            && let Some(e) = canvas_tools::text_box_at(m, to_canvas(p))
+                .and_then(|id| canvas_tools::begin_edit_text(m, id))
+        {
+            editor.canvas.text_edit = Some(e);
+        }
         if resp.clicked()
             && !over_handle
+            && !typing_before
             && let Some(p) = resp.interact_pointer_pos()
         {
             let c = to_canvas(p);
             if let Some(target) = editor.canvas.eyedropper.take() {
                 pick_color(doc, c, target, editor);
+            } else if tool == ToolId::Text {
+                editor.canvas.text_edit = Some(
+                    canvas_tools::text_box_at(m, c)
+                        .and_then(|id| canvas_tools::begin_edit_text(m, id))
+                        .unwrap_or_else(|| canvas_tools::begin_new_text(editor, c, None)),
+                );
+            } else if tool == ToolId::Shape && editor.tools.shape.kind == ShapeKind::Polygon {
+                if resp.double_clicked() {
+                    let corners = std::mem::take(&mut editor.canvas.polygon);
+                    intents.extend(canvas_tools::polygon_intent(editor, &corners));
+                } else {
+                    editor.canvas.polygon.push(c);
+                }
+            } else if tool == ToolId::Eraser {
+                intents.extend(canvas_tools::stroke_intent(editor, &[c]));
+            } else if tool == ToolId::Crop {
+                if resp.double_clicked()
+                    && let Some(r) = editor.canvas.crop
+                    && let Some(i) = canvas_tools::crop_intent(m, r)
+                {
+                    intents.push(i);
+                    editor.canvas.crop = None;
+                }
+            } else if tool == ToolId::Pen {
             } else if tool == ToolId::Move {
                 let shift = ui.input(|i| i.modifiers.shift);
                 match node_at(m, c, slop) {
@@ -1194,6 +1271,21 @@ impl CanvasViewport<'_> {
                     }
                     hit.map(|_| CanvasGesture::MoveSelection { from: c, to: c })
                 }
+                (ToolId::Pen | ToolId::Eraser, _, _) => {
+                    Some(CanvasGesture::Stroke { points: vec![c] })
+                }
+                (ToolId::Crop, _, _) => {
+                    let r = editor.canvas.crop.unwrap_or(full);
+                    let tol = f64::from(CROP_REACH / xf.scale.max(f32::EPSILON));
+                    Some(CanvasGesture::Crop {
+                        hit: canvas_tools::crop_hit(r, c, tol),
+                        start: r,
+                        from: c,
+                        to: c,
+                    })
+                }
+                (ToolId::Shape, _, _) if editor.tools.shape.kind == ShapeKind::Polygon => None,
+                _ if typing_before => None,
                 (ToolId::CutOut, _, _) => Some(CanvasGesture::CutOut {
                     from: along(c),
                     to: along(c),
@@ -1217,6 +1309,8 @@ impl CanvasViewport<'_> {
                     *to = c;
                 }
                 Some(CanvasGesture::CutOut { to, .. }) => *to = along(c),
+                Some(CanvasGesture::Stroke { points }) => canvas_tools::push_trace(points, c),
+                Some(CanvasGesture::Crop { to, .. }) => *to = c,
                 Some(CanvasGesture::Resize { local, .. }) => {
                     if let Some((_, f, _)) = &gizmo_node {
                         *local = f.to_local(c);
@@ -1233,8 +1327,57 @@ impl CanvasViewport<'_> {
                 _ => {}
             }
         }
+        if let Some(CanvasGesture::Stroke { points }) = &editor.canvas.gesture {
+            draw_trace(&painter, &xf, editor, points);
+        }
+        if tool == ToolId::Crop
+            && let Some(r) = editor.canvas.crop
+        {
+            let shown = match &editor.canvas.gesture {
+                Some(CanvasGesture::Crop {
+                    hit,
+                    start,
+                    from,
+                    to,
+                }) => canvas_tools::crop_drag(*start, *hit, *from, *to, mods.alt),
+                _ => r,
+            };
+            draw_crop(&painter, &xf, view, shown, t);
+            if let Some(p) = resp.hover_pos() {
+                let tol = f64::from(CROP_REACH / xf.scale.max(f32::EPSILON));
+                ui.ctx()
+                    .set_cursor_icon(match canvas_tools::crop_hit(shown, to_canvas(p), tol) {
+                        CropHit::Handle(hx, hy) => crop_cursor(hx, hy),
+                        CropHit::Inside => CursorIcon::Move,
+                        CropHit::Outside => CursorIcon::Crosshair,
+                    });
+            }
+        }
+        if !editor.canvas.polygon.is_empty() {
+            let mut line: Vec<Pos2> = editor
+                .canvas
+                .polygon
+                .iter()
+                .map(|q| xf.to_screen(*q))
+                .collect();
+            if let Some(h) = resp.hover_pos() {
+                line.push(h);
+            }
+            painter.add(Shape::line(line, stroke(2.0, t.gizmo_stroke)));
+            for q in &editor.canvas.polygon {
+                painter.circle_filled(xf.to_screen(*q), 3.0, t.handle_fill);
+            }
+        }
+        if tool == ToolId::Eraser
+            && let Some(h) = resp.hover_pos()
+        {
+            let r = editor.tools.eraser.radius * xf.scale;
+            painter.circle_stroke(h, r, stroke(1.5, t.gizmo_outline));
+            painter.circle_stroke(h, r, stroke(0.75, t.handle_fill));
+        }
         if let Some(CanvasGesture::Draw { from, to }) = &editor.canvas.gesture {
-            let ellipse = tool == ToolId::Shape && editor.tools.shape.ellipse;
+            let ellipse = (tool == ToolId::Shape && editor.tools.shape.kind == ShapeKind::Ellipse)
+                || (tool == ToolId::Spotlight && editor.tools.spotlight.ellipse);
             draw_preview(&painter, &xf, tool, *from, *to, ellipse, t);
         }
         if tool == ToolId::Selection {
@@ -1278,10 +1421,29 @@ impl CanvasViewport<'_> {
         }
         if resp.drag_stopped() {
             match editor.canvas.gesture.take() {
+                Some(CanvasGesture::Draw { from, to }) if tool == ToolId::Text => {
+                    editor.canvas.text_edit = Some(canvas_tools::begin_new_text(
+                        editor,
+                        from,
+                        Some(normalized(from, to)),
+                    ));
+                }
                 Some(CanvasGesture::Draw { from, to }) => {
                     if let Some(i) = draw_intent(editor, from, to) {
                         intents.push(i);
                     }
+                }
+                Some(CanvasGesture::Stroke { points }) => {
+                    intents.extend(canvas_tools::stroke_intent(editor, &points));
+                }
+                Some(CanvasGesture::Crop {
+                    hit,
+                    start,
+                    from,
+                    to,
+                }) => {
+                    editor.canvas.crop =
+                        Some(canvas_tools::crop_drag(start, hit, from, to, mods.alt));
                 }
                 Some(CanvasGesture::MoveSelection { from, to }) => {
                     let (dx, dy) = (to.x - from.x, to.y - from.y);
@@ -1326,6 +1488,31 @@ impl CanvasViewport<'_> {
                 _ => {}
             }
         }
+        let typing = ui.ctx().text_edit_focused();
+        if !typing {
+            let (enter, escape) =
+                ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+            if tool == ToolId::Shape && !editor.canvas.polygon.is_empty() {
+                if enter {
+                    let corners = std::mem::take(&mut editor.canvas.polygon);
+                    intents.extend(canvas_tools::polygon_intent(editor, &corners));
+                } else if escape {
+                    editor.canvas.polygon.clear();
+                }
+            }
+            if tool == ToolId::Crop {
+                if enter
+                    && let Some(r) = editor.canvas.crop
+                    && let Some(i) = canvas_tools::crop_intent(m, r)
+                {
+                    intents.push(i);
+                    editor.canvas.crop = None;
+                } else if escape {
+                    editor.canvas.crop = None;
+                }
+            }
+        }
+        inline_text(ui, &xf, editor, intents, t);
         if resp.hovered()
             && (editor.canvas.eyedropper.is_some()
                 || !matches!(tool, ToolId::Move | ToolId::Selection))
@@ -1339,6 +1526,148 @@ impl CanvasViewport<'_> {
             pointer_badge(&painter, p, tool, t);
         }
         resp
+    }
+}
+
+/// Reach of the crop frame's handles, points.
+const CROP_REACH: f32 = 8.0;
+
+fn crop_cursor(hx: i8, hy: i8) -> CursorIcon {
+    match (hx, hy) {
+        (0, _) => CursorIcon::ResizeVertical,
+        (_, 0) => CursorIcon::ResizeHorizontal,
+        (-1, -1) | (1, 1) => CursorIcon::ResizeNwSe,
+        _ => CursorIcon::ResizeNeSw,
+    }
+}
+
+/// The pending crop: everything outside dimmed, the frame with rule-of-
+/// thirds guides, eight handles and the size under it.
+fn draw_crop(painter: &egui::Painter, xf: &ViewTransform, view: ERect, r: RectF, t: &Tokens) {
+    let f = xf.rect_to_screen(r);
+    let shade = Color32::from_black_alpha(150);
+    for band in [
+        ERect::from_min_max(view.min, pos2(view.max.x, f.min.y)),
+        ERect::from_min_max(pos2(view.min.x, f.max.y), view.max),
+        ERect::from_min_max(pos2(view.min.x, f.min.y), pos2(f.min.x, f.max.y)),
+        ERect::from_min_max(pos2(f.max.x, f.min.y), pos2(view.max.x, f.max.y)),
+    ] {
+        if band.is_positive() {
+            painter.rect_filled(band, 0.0, shade);
+        }
+    }
+    let guide = stroke(1.0, Color32::from_white_alpha(110));
+    for k in [1.0 / 3.0, 2.0 / 3.0] {
+        let x = f.min.x + f.width() * k;
+        let y = f.min.y + f.height() * k;
+        painter.line_segment([pos2(x, f.min.y), pos2(x, f.max.y)], guide);
+        painter.line_segment([pos2(f.min.x, y), pos2(f.max.x, y)], guide);
+    }
+    painter.rect_stroke(f, 0.0, stroke(1.5, Color32::WHITE), StrokeKind::Middle);
+    for hx in [-1i8, 0, 1] {
+        for hy in [-1i8, 0, 1] {
+            if (hx, hy) == (0, 0) {
+                continue;
+            }
+            let c = pos2(
+                f.center().x + f32::from(hx) * f.width() / 2.0,
+                f.center().y + f32::from(hy) * f.height() / 2.0,
+            );
+            let h = ERect::from_center_size(c, Vec2::splat(t.handle_size));
+            painter.rect(
+                h,
+                0.0,
+                t.handle_fill,
+                stroke(1.0, t.handle_stroke),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    badge(
+        painter,
+        f.center_bottom() + vec2(0.0, t.space_lg),
+        &format!("{} × {} px", r.w.round(), r.h.round()),
+        t,
+    );
+}
+
+/// The Pen's line in its style, or the Eraser's swath, while dragging.
+fn draw_trace(painter: &egui::Painter, xf: &ViewTransform, editor: &EditorState, points: &[Point]) {
+    let line: Vec<Pos2> = points.iter().map(|q| xf.to_screen(*q)).collect();
+    let s = if editor.toolbar.active == ToolId::Eraser {
+        stroke(
+            editor.tools.eraser.radius * 2.0 * xf.scale,
+            Color32::from_white_alpha(90),
+        )
+    } else {
+        let style = editor
+            .sidebar
+            .effective_style(ToolId::Pen)
+            .unwrap_or_default();
+        let k = style.stroke.unwrap_or_default();
+        stroke(
+            (k.width * xf.scale).max(1.0),
+            Color32::from_rgba_unmultiplied(k.color.r, k.color.g, k.color.b, k.color.a),
+        )
+    };
+    if line.len() == 1 {
+        painter.circle_filled(line[0], s.width / 2.0, s.color);
+    } else {
+        painter.add(Shape::line(line, s));
+    }
+}
+
+/// The text being typed, as a text field over its box at the canvas
+/// zoom. Enter (or a click elsewhere) finishes, Shift+Enter starts a new
+/// line, Esc finishes too; the commit is one command.
+fn inline_text(
+    ui: &mut Ui,
+    xf: &ViewTransform,
+    editor: &mut EditorState,
+    intents: &mut Vec<UiIntent>,
+    t: &Tokens,
+) {
+    let Some(mut e) = editor.canvas.text_edit.clone() else {
+        return;
+    };
+    let (font, color) = canvas_tools::text_style(editor);
+    let px = (font.size * xf.scale).clamp(6.0, 200.0);
+    let fit = canvas_tools::fit_text_rect(e.rect, &e.text, font.size);
+    let r = xf.rect_to_screen(fit);
+    let id = Id::new("canvas.inline_text");
+    let col = Color32::from_rgba_unmultiplied(color.r, color.g, color.b, 255);
+    let painter = ui.painter();
+    painter.rect_filled(r.expand(2.0), 2.0, Color32::from_white_alpha(225));
+    dashed_rect(painter, r.expand(2.0), t.gizmo_stroke);
+    // Plain Enter finishes (Shift+Enter is the field's new line); taken
+    // before the field sees it.
+    let enter = ui.memory(|m| m.has_focus(id))
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    let out = egui::TextEdit::multiline(&mut e.text)
+        .id(id)
+        .font(FontId::proportional(px))
+        .text_color(col)
+        .frame(egui::Frame::NONE)
+        .desired_width(r.width())
+        .return_key(Some(egui::KeyboardShortcut::new(
+            egui::Modifiers::SHIFT,
+            Key::Enter,
+        )))
+        .hint_text("Type here");
+    let resp = ui.put(r, out);
+    let first = ui.ctx().data(|d| d.get_temp::<bool>(id)).is_none();
+    if first {
+        resp.request_focus();
+        ui.ctx().data_mut(|d| d.insert_temp(id, true));
+    }
+    let done = enter || (!first && (resp.lost_focus() || !resp.has_focus()));
+    if done {
+        ui.ctx().data_mut(|d| d.remove::<bool>(id));
+        resp.surrender_focus();
+        intents.extend(canvas_tools::text_commit_intent(editor, &e));
+        editor.canvas.text_edit = None;
+    } else {
+        editor.canvas.text_edit = Some(e);
     }
 }
 
@@ -1763,7 +2092,7 @@ fn draw_preview(
     let r = ERect::from_two_pos(pa, pb);
     match tool {
         ToolId::Arrow => painter.arrow(pa, pb - pa, s),
-        ToolId::Shape if ellipse => {
+        ToolId::Shape | ToolId::Spotlight if ellipse => {
             painter.add(Shape::ellipse_stroke(r.center(), r.size() / 2.0, s));
         }
         ToolId::Callout
@@ -2033,7 +2362,7 @@ mod tests {
         )
         .unwrap();
         let mut e = EditorState::default();
-        e.tools.shape.ellipse = true;
+        e.tools.shape.kind = ShapeKind::Ellipse;
         for tool in [
             ToolId::Arrow,
             ToolId::Callout,
