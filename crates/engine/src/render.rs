@@ -59,6 +59,47 @@ const TORN_WAVELENGTH_PX: f32 = 24.0;
 /// Pixel grid colour of a magnifier in pixel grid mode (not in the format).
 const GRID_COLOR: SColor = SColor::new(0.0, 0.0, 0.0, 0.25);
 
+/// A document rendered for export or the clipboard: row-major RGBA8,
+/// sRGB, straight (not premultiplied) alpha.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Flattened {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Renders `doc` with the CPU compositor (no GPU: exports, the clipboard,
+/// the CLI), frame and all.
+pub fn flatten(doc: &DocState) -> Result<Flattened, crate::EngineError> {
+    let frame = capturecraft_compositor::CpuCompositor::render(&render_scene(doc))
+        .map_err(|e| crate::EngineError::Other(format!("render failed: {e}")))?;
+    Ok(Flattened {
+        width: frame.width,
+        height: frame.height,
+        rgba: straight_rgba8(&frame.pixels),
+    })
+}
+
+/// Premultiplied, sRGB-encoded float pixels as straight RGBA8.
+pub fn straight_rgba8(pixels: &[[f32; 4]]) -> Vec<u8> {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    pixels
+        .iter()
+        .flat_map(|p| {
+            let a = if p[3].is_finite() {
+                p[3].clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if a <= 0.0 {
+                [0; 4]
+            } else {
+                [byte(p[0] / a), byte(p[1] / a), byte(p[2] / a), byte(a)]
+            }
+        })
+        .collect()
+}
+
 /// The render graph of `doc`, bottom to top.
 pub fn render_scene(doc: &DocState) -> RenderScene {
     let m = &doc.manifest;
@@ -723,6 +764,46 @@ mod tests {
 
     fn id(v: serde_json::Value) -> u64 {
         v["id"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn flatten_gives_straight_rgba_of_the_whole_canvas() {
+        let mut s = session(40, 30);
+        let flat = flatten(s.active().unwrap()).unwrap();
+        assert_eq!((flat.width, flat.height), (40, 30));
+        assert_eq!(flat.rgba.len(), 40 * 30 * 4);
+        assert!(flat.rgba.iter().all(|b| *b == 255), "white capture");
+        // The frame grows the export by its margin on every side.
+        let frame = capturecraft_format::CanvasBackdrop::RoundedShadowFrame {
+            margin_px: 10.0,
+            corner_radius_px: 4.0,
+            backdrop_fill: capturecraft_format::Fill::Solid {
+                color: capturecraft_format::Color::rgb(0xE2, 0xE8, 0xF0),
+            },
+            shadow: None,
+            border: None,
+        };
+        s.run(
+            "canvas.setBackdrop",
+            &json!({ "backdrop": serde_json::to_value(&frame).unwrap() }),
+        )
+        .unwrap();
+        let framed = flatten(s.active().unwrap()).unwrap();
+        assert_eq!((framed.width, framed.height), (60, 50));
+        assert_eq!(&framed.rgba[..4], &[0xE2, 0xE8, 0xF0, 0xFF]);
+    }
+
+    #[test]
+    fn premultiplied_pixels_are_unpremultiplied() {
+        let px = [
+            [0.25, 0.0, 0.5, 0.5],
+            [0.0; 4],
+            [f32::NAN, 0.0, 0.0, f32::NAN],
+        ];
+        assert_eq!(
+            straight_rgba8(&px),
+            [128, 0, 255, 128, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]
