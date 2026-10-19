@@ -12,26 +12,32 @@
 //!    after all cuts because `canvas.cutOut` moves existing annotations
 //!    into post-cut space and new ones are placed there.
 //!
-//! The compositor has no text node yet: callout text and step badge labels
-//! are not drawn. The cursor layer is not drawn (its sprite is not loaded
-//! into the session).
+//! 4. The canvas backdrop (rounded drop-shadow frame), last: it grows the
+//!    image by its margin, so it must follow everything it frames.
+//!
+//! A rotated node carries its [`AnnotationNode::transform`] (rotation about
+//! its pivot) as the scene node's transform; the geometry stays unrotated.
+//! Callout text and step badge labels are text specs on their nodes; the
+//! compositor shapes them with photocraft-text. The cursor layer is not
+//! drawn (its sprite is not loaded into the session).
 
 use std::sync::Arc;
 
 use capturecraft_compositor::{
-    ArrowCurve as SArrowCurve, ArrowHeadShape, ArrowHeadStyle, ArrowSpec, BackdropFilterKind,
-    BackdropFilterSpec, CalloutBody as SCalloutBody, CalloutSpec, CalloutTail as SCalloutTail,
-    Color as SColor, CutAxis, CutOutSeamSpec, DropShadowStyle, InnerShadowStyle,
-    LineJoin as SLineJoin, MagnifierSpec, PointF32, RasterSpec, RectF32, RenderNode, RenderScene,
-    Resample, SceneNode, SeamShadow, SeamStyle, ShapeBounds, ShapeGeometry, ShapeSpec,
-    SpotlightSpec, StrokeSpec, TailAnchor as STailAnchor,
+    Affine, ArrowCurve as SArrowCurve, ArrowHeadShape, ArrowHeadStyle, ArrowSpec,
+    BackdropFilterKind, BackdropFilterSpec, CalloutBody as SCalloutBody, CalloutSpec,
+    CalloutTail as SCalloutTail, Color as SColor, CutAxis, CutOutSeamSpec, DropShadowStyle,
+    GradientStop as SGradientStop, InnerShadowStyle, LineJoin as SLineJoin, MagnifierSpec, Paint,
+    PointF32, RasterSpec, RectF32, RenderNode, RenderScene, Resample, SceneNode, SeamShadow,
+    SeamStyle, ShadowFrameSpec, ShapeBounds, ShapeGeometry, ShapeSpec, SpotlightSpec, StrokeSpec,
+    TailAnchor as STailAnchor, TextAlign as STextAlign, TextRunSpec, TextSpec, TextVAlign,
 };
 use capturecraft_format::{
     Annotation, AnnotationNode, ArrowCurve, ArrowHead, Axis, BackdropEffect, Background,
-    BadgeShape, BlurRegion, Callout, CalloutBody, Color, CurvedArrow, CutOutSeam, DashStyle,
-    DropShadow, Fill, HeadStyle, LensShape, LineJoin, MagnifierLens, Manifest, NodeKind, RectF,
-    RegionShape, Sampling, SeamEdge, ShapeNode, SmartObject, Spotlight, StepBadge, Stroke,
-    TailAnchor,
+    BadgeShape, BlurRegion, Callout, CalloutBody, CanvasBackdrop, Color, CurvedArrow, CutOutSeam,
+    DashStyle, DropShadow, Fill, GradientStop, HeadStyle, LensShape, LineJoin, MagnifierLens,
+    Manifest, NodeKind, RectF, RegionShape, Sampling, SeamEdge, ShapeNode, SmartObject, Spotlight,
+    StepBadge, Stroke, TailAnchor, TextAlign, TextBlock, VAlign,
 };
 use photocraft_geom::Point;
 
@@ -40,6 +46,10 @@ use crate::{DocState, Pixels};
 /// Scene id of the base raster. [`Manifest::alloc_node_id`] never hands
 /// out 0, so it cannot collide with an annotation.
 pub const BASE_NODE_ID: u64 = 0;
+
+/// Scene id of the canvas backdrop frame. Node ids count up from 1 and a
+/// document holds at most [`capturecraft_format::MAX_NODES`], far below it.
+pub const FRAME_NODE_ID: u64 = u64::MAX;
 
 /// Feature size of a torn seam's first octave. The format has no
 /// wavelength (it stores an octave count instead, which the compositor
@@ -96,16 +106,27 @@ pub fn render_scene(doc: &DocState) -> RenderScene {
             Annotation::MagnifierLens(l) => (Some(magnifier(l, alpha)), None),
             Annotation::Spotlight(s) => (Some(spotlight(s, alpha)), None),
             Annotation::Shape(s) => (Some(shape(s, alpha)), None),
-            Annotation::SmartObject(o) => match doc.object_pixels(n.id) {
-                Some(p) => (Some(smart_object(o, p, alpha)), Some(p.revision())),
+            Annotation::SmartObject(_) => match doc.object_pixels(n.id) {
+                Some(p) => (Some(raster(p, [0, 0], alpha)), Some(p.revision())),
                 None => (None, None),
             },
             Annotation::CutOutSeam(_) => (None, None),
         };
         if let Some(node) = node {
             let extra: Vec<u64> = extra.into_iter().collect();
-            nodes.push(SceneNode::new(n.id.0, revision(n, &extra), node));
+            let mut t = n.transform();
+            if let Annotation::SmartObject(o) = a {
+                t = smart_object_placement(o).then(&t);
+            }
+            nodes.push(SceneNode::new(n.id.0, revision(n, &extra), node).with_transform(t));
         }
+    }
+    if let Some((spec, rev)) = shadow_frame(&m.canvas.backdrop) {
+        nodes.push(SceneNode::new(
+            FRAME_NODE_ID,
+            rev,
+            RenderNode::ShadowFrame(spec),
+        ));
     }
     RenderScene {
         width: side(w),
@@ -155,27 +176,81 @@ fn rgba(c: Color, alpha: f32) -> SColor {
     s
 }
 
-/// A linear gradient has no scene equivalent: it fills with the mean of its
-/// stops.
-fn fill(f: &Fill, alpha: f32) -> Option<SColor> {
+/// The format's fill as a scene paint, stop colours scaled by the node
+/// opacity. Gradient points are canvas space (frame space for a backdrop),
+/// like the scene's.
+fn fill(f: &Fill, alpha: f32) -> Option<Paint> {
+    let stops = |s: &[GradientStop]| -> Vec<SGradientStop> {
+        s.iter()
+            .map(|g| SGradientStop {
+                offset: g.offset,
+                color: rgba(g.color, alpha),
+            })
+            .collect()
+    };
     match f {
         Fill::None => None,
-        Fill::Solid { color } => Some(rgba(*color, alpha)),
-        Fill::Linear { stops, .. } | Fill::Radial { stops, .. } => {
-            let n = stops.len() as f32;
-            if n == 0.0 {
-                return None;
-            }
-            let mut acc = [0.0f32; 4];
-            for s in stops {
-                let c = SColor::rgba8(s.color.r, s.color.g, s.color.b, s.color.a);
-                for (a, v) in acc.iter_mut().zip([c.r, c.g, c.b, c.a]) {
-                    *a += v / n;
-                }
-            }
-            Some(SColor::new(acc[0], acc[1], acc[2], acc[3] * alpha))
-        }
+        Fill::Solid { color } => Some(Paint::Solid(rgba(*color, alpha))),
+        Fill::Linear { from, to, stops: s } => Some(Paint::Linear {
+            from: pt(*from),
+            to: pt(*to),
+            stops: stops(s),
+        }),
+        Fill::Radial {
+            center,
+            radius,
+            stops: s,
+        } => Some(Paint::Radial {
+            center: pt(*center),
+            radius: *radius,
+            stops: stops(s),
+        }),
     }
+}
+
+/// Callout text in `frame` (the body inset by the padding); `None` when
+/// there is nothing to draw.
+fn text_block(t: &TextBlock, frame: RectF32, alpha: f32) -> Option<TextSpec> {
+    if t.runs.iter().all(|r| r.text.is_empty()) {
+        return None;
+    }
+    Some(TextSpec {
+        runs: t
+            .runs
+            .iter()
+            .filter(|r| !r.text.is_empty())
+            .map(|r| TextRunSpec {
+                text: r.text.clone(),
+                family: r.font.family.clone(),
+                size_px: r.font.size,
+                weight: r.font.weight,
+                italic: r.font.italic,
+                color: rgba(r.color, alpha),
+                underline: r.underline,
+                strike: r.strike,
+            })
+            .collect(),
+        frame,
+        align: match t.align {
+            TextAlign::Left => STextAlign::Left,
+            TextAlign::Center => STextAlign::Center,
+            TextAlign::Right => STextAlign::Right,
+        },
+        valign: match t.valign {
+            VAlign::Top => TextVAlign::Top,
+            VAlign::Middle => TextVAlign::Middle,
+            VAlign::Bottom => TextVAlign::Bottom,
+        },
+        wrap: true,
+    })
+}
+
+/// `r` shrunk by `pad` on every side (never below zero size).
+fn inset(r: RectF32, pad: f32) -> RectF32 {
+    let pad = if pad.is_finite() { pad.max(0.0) } else { 0.0 };
+    let px = pad.min(r.w * 0.5);
+    let py = pad.min(r.h * 0.5);
+    RectF32::new(r.x + px, r.y + py, r.w - 2.0 * px, r.h - 2.0 * py)
 }
 
 fn pt(p: Point) -> PointF32 {
@@ -245,11 +320,55 @@ fn raster(p: &Pixels, origin: [i32; 2], opacity: f32) -> RenderNode {
     })
 }
 
-/// Smart objects are drawn unscaled at the rounded top-left of their rect:
-/// the scene's rasters have no scale.
-fn smart_object(o: &SmartObject, p: &Pixels, alpha: f32) -> RenderNode {
-    let origin = [o.rect.x.round() as i32, o.rect.y.round() as i32];
-    raster(p, origin, alpha)
+/// Smart object pixels (a surface from `(0, 0)` of `image_size`) → its
+/// canvas `rect`: a scale and a translation, before the node's rotation.
+fn smart_object_placement(o: &SmartObject) -> Affine {
+    let k = |len: f64, px: u32| {
+        if px > 0 && len.is_finite() && len > 0.0 {
+            len / f64::from(px)
+        } else {
+            1.0
+        }
+    };
+    Affine {
+        m: [
+            k(o.rect.w, o.image_size.width),
+            0.0,
+            0.0,
+            k(o.rect.h, o.image_size.height),
+            o.rect.x,
+            o.rect.y,
+        ],
+    }
+}
+
+/// The rounded drop-shadow frame and a revision derived from its content
+/// (the format keeps no revision for it).
+fn shadow_frame(b: &CanvasBackdrop) -> Option<(ShadowFrameSpec, u64)> {
+    let CanvasBackdrop::RoundedShadowFrame {
+        corner_radius_px,
+        backdrop_fill,
+        shadow: sh,
+        border,
+        ..
+    } = b
+    else {
+        return None;
+    };
+    let spec = ShadowFrameSpec {
+        margin: b.margin(),
+        corner_radius: *corner_radius_px,
+        backdrop: fill(backdrop_fill, 1.0).unwrap_or(Paint::Solid(SColor::TRANSPARENT)),
+        shadow: sh.as_ref().map(|s| shadow(s, 1.0)),
+        border: border.as_ref().map(|s| stroke(s, 1.0)),
+    };
+    let json = serde_json::to_vec(b).unwrap_or_default();
+    let rev = json.chunks(8).fold(mix(json.len() as u64), |h, c| {
+        let mut w = [0u8; 8];
+        w[..c.len()].copy_from_slice(c);
+        mix(h ^ u64::from_le_bytes(w))
+    });
+    Some((spec, rev))
 }
 
 /// Every effective cut out with its scene spec, in document order.
@@ -352,15 +471,20 @@ fn callout(c: &Callout, alpha: f32) -> RenderNode {
                 },
             })
             .collect(),
-        fill: fill(&c.fill, alpha).map(Into::into),
+        fill: fill(&c.fill, alpha),
         stroke: c.stroke.as_ref().map(|s| stroke(s, alpha)),
         shadow: c.shadow.as_ref().map(|s| shadow(s, alpha)),
-        text: None,
+        text: text_block(&c.text, inset(r, c.text.padding), alpha),
     })
 }
 
-/// The badge body as a plain shape (the label needs a text node). The ring
-/// is inset by half its width so the badge keeps its radius.
+/// The badge body as a plain shape with its label. The ring is inset by
+/// half its width so the badge keeps its radius.
+///
+/// The label is centred in the badge square at the badge font's size, but
+/// never larger than fits: at most 1.1 × the radius, and for long labels
+/// (`XVIII`, `AB`…) small enough that its glyphs (about 0.6 em wide each)
+/// span at most 1.7 × the radius.
 fn step_badge(b: &StepBadge, alpha: f32) -> RenderNode {
     let inset = b.ring.map_or(0.0, |s| (s.width * 0.5).clamp(0.0, b.radius));
     let r = f64::from(b.radius - inset);
@@ -382,12 +506,31 @@ fn step_badge(b: &StepBadge, alpha: f32) -> RenderNode {
         BadgeShape::Teardrop => ShapeGeometry::Polygon(teardrop(c, r, deg)),
         BadgeShape::Shield => ShapeGeometry::Polygon(shield(c, r, deg)),
     };
+    let label = b.label();
+    let glyphs = label.chars().count().max(1) as f32;
+    let fit = (1.1 * b.radius).min(1.7 * b.radius / (0.6 * glyphs));
+    let text = TextSpec {
+        runs: vec![TextRunSpec {
+            text: label,
+            family: b.font.family.clone(),
+            size_px: b.font.size.min(fit).max(1.0),
+            weight: b.font.weight,
+            italic: b.font.italic,
+            color: rgba(b.text_color, alpha),
+            underline: false,
+            strike: false,
+        }],
+        frame: square,
+        align: STextAlign::Center,
+        valign: TextVAlign::Middle,
+        wrap: false,
+    };
     RenderNode::Shape(ShapeSpec {
         geometry,
         fill: Some(rgba(b.fill, alpha).into()),
         stroke: b.ring.as_ref().map(|s| stroke(s, alpha)),
         shadow: b.shadow.as_ref().map(|s| shadow(s, alpha)),
-        text: None,
+        text: Some(text),
     })
 }
 
@@ -483,8 +626,8 @@ fn arrow(a: &CurvedArrow, alpha: f32) -> RenderNode {
 }
 
 /// Backdrop effects cannot fade: node opacity only hides them at 0, and
-/// `feather_px` is not drawn. Pixelate blocks start at the shape's top-left
-/// rather than on the canvas grid.
+/// Pixelate blocks start at the shape's top-left rather than on the canvas
+/// grid.
 fn blur_region(b: &BlurRegion) -> RenderNode {
     RenderNode::BackdropFilter(BackdropFilterSpec {
         shape: region(&b.shape),
@@ -494,7 +637,7 @@ fn blur_region(b: &BlurRegion) -> RenderNode {
                 BackdropFilterKind::Pixelate { block_size_px }
             }
         },
-        feather_px: 0.0,
+        feather_px: b.feather_px,
     })
 }
 
@@ -550,7 +693,7 @@ fn spotlight(s: &Spotlight, alpha: f32) -> RenderNode {
 fn shape(s: &ShapeNode, alpha: f32) -> RenderNode {
     RenderNode::Shape(ShapeSpec {
         geometry: region(&s.shape),
-        fill: fill(&s.fill, alpha).map(Into::into),
+        fill: fill(&s.fill, alpha),
         stroke: s.stroke.as_ref().map(|k| stroke(k, alpha)),
         shadow: s.shadow.as_ref().map(|k| shadow(k, alpha)),
         text: None,
@@ -783,5 +926,258 @@ mod tests {
         let px = |x, y| frame.pixel(x, y).map(|v| (v * 255.0).round() as u8);
         assert_eq!(px(50, 40), [255, 0, 0, 255], "callout fill");
         assert_eq!(px(100, 80), [255, 255, 255, 255], "base shows through");
+    }
+
+    fn push(s: &mut Session, a: Annotation) -> u64 {
+        let m = &mut s.active_mut().unwrap().manifest;
+        let id = m.alloc_node_id();
+        m.annotations.push(AnnotationNode::new(id, a));
+        id.0
+    }
+
+    #[test]
+    fn rotated_nodes_carry_their_transform() {
+        let mut s = session(200, 200);
+        let c = id(s
+            .run(
+                "annotation.addCallout",
+                &json!({ "bounds": { "x": 20, "y": 30, "w": 100, "h": 40 }, "text": "Hi" }),
+            )
+            .unwrap());
+        assert_eq!(scene(&s).nodes[1].transform, None);
+        s.run("node.rotate", &json!({ "id": c, "rotation_rad": 0.5 }))
+            .unwrap();
+        let sc = scene(&s);
+        let n = &sc.nodes[1];
+        let want = s
+            .active()
+            .unwrap()
+            .manifest
+            .node(NodeId(c))
+            .unwrap()
+            .transform();
+        assert_eq!(n.transform, Some(want));
+        // The pivot (body centre) stays put.
+        let p = want.apply(Point::new(70.0, 50.0));
+        assert!((p.x - 70.0).abs() < 1e-9 && (p.y - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smart_objects_scale_into_their_rect() {
+        let o = SmartObject {
+            rect: RectF::new(10.0, 20.0, 80.0, 30.0),
+            image_size: Size::new(40, 60),
+            ..SmartObject::default()
+        };
+        let t = smart_object_placement(&o);
+        let a = t.apply(Point::new(0.0, 0.0));
+        let b = t.apply(Point::new(40.0, 60.0));
+        assert_eq!((a.x, a.y), (10.0, 20.0));
+        assert_eq!((b.x, b.y), (90.0, 50.0));
+    }
+
+    #[test]
+    fn gradients_become_paints() {
+        let mut s = session(100, 100);
+        let stops = vec![
+            GradientStop {
+                offset: 0.0,
+                color: Color::rgb(255, 0, 0),
+            },
+            GradientStop {
+                offset: 1.0,
+                color: Color::rgb(0, 0, 255),
+            },
+        ];
+        push(
+            &mut s,
+            Annotation::Shape(ShapeNode {
+                fill: Fill::Linear {
+                    from: Point::new(0.0, 0.0),
+                    to: Point::new(100.0, 0.0),
+                    stops: stops.clone(),
+                },
+                ..ShapeNode::default()
+            }),
+        );
+        push(
+            &mut s,
+            Annotation::Shape(ShapeNode {
+                fill: Fill::Radial {
+                    center: Point::new(50.0, 50.0),
+                    radius: 25.0,
+                    stops,
+                },
+                ..ShapeNode::default()
+            }),
+        );
+        s.active_mut().unwrap().manifest.annotations[0].opacity = 0.5;
+        let sc = scene(&s);
+        let RenderNode::Shape(lin) = &sc.nodes[1].node else {
+            panic!("shape expected");
+        };
+        let Some(Paint::Linear { from, to, stops }) = &lin.fill else {
+            panic!("linear paint expected: {:?}", lin.fill);
+        };
+        assert_eq!(
+            (*from, *to),
+            (PointF32::new(0.0, 0.0), PointF32::new(100.0, 0.0))
+        );
+        assert_eq!(stops[0].color, SColor::new(1.0, 0.0, 0.0, 0.5));
+        assert_eq!(stops[1].offset, 1.0);
+        let RenderNode::Shape(rad) = &sc.nodes[2].node else {
+            panic!("shape expected");
+        };
+        assert!(matches!(
+            &rad.fill,
+            Some(Paint::Radial { center, radius, stops })
+                if *center == PointF32::new(50.0, 50.0) && *radius == 25.0 && stops.len() == 2
+        ));
+    }
+
+    #[test]
+    fn callout_text_fills_the_padded_body() {
+        let mut s = session(300, 200);
+        let c = id(s
+            .run(
+                "annotation.addCallout",
+                &json!({ "bounds": { "x": 20, "y": 30, "w": 160, "h": 80 }, "text": "Hello" }),
+            )
+            .unwrap());
+        let sc = scene(&s);
+        let RenderNode::Callout(spec) = &sc.nodes[1].node else {
+            panic!("callout expected");
+        };
+        let t = spec.text.as_ref().unwrap();
+        let pad = s
+            .active()
+            .unwrap()
+            .manifest
+            .node(NodeId(c))
+            .and_then(|n| match n.annotation() {
+                Some(Annotation::Callout(c)) => Some(c.text.padding),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            t.frame,
+            RectF32::new(20.0 + pad, 30.0 + pad, 160.0 - 2.0 * pad, 80.0 - 2.0 * pad)
+        );
+        assert_eq!(t.runs.len(), 1);
+        assert_eq!(t.runs[0].text, "Hello");
+        assert!(t.wrap);
+        // Empty text draws nothing.
+        let Some(Annotation::Callout(cc)) = s
+            .active_mut()
+            .unwrap()
+            .manifest
+            .node_mut(NodeId(c))
+            .unwrap()
+            .annotation_mut()
+        else {
+            panic!("callout expected");
+        };
+        cc.text.runs.clear();
+        let RenderNode::Callout(spec) = &scene(&s).nodes[1].node else {
+            panic!("callout expected");
+        };
+        assert_eq!(spec.text, None);
+    }
+
+    #[test]
+    fn step_badges_draw_their_label() {
+        let mut s = session(200, 200);
+        s.run(
+            "annotation.addStep",
+            &json!({ "at": { "x": 50, "y": 60 }, "numbering": "upper_alpha" }),
+        )
+        .unwrap();
+        s.run(
+            "annotation.addStep",
+            &json!({ "at": { "x": 100, "y": 60 }, "numbering": "upper_roman", "value": 18 }),
+        )
+        .unwrap();
+        let sc = scene(&s);
+        let RenderNode::Shape(a) = &sc.nodes[1].node else {
+            panic!("badge expected");
+        };
+        let t = a.text.as_ref().unwrap();
+        assert_eq!(t.runs[0].text, "A");
+        assert_eq!(t.frame, RectF32::new(34.0, 44.0, 32.0, 32.0));
+        assert_eq!(
+            (t.align, t.valign, t.wrap),
+            (STextAlign::Center, TextVAlign::Middle, false)
+        );
+        assert_eq!(t.runs[0].color, SColor::WHITE);
+        let short = t.runs[0].size_px;
+        let RenderNode::Shape(b) = &sc.nodes[2].node else {
+            panic!("badge expected");
+        };
+        let long = &b.text.as_ref().unwrap().runs[0];
+        assert_eq!(long.text, "XVIII");
+        assert!(long.size_px < short, "{} vs {short}", long.size_px);
+    }
+
+    #[test]
+    fn blur_feather_reaches_the_scene() {
+        let mut s = session(100, 100);
+        push(
+            &mut s,
+            Annotation::BlurRegion(BlurRegion {
+                feather_px: 6.0,
+                ..BlurRegion::default()
+            }),
+        );
+        let RenderNode::BackdropFilter(b) = &scene(&s).nodes[1].node else {
+            panic!("blur expected");
+        };
+        assert_eq!(b.feather_px, 6.0);
+    }
+
+    #[test]
+    fn the_shadow_frame_comes_last_with_its_margin() {
+        let mut s = session(120, 80);
+        s.run("annotation.addStep", &json!({ "at": { "x": 50, "y": 60 } }))
+            .unwrap();
+        assert!(
+            !scene(&s)
+                .nodes
+                .iter()
+                .any(|n| matches!(n.node, RenderNode::ShadowFrame(_)))
+        );
+        let frame = serde_json::to_value(CanvasBackdrop::rounded_shadow_frame()).unwrap();
+        s.run("canvas.setBackdrop", &json!({ "backdrop": frame }))
+            .unwrap();
+        let sc = scene(&s);
+        let last = sc.nodes.last().unwrap();
+        assert_eq!(last.id.0, FRAME_NODE_ID);
+        let RenderNode::ShadowFrame(f) = &last.node else {
+            panic!("frame expected");
+        };
+        assert_eq!(f.margin, 48);
+        assert_eq!(f.corner_radius, 12.0);
+        assert!(f.shadow.is_some() && f.border.is_none());
+        assert_eq!(
+            f.backdrop,
+            Paint::Solid(SColor::rgba8(0xE2, 0xE8, 0xF0, 255))
+        );
+        // The revision follows the content.
+        let r1 = last.revision;
+        let mut wider = CanvasBackdrop::rounded_shadow_frame();
+        if let CanvasBackdrop::RoundedShadowFrame { margin_px, .. } = &mut wider {
+            *margin_px = 64.0;
+        }
+        s.run(
+            "canvas.setBackdrop",
+            &json!({ "backdrop": serde_json::to_value(wider).unwrap() }),
+        )
+        .unwrap();
+        let sc = scene(&s);
+        let last = sc.nodes.last().unwrap();
+        assert_ne!(last.revision, r1);
+        let RenderNode::ShadowFrame(f) = &last.node else {
+            panic!("frame expected");
+        };
+        assert_eq!(f.margin, 64);
     }
 }

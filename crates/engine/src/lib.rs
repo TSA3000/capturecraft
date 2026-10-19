@@ -17,6 +17,7 @@ pub mod commands;
 pub mod edit_commands;
 pub mod render;
 pub mod smart_commands;
+pub mod transform_commands;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
