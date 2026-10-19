@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -895,6 +895,7 @@ dependencies = [
  "photocraft-codecs",
  "photocraft-geom",
  "serde_json",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.21.0 (2026-10-19)
+
+- Shape (rectangle / ellipse), Highlight, Blur and Pixelate tools draw on the canvas.
+- Engine: `annotation.addShape`, `annotation.addBlur`.
+- The canvas pointer shows the active tool's icon.
+- Library lists the image files in the captures folders, not only the open captures.
+
 ## v0.20.1 (2026-10-19)
 
 - Fix: the editor's right drawer no longer overflows past the window edge.

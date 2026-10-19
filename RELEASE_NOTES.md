@@ -1,3 +1,30 @@
+# v0.21.0
+
+## Changes
+
+- **Shape tool**: drag a rectangle or an ellipse (Rectangle / Ellipse switch in Tool
+  Properties) in the selected Quick Style, including its corner radius and shadow.
+- **Highlight tool**: drag over text for a translucent marker band. Its Quick Styles are
+  Yellow, Green, Pink and Blue.
+- **Blur and Pixelate tools**: drag over private details. Blur has Light / Medium / Strong
+  cards, Pixelate has Fine / Medium / Coarse block sizes.
+- **Tool pointer**: on the canvas the pointer carries a small badge with the active tool's
+  icon.
+- **Library shows the captures on disk**: besides the open captures it now lists every image
+  in the captures folders (Pictures/CaptureCraft, the tray app's output folder and any
+  Share › File folder), newest first, with thumbnails loaded in the background. Double-click
+  one to open it in the editor. Delete in the Library only closes open captures; it never
+  deletes files.
+- **Engine**: new `annotation.addShape` (rect/ellipse, fill, stroke, shadow, multiply blend
+  for highlighters) and `annotation.addBlur` (gaussian or pixelate) commands.
+
+## Upgrading
+
+- Install over v0.20.x; nothing else to do.
+- Highlight Quick Styles saved by an earlier version keep their old colours (red, orange,
+  blue, black). To get the new marker colours, reset the editor's saved layout or add your
+  own Quick Style.
+
 # v0.20.1
 
 ## Changes

@@ -140,6 +140,9 @@ Layout, top to bottom:
 | Arrow | Drag from tail to tip; drag the green handle to bend it |
 | Callout | Click for a default bubble or drag its size; the yellow diamond aims the tail, the `+` adds another |
 | Step | Click to drop the next number (1, 2, 3 / A, B, C / I, II, III) |
+| Shape | Drag a rectangle or ellipse (switch in Tool Properties) in the selected Quick Style |
+| Highlight | Drag over text for a translucent marker band (yellow, green, pink or blue) |
+| Blur / Pixelate | Drag over private details; pick Light / Medium / Strong blur or Fine / Medium / Coarse blocks |
 | Move | Select, Shift+click to add, drag to move; handles resize (Shift keeps the aspect, Alt from the centre), rotate (Shift snaps to 15°) and round corners |
 | Selection | Rectangle: drag to select part of the capture, drag inside it to move it, Delete to remove it; the hole is Transparent or Auto Fill |
 | Cut Out | Drag across the capture to remove a strip and close the gap (straight or torn seam) |
@@ -149,13 +152,15 @@ Layout, top to bottom:
 | Canvas | Resize squares on the border add padding; Resize / Trim Canvas from the size button |
 | Share / Save | PNG to the captures folder; JPG, WebP, SVG, PDF (every open capture, one per page) and Clipboard from the arrow; Copy All |
 | Captures | Recent Captures strip (switch, close, Duplicate, Copy, Delete), Tag, New Blank Image, zoom, Undo / Redo |
+| Library | The open captures plus every image in the captures folders (Pictures/CaptureCraft, the tray's output folder, Share › File folders); double-click opens one |
+| Pointer | The canvas pointer carries the active tool's icon |
 
 #### Not working yet
 
 The buttons are there and say "not available yet" when used:
 
-- **Tools**: Text, Shape, Stamp, Fill, Blur, Pixelate, Highlight, Pen,
-  Eraser, Magnify, Spotlight, Smart Move and Crop. They can be selected
+- **Tools**: Text, Stamp, Fill, Pen, Eraser, Magnify, Spotlight, Smart Move
+  and Crop. They can be selected
   and their Quick Styles edited, but they do not draw yet.
 - **Selection**: Ellipse, Polygon and Freehand Lasso modes, Snap to Object.
 - **Effects**: Torn Edge, Perspective / Shear, Spotlight and Color Filter.
@@ -169,9 +174,8 @@ The buttons are there and say "not available yet" when used:
 
 Roughly in this order:
 
-1. **Text, Shape, Blur, Pixelate, Highlight and Crop**: the document format
-   and both compositors already draw shapes, blur and pixelate regions; they
-   need engine commands and canvas gestures.
+1. **Text and Crop**: Text needs an annotation type of its own and editing
+   on the canvas.
 2. **Pen, Eraser, Magnify, Spotlight, Stamp, Fill and the Smart Move tool.**
 3. **Saving and opening `.capturecraft` documents**, a Save As dialog, and
    Combine Images.
