@@ -2,5 +2,7 @@
 //! [`crate::UiIntent`]s; none of them edits a document.
 
 pub mod canvas_viewport;
+pub mod editor_toolbar;
+pub mod gizmo;
 pub mod recent_tray;
 pub mod right_sidebar;

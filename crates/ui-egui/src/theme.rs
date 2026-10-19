@@ -217,8 +217,15 @@ impl Tokens {
 
     /// Styles egui with PhotoCraft's `theme::apply` (which also publishes
     /// PhotoCraft's tokens for its widgets) and stores these tokens for
-    /// [`Tokens::get`].
+    /// [`Tokens::get`]. The first call on a context also installs
+    /// PhotoCraft's fonts: its text styles name font families (`semibold`)
+    /// that egui cannot lay out without them.
     pub fn apply(&self, ctx: &egui::Context) {
+        let fonts = egui::Id::new("capturecraft-photocraft-fonts");
+        if !ctx.data(|d| d.get_temp::<bool>(fonts).unwrap_or(false)) {
+            pc::install_fonts(ctx);
+            ctx.data_mut(|d| d.insert_temp(fonts, true));
+        }
         pc::apply(ctx, self.kind);
         ctx.data_mut(|d| d.insert_temp(egui::Id::new(TOKENS_ID), *self));
     }

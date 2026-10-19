@@ -10,9 +10,17 @@
 //!
 //! - eight expansion handles outside the canvas edge; dragging one out
 //!   previews the new bounds and commits `canvas.expandBounds`;
-//! - selection outlines, yellow diamond callout tail handles (drag to move,
-//!   drag the `+` out of a callout to add a tail), and the arrow bend
-//!   handle (drag to curve, double-click to straighten);
+//! - selection outlines turned with the node's rotation and, for a single
+//!   selection with the Move tool, the transform gizmo ([`super::gizmo`]):
+//!   eight resize handles (Shift keeps the aspect, Alt resizes from the
+//!   centre; `node.resize`), the rotation stem (Shift snaps to 15°;
+//!   `node.rotate`) and the yellow corner-radius diamond
+//!   (`annotation.setStyle`);
+//! - yellow diamond callout tail handles (drag to move, drag the `+` out of
+//!   a callout to add a tail), and the arrow bend handle (drag to curve,
+//!   double-click to straighten), all in the node's rotated frame;
+//! - with a rounded shadow frame, the frame margin around the canvas and
+//!   four margin handles on its edges (`canvas.setBackdrop`);
 //! - the Cut Out guide: a full-width or full-height band with seam lines
 //!   showing the strip the drag would remove.
 //!
@@ -33,6 +41,10 @@ use egui::{
 use photocraft_geom::{Point, Size};
 use serde_json::{Value, json};
 
+use super::gizmo::{
+    self, GizmoHandle, NodeFrame, RADIUS_INSET_PT, RESIZE_HANDLES, STEM_PT, corner_radius_of,
+    corner_radius_point, handle_point, rotate_handle_point,
+};
 use crate::UiIntent;
 use crate::state::{
     CanvasGesture, ColorTarget, EditorState, ExpandBackdrop, ResizeDrag, ResizeHandle, StylePreset,
@@ -560,9 +572,11 @@ impl CanvasViewport<'_> {
             );
         }
         if let Some(img) = self.image {
+            let off =
+                gizmo::image_offset(&m.canvas.backdrop, [canvas.width, canvas.height], img.size);
             let r = xf.rect_to_screen(RectF::new(
-                0.0,
-                0.0,
+                off,
+                off,
                 f64::from(img.size[0]),
                 f64::from(img.size[1]),
             ));
@@ -574,6 +588,19 @@ impl CanvasViewport<'_> {
             stroke(1.0, t.canvas_edge),
             StrokeKind::Outside,
         );
+        if let Some(margin) = gizmo::frame_margin(&m.canvas.backdrop) {
+            frame_margin_handles(
+                ui,
+                &painter,
+                &xf,
+                canvas,
+                &m.canvas.backdrop,
+                margin,
+                editor,
+                intents,
+                t,
+            );
+        }
 
         let tool = editor.toolbar.active;
         let to_canvas = |p: Pos2| xf.to_canvas(p);
@@ -646,44 +673,64 @@ impl CanvasViewport<'_> {
             Some(CanvasGesture::MoveSelection { from, to }) => (to.x - from.x, to.y - from.y),
             _ => (0.0, 0.0),
         };
+        let mods = ui.input(|i| i.modifiers);
         if let Some(h) = editor.canvas.hovered.filter(|h| !selection.contains(h))
-            && let Some(b) = m
-                .node(h)
-                .and_then(|n| n.annotation())
-                .and_then(Annotation::bounds)
+            && let Some(f) = m.node(h).and_then(NodeFrame::of)
         {
-            painter.rect_stroke(
-                xf.rect_to_screen(b),
-                0.0,
-                stroke(1.0, t.gizmo_stroke),
-                StrokeKind::Outside,
-            );
+            frame_outline(&painter, &xf, &f, stroke(1.0, t.gizmo_stroke));
         }
+        let single = (selection.len() == 1 && tool == ToolId::Move)
+            .then(|| selection.first().copied())
+            .flatten();
         for &id in &selection {
-            let Some(a) = m.node(id).and_then(|n| n.annotation()) else {
+            let Some(node) = m.node(id) else {
                 continue;
             };
-            if let Some(mut b) = a.bounds() {
-                b.translate(moving.0, moving.1);
-                let r = xf.rect_to_screen(b).expand(2.0);
-                painter.rect_stroke(r, 0.0, stroke(3.0, t.gizmo_outline), StrokeKind::Middle);
-                painter.rect_stroke(r, 0.0, stroke(1.5, t.gizmo_stroke), StrokeKind::Middle);
-                for c in [
-                    r.left_top(),
-                    r.right_top(),
-                    r.left_bottom(),
-                    r.right_bottom(),
-                ] {
-                    let hr = ERect::from_center_size(c, Vec2::splat(t.handle_size));
-                    painter.rect(
-                        hr,
-                        1.0,
-                        t.handle_fill,
-                        stroke(1.0, t.handle_stroke),
-                        StrokeKind::Middle,
+            let Some(a) = node.annotation() else {
+                continue;
+            };
+            let base = NodeFrame::of(node);
+            if let Some(mut f) = base {
+                let mut radius = None;
+                match editor.canvas.gesture {
+                    Some(CanvasGesture::Resize {
+                        id: g,
+                        handle,
+                        local,
+                    }) if g == id => {
+                        if let Some((_, p)) = gizmo::resize_preview(
+                            a, f.rotation, handle, local, mods.shift, mods.alt,
+                        ) {
+                            f = p;
+                        }
+                    }
+                    Some(CanvasGesture::Rotate { id: g, from, to }) if g == id => {
+                        f.rotation =
+                            gizmo::rotation_from_drag(f.pivot, from, to, f.rotation, mods.shift);
+                    }
+                    Some(CanvasGesture::CornerRadius { id: g, radius: r }) if g == id => {
+                        radius = Some(r);
+                    }
+                    _ => {}
+                }
+                f.bounds.translate(moving.0, moving.1);
+                f.pivot = Point::new(f.pivot.x + moving.0, f.pivot.y + moving.1);
+                frame_outline(&painter, &xf, &f, stroke(3.0, t.gizmo_outline));
+                frame_outline(&painter, &xf, &f, stroke(1.5, t.gizmo_stroke));
+                if single == Some(id) {
+                    let resizing = matches!(
+                        editor.canvas.gesture,
+                        Some(CanvasGesture::Resize { .. } | CanvasGesture::MoveSelection { .. })
                     );
+                    draw_gizmo(&painter, &xf, &f, (!resizing).then_some(a), radius, t);
                 }
             }
+            // Handles below live in the node's (unrotated) geometry space.
+            let to_scr = |p: Point| xf.to_screen(base.map_or(p, |f| f.to_canvas(p)));
+            let to_local = |p: Pos2| {
+                let c = to_canvas(p);
+                base.map_or(c, |f| f.to_local(c))
+            };
             match a {
                 Annotation::Callout(c) => {
                     for (index, tail) in c.tails.iter().enumerate() {
@@ -695,9 +742,9 @@ impl CanvasViewport<'_> {
                             }) if *g == id && *gi == index => Some(*to),
                             _ => None,
                         };
-                        let at = xf.to_screen(preview.unwrap_or(tail.tip));
+                        let at = to_scr(preview.unwrap_or(tail.tip));
                         let h = ui.interact(
-                            ERect::from_center_size(xf.to_screen(tail.tip), Vec2::splat(16.0)),
+                            ERect::from_center_size(to_scr(tail.tip), Vec2::splat(16.0)),
                             Id::new(("canvas.tail", id.0, index)),
                             Sense::drag(),
                         );
@@ -713,21 +760,26 @@ impl CanvasViewport<'_> {
                                 editor.canvas.gesture = Some(CanvasGesture::CalloutTail {
                                     id,
                                     index,
-                                    to: to_canvas(p),
+                                    to: to_local(p),
                                 });
                             }
                             if h.drag_stopped() {
                                 intents.push(UiIntent::command(
                                     "annotation.moveCalloutTail",
-                                    json!({ "id": id.0, "index": index, "tip": pt(to_canvas(p)) }),
+                                    json!({ "id": id.0, "index": index, "tip": pt(to_local(p)) }),
                                 ));
                                 editor.canvas.gesture = None;
                             }
                         }
                     }
                     // "+" below the body: drag out a new tail.
-                    let body = xf.rect_to_screen(c.bounds);
-                    let plus = body.center_bottom() + vec2(0.0, 18.0);
+                    let below = f64::from(18.0 / xf.scale.max(f32::EPSILON));
+                    let bottom = Point::new(
+                        c.bounds.x + c.bounds.w / 2.0,
+                        c.bounds.y + c.bounds.h + below,
+                    );
+                    let plus = to_scr(bottom);
+                    let body_center = to_scr(c.bounds.center());
                     let h = ui.interact(
                         ERect::from_center_size(plus, Vec2::splat(16.0)),
                         Id::new(("canvas.newtail", id.0)),
@@ -738,8 +790,8 @@ impl CanvasViewport<'_> {
                         _ => None,
                     };
                     if let Some(tip) = new_tip {
-                        let s = xf.to_screen(tip);
-                        painter.line_segment([body.center(), s], stroke(1.0, t.tail_handle));
+                        let s = to_scr(tip);
+                        painter.line_segment([body_center, s], stroke(1.0, t.tail_handle));
                         diamond(&painter, s, 6.5, t.tail_handle, t);
                     }
                     diamond(&painter, plus, 6.5, t.handle_fill, t);
@@ -754,7 +806,7 @@ impl CanvasViewport<'_> {
                         if h.dragged() {
                             editor.canvas.gesture = Some(CanvasGesture::NewTail {
                                 id,
-                                to: to_canvas(p),
+                                to: to_local(p),
                             });
                         }
                         if h.drag_stopped() {
@@ -762,7 +814,7 @@ impl CanvasViewport<'_> {
                             intents.push(UiIntent::command(
                                 "annotation.addCalloutTail",
                                 json!({ "id": id.0, "tail": {
-                                    "tip": pt(to_canvas(p)),
+                                    "tip": pt(to_local(p)),
                                     "base_width": o.tail_width,
                                     "curve_bias": o.tail_curve,
                                 } }),
@@ -780,7 +832,7 @@ impl CanvasViewport<'_> {
                     if let Some(to) = preview {
                         let pts: Vec<Pos2> = [arrow.start, to, arrow.end]
                             .into_iter()
-                            .map(|p| xf.to_screen(p))
+                            .map(to_scr)
                             .collect();
                         painter.extend(Shape::dashed_line(
                             &pts,
@@ -789,9 +841,9 @@ impl CanvasViewport<'_> {
                             4.0,
                         ));
                     }
-                    let at = xf.to_screen(preview.unwrap_or(mid));
+                    let at = to_scr(preview.unwrap_or(mid));
                     let h = ui.interact(
-                        ERect::from_center_size(xf.to_screen(mid), Vec2::splat(16.0)),
+                        ERect::from_center_size(to_scr(mid), Vec2::splat(16.0)),
                         Id::new(("canvas.bend", id.0)),
                         Sense::click_and_drag(),
                     );
@@ -813,13 +865,13 @@ impl CanvasViewport<'_> {
                         if h.dragged() {
                             editor.canvas.gesture = Some(CanvasGesture::ArrowBend {
                                 id,
-                                to: to_canvas(p),
+                                to: to_local(p),
                             });
                         }
                         if h.drag_stopped() {
                             intents.push(UiIntent::command(
                                 "annotation.setArrowCurve",
-                                json!({ "id": id.0, "through": pt(to_canvas(p)) }),
+                                json!({ "id": id.0, "through": pt(to_local(p)) }),
                             ));
                             editor.canvas.gesture = None;
                         }
@@ -860,15 +912,35 @@ impl CanvasViewport<'_> {
             return resp;
         }
         let along = |p: Point| if axis == Axis::Horizontal { p.y } else { p.x };
+        // The gizmo of a single selection, with its node.
+        let gizmo_node = single.and_then(|id| {
+            let n = m.node(id)?;
+            Some((id, NodeFrame::of(n)?, n.annotation()?))
+        });
+        let gizmo_hit = |p: Pos2| {
+            gizmo_node.and_then(|(_, f, a)| {
+                gizmo::hit_handle(&f, a, to_canvas(p), xf.scale, t.handle_size)
+            })
+        };
+        let mut over_handle = false;
         if tool == ToolId::Move
             && let Some(p) = resp.hover_pos()
         {
-            editor.canvas.hovered = node_at(m, to_canvas(p), slop);
+            match (gizmo_hit(p), &gizmo_node) {
+                (Some(h), Some((_, f, _))) => {
+                    over_handle = true;
+                    editor.canvas.hovered = None;
+                    ui.ctx()
+                        .set_cursor_icon(gizmo::handle_cursor(h, f.rotation));
+                }
+                _ => editor.canvas.hovered = node_at(m, to_canvas(p), slop),
+            }
         } else {
             editor.canvas.hovered = None;
         }
 
         if resp.clicked()
+            && !over_handle
             && let Some(p) = resp.interact_pointer_pos()
         {
             let c = to_canvas(p);
@@ -890,8 +962,21 @@ impl CanvasViewport<'_> {
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
             let c = to_canvas(o);
-            editor.canvas.gesture = match tool {
-                ToolId::Move => {
+            let handle = (tool == ToolId::Move).then(|| gizmo_hit(o)).flatten();
+            editor.canvas.gesture = match (tool, handle, gizmo_node) {
+                (_, Some(h), Some((id, f, a))) => Some(match h {
+                    GizmoHandle::Resize(handle) => CanvasGesture::Resize {
+                        id,
+                        handle,
+                        local: f.to_local(c),
+                    },
+                    GizmoHandle::Rotate => CanvasGesture::Rotate { id, from: c, to: c },
+                    GizmoHandle::CornerRadius => CanvasGesture::CornerRadius {
+                        id,
+                        radius: corner_radius_of(a).map_or(0.0, |(_, r)| r),
+                    },
+                }),
+                (ToolId::Move, _, _) => {
                     let hit = node_at(m, c, slop);
                     if let Some(id) = hit
                         && !editor.canvas.selection.contains(&id)
@@ -900,7 +985,7 @@ impl CanvasViewport<'_> {
                     }
                     hit.map(|_| CanvasGesture::MoveSelection { from: c, to: c })
                 }
-                ToolId::CutOut => Some(CanvasGesture::CutOut {
+                (ToolId::CutOut, _, _) => Some(CanvasGesture::CutOut {
                     from: along(c),
                     to: along(c),
                 }),
@@ -914,6 +999,19 @@ impl CanvasViewport<'_> {
                     *to = c;
                 }
                 Some(CanvasGesture::CutOut { to, .. }) => *to = along(c),
+                Some(CanvasGesture::Resize { local, .. }) => {
+                    if let Some((_, f, _)) = &gizmo_node {
+                        *local = f.to_local(c);
+                    }
+                }
+                Some(CanvasGesture::Rotate { to, .. }) => *to = c,
+                Some(CanvasGesture::CornerRadius { radius, .. }) => {
+                    if let Some((_, f, a)) = &gizmo_node
+                        && let Some((rect, _)) = corner_radius_of(a)
+                    {
+                        *radius = gizmo::radius_from_drag(rect, f.to_local(c));
+                    }
+                }
                 _ => {}
             }
         }
@@ -943,6 +1041,17 @@ impl CanvasViewport<'_> {
                         editor.tools.cut_out.params(from, to),
                     ));
                 }
+                Some(
+                    g @ (CanvasGesture::Resize { .. }
+                    | CanvasGesture::Rotate { .. }
+                    | CanvasGesture::CornerRadius { .. }),
+                ) => {
+                    if let Some(i) = gizmo_node
+                        .and_then(|(_, f, a)| finish_gizmo(&g, &f, a, mods.shift, mods.alt))
+                    {
+                        intents.push(i);
+                    }
+                }
                 _ => {}
             }
         }
@@ -950,6 +1059,183 @@ impl CanvasViewport<'_> {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
         resp
+    }
+}
+
+/// The command a finished gizmo drag runs, `None` when nothing changed.
+pub fn finish_gizmo(
+    g: &CanvasGesture,
+    f: &NodeFrame,
+    a: &Annotation,
+    shift: bool,
+    alt: bool,
+) -> Option<UiIntent> {
+    match *g {
+        CanvasGesture::Resize { id, handle, local } => {
+            let (sent, _) = gizmo::resize_preview(a, f.rotation, handle, local, shift, alt)?;
+            let start = a.bounds()?;
+            let same = (sent.x - start.x).abs() < 1e-6
+                && (sent.y - start.y).abs() < 1e-6
+                && (sent.w - start.w).abs() < 1e-6
+                && (sent.h - start.h).abs() < 1e-6;
+            (!same && sent.w > 0.0 && sent.h > 0.0).then(|| gizmo::resize_intent(id, sent))
+        }
+        CanvasGesture::Rotate { id, from, to } => {
+            let r = gizmo::rotation_from_drag(f.pivot, from, to, f.rotation, shift);
+            (r != f.rotation).then(|| gizmo::rotate_intent(id, r))
+        }
+        CanvasGesture::CornerRadius { id, radius } => {
+            let before = corner_radius_of(a).map(|(_, r)| r);
+            (before != Some(radius)).then(|| gizmo::radius_intent(id, radius))
+        }
+        _ => None,
+    }
+}
+
+/// The node frame's rotated bounds as a closed outline.
+fn frame_outline(painter: &egui::Painter, xf: &ViewTransform, f: &NodeFrame, s: egui::Stroke) {
+    let pts: Vec<Pos2> = f.corners().into_iter().map(|p| xf.to_screen(p)).collect();
+    painter.add(Shape::closed_line(pts, s));
+}
+
+/// Resize squares, the rotation stem and (with `radius_of`) the
+/// corner-radius diamond of a single selection.
+fn draw_gizmo(
+    painter: &egui::Painter,
+    xf: &ViewTransform,
+    f: &NodeFrame,
+    radius_of: Option<&Annotation>,
+    radius_preview: Option<f32>,
+    t: &Tokens,
+) {
+    let s = f64::from(xf.scale.max(f32::EPSILON));
+    let scr = |p: Point| xf.to_screen(f.to_canvas(p));
+    let b = f.bounds;
+    let top = scr(handle_point(b, ResizeHandle::N));
+    let knob = scr(rotate_handle_point(b, f64::from(STEM_PT) / s));
+    painter.line_segment([top, knob], stroke(3.0, t.gizmo_outline));
+    painter.line_segment([top, knob], stroke(1.5, t.gizmo_stroke));
+    painter.circle(knob, 5.5, t.handle_fill, stroke(1.5, t.handle_stroke));
+    let (sin, cos) = f.rotation.sin_cos();
+    let half = t.handle_size / 2.0;
+    for h in RESIZE_HANDLES {
+        let c = scr(handle_point(b, h));
+        let pts = [(-half, -half), (half, -half), (half, half), (-half, half)]
+            .map(|(x, y)| c + vec2(x * cos - y * sin, x * sin + y * cos))
+            .to_vec();
+        painter.add(Shape::convex_polygon(
+            pts,
+            t.handle_fill,
+            stroke(1.0, t.handle_stroke),
+        ));
+    }
+    if let Some((rect, r)) = radius_of.and_then(corner_radius_of) {
+        let r = radius_preview.unwrap_or(r);
+        let at = scr(corner_radius_point(rect, r, f64::from(RADIUS_INSET_PT) / s));
+        diamond(painter, at, 6.0, t.tail_handle, t);
+    }
+}
+
+/// The rounded shadow frame around the canvas and its four margin handles.
+#[allow(clippy::too_many_arguments)]
+fn frame_margin_handles(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    xf: &ViewTransform,
+    canvas: Size,
+    backdrop: &capturecraft_format::CanvasBackdrop,
+    margin: f32,
+    editor: &mut EditorState,
+    intents: &mut Vec<UiIntent>,
+    t: &Tokens,
+) {
+    let shown = match &editor.canvas.gesture {
+        Some(CanvasGesture::FrameMargin { side, start, delta }) => {
+            gizmo::margin_after_drag(*start, *side, *delta)
+        }
+        _ => margin,
+    };
+    let m = f64::from(shown);
+    let frame = xf.rect_to_screen(RectF::new(
+        -m,
+        -m,
+        f64::from(canvas.width) + 2.0 * m,
+        f64::from(canvas.height) + 2.0 * m,
+    ));
+    let dragging = matches!(
+        editor.canvas.gesture,
+        Some(CanvasGesture::FrameMargin { .. })
+    );
+    dashed_rect(
+        painter,
+        frame,
+        if dragging {
+            t.expand_preview
+        } else {
+            t.canvas_edge
+        },
+    );
+    // Off the edge midpoints, clear of the canvas expansion handles.
+    let along = t.expand_handle_len + t.space_lg;
+    for side in gizmo::MARGIN_HANDLES {
+        let (at, size) = match side {
+            ResizeHandle::N => (frame.center_top() + vec2(along, 0.0), vec2(20.0, 6.0)),
+            ResizeHandle::S => (frame.center_bottom() + vec2(along, 0.0), vec2(20.0, 6.0)),
+            ResizeHandle::W => (frame.left_center() + vec2(0.0, along), vec2(6.0, 20.0)),
+            _ => (frame.right_center() + vec2(0.0, along), vec2(6.0, 20.0)),
+        };
+        let rect = ERect::from_center_size(at, size);
+        let h = ui.interact(
+            rect.expand(4.0),
+            Id::new(("canvas.frame_margin", side)),
+            Sense::drag(),
+        );
+        let hot = h.hovered() || h.dragged();
+        painter.rect(
+            rect,
+            Tokens::corner(t.radius_pill),
+            if hot { t.expand_preview } else { t.accent },
+            stroke(1.0, t.expand_handle_stroke),
+            StrokeKind::Outside,
+        );
+        if hot {
+            ui.ctx().set_cursor_icon(resize_cursor(side));
+            h.clone().on_hover_text("Drag to change the frame margin");
+        }
+        if h.drag_started() {
+            editor.canvas.gesture = Some(CanvasGesture::FrameMargin {
+                side,
+                start: margin,
+                delta: [0.0, 0.0],
+            });
+        }
+        if let Some(CanvasGesture::FrameMargin {
+            side: s,
+            start,
+            delta,
+        }) = &mut editor.canvas.gesture
+            && *s == side
+        {
+            if h.dragged() {
+                let d = h.drag_delta() / xf.scale.max(f32::EPSILON);
+                *delta = [delta[0] + d.x, delta[1] + d.y];
+            }
+            if h.drag_stopped() {
+                let new = gizmo::margin_after_drag(*start, side, *delta);
+                if new != *start {
+                    intents.push(gizmo::backdrop_intent(&gizmo::with_margin(backdrop, new)));
+                }
+                editor.canvas.gesture = None;
+            }
+        }
+    }
+    if dragging {
+        badge(
+            painter,
+            frame.center_bottom() + vec2(0.0, t.space_lg),
+            &format!("Margin {shown:.0} px"),
+            t,
+        );
     }
 }
 
@@ -1106,9 +1392,12 @@ fn draw_preview(
     let s = stroke(2.0, t.gizmo_stroke);
     match tool {
         ToolId::Arrow => painter.arrow(pa, pb - pa, s),
-        ToolId::Callout | ToolId::Shape | ToolId::Blur | ToolId::Magnify | ToolId::Highlighter => {
-            dashed_rect(painter, ERect::from_two_pos(pa, pb), t.gizmo_stroke)
-        }
+        ToolId::Callout
+        | ToolId::Shape
+        | ToolId::Blur
+        | ToolId::Magnify
+        | ToolId::Spotlight
+        | ToolId::Highlighter => dashed_rect(painter, ERect::from_two_pos(pa, pb), t.gizmo_stroke),
         _ => {}
     }
 }
@@ -1226,6 +1515,56 @@ mod tests {
         assert_eq!(params["bounds"]["w"], 100.0);
         assert_eq!(params["tails"].as_array().unwrap().len(), 1);
         assert_eq!(params["body"]["kind"], "rounded_rect");
+    }
+
+    #[test]
+    fn gizmo_drags_commit_one_command() {
+        use capturecraft_format::{AnnotationNode, RegionShape, ShapeNode};
+        let a = Annotation::Shape(ShapeNode {
+            shape: RegionShape::Rect {
+                rect: RectF::new(0.0, 0.0, 100.0, 50.0),
+            },
+            ..ShapeNode::default()
+        });
+        let n = AnnotationNode::new(NodeId(3), a.clone());
+        let f = NodeFrame::of(&n).unwrap();
+        let g = CanvasGesture::Resize {
+            id: NodeId(3),
+            handle: ResizeHandle::SE,
+            local: Point::new(150.0, 75.0),
+        };
+        let UiIntent::Command { id, params } = finish_gizmo(&g, &f, &a, false, false).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "node.resize");
+        assert_eq!(params["bounds"]["w"], 150.0);
+        let unchanged = CanvasGesture::Resize {
+            id: NodeId(3),
+            handle: ResizeHandle::SE,
+            local: Point::new(100.0, 50.0),
+        };
+        assert!(finish_gizmo(&unchanged, &f, &a, false, false).is_none());
+        let g = CanvasGesture::Rotate {
+            id: NodeId(3),
+            from: Point::new(50.0, -10.0),
+            to: Point::new(100.0, 25.0),
+        };
+        let UiIntent::Command { id, params } = finish_gizmo(&g, &f, &a, true, false).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "node.rotate");
+        let deg = params["rotation_rad"].as_f64().unwrap().to_degrees();
+        assert!((deg - 90.0).abs() < 1e-3, "{deg}");
+        let g = CanvasGesture::CornerRadius {
+            id: NodeId(3),
+            radius: 8.0,
+        };
+        let UiIntent::Command { id, .. } = finish_gizmo(&g, &f, &a, false, false).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(id, "annotation.setStyle");
     }
 
     /// The emitted parameters are accepted by the real commands.

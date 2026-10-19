@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod dpi;
 pub mod panels;
 pub mod state;
 pub mod theme;
@@ -31,6 +32,26 @@ pub enum UiIntent {
     CombineImages { doc_ids: Vec<String> },
     /// Start a new capture (toolbar, tray).
     NewCapture,
+    /// Capture now with the HUD's settings: open the crosshair overlay for
+    /// `selection` after `delay_secs`.
+    StartCapture {
+        tab: state::CaptureTab,
+        selection: state::SelectionType,
+        delay_secs: u32,
+    },
+    /// Hide the floating capture HUD.
+    CloseHud,
+    /// Bring up the editor window (HUD, tray menu).
+    ShowEditor,
+    /// Open the preferences window.
+    OpenSettings,
+    /// Copy the active document's rendered image to the clipboard.
+    CopyImage,
+    /// Share/export the active document (file, PDF, upload).
+    Share,
+    /// Close these documents and drop them from the library (the app asks
+    /// before discarding unsaved ones).
+    DeleteDocuments { doc_ids: Vec<String> },
 }
 
 impl UiIntent {
@@ -107,6 +128,16 @@ pub const COMMANDS_USED: &[&str] = &[
     "canvas.expandBounds",
     "smart.simplify",
     "smart.setPalette",
+];
+
+/// Engine commands the transform gizmo and the frame UI emit
+/// ([`panels::gizmo`]). Not yet part of [`COMMANDS_USED`]: fold them in
+/// once the engine registers them.
+pub const GIZMO_COMMANDS: &[&str] = &[
+    "node.resize",
+    "node.rotate",
+    "node.transform",
+    "canvas.setBackdrop",
 ];
 
 #[cfg(test)]

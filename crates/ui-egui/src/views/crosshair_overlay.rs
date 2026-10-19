@@ -13,6 +13,13 @@
 //! The view never captures anything: it returns an [`OverlayAction`] and
 //! the app crops (`FrozenDesktop::crop`) or starts a recording. The gesture
 //! logic is the pure [`step`] function, unit-tested without a display.
+//!
+//! HiDPI: positions on screen are [`LogicalPt`]s, desktop pixels are
+//! [`PhysicalPx`]s (see [`crate::dpi`]); the mapping is rebuilt every frame
+//! from the overlay viewport's own `pixels_per_point`, and the size badges
+//! count the frozen frames' physical pixels. One egui viewport has one
+//! scale, so on a desktop mixing scales the overlay is exact on the
+//! monitor whose scale egui reports and the badges stay exact everywhere.
 
 use capturecraft_capture::{FrozenDesktop, HitKind, HitTarget, PointI32};
 use egui::{
@@ -21,6 +28,7 @@ use egui::{
 };
 use photocraft_geom::Rect;
 
+use crate::dpi::{LogicalPt, PhysicalPx, dimension_badge, physical_size, sane_ppp};
 use crate::state::{
     ColorCode, CrosshairOverlayState, CrosshairPrefs, HoverTarget, OverlayPhase, SelectionSource,
 };
@@ -62,30 +70,55 @@ pub struct DesktopMapping {
     /// `FrozenDesktop::bounds`.
     pub desktop: Rect,
     pub points_per_unit: f32,
+    /// macOS reports the desktop in points; Windows and X11 in physical
+    /// pixels, which egui divides by `pixels_per_point`.
+    pub units_are_points: bool,
 }
 
 impl DesktopMapping {
-    /// `units_are_points`: macOS reports the desktop in points; Windows and
-    /// X11 in physical pixels, which egui divides by `pixels_per_point`.
     pub fn new(desktop: Rect, units_are_points: bool, pixels_per_point: f32) -> Self {
-        let ppp = if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
-            pixels_per_point
-        } else {
-            1.0
-        };
         Self {
             desktop,
-            points_per_unit: if units_are_points { 1.0 } else { 1.0 / ppp },
+            points_per_unit: if units_are_points {
+                1.0
+            } else {
+                1.0 / sane_ppp(pixels_per_point)
+            },
+            units_are_points,
         }
+    }
+
+    /// The same desktop at another scale (the overlay viewport's own
+    /// `pixels_per_point`, read every frame).
+    pub fn with_pixels_per_point(self, pixels_per_point: f32) -> Self {
+        Self::new(self.desktop, self.units_are_points, pixels_per_point)
+    }
+
+    /// Desktop units per point: the scale of the unit ↔ point conversion.
+    fn units_per_point(&self) -> f32 {
+        1.0 / self.points_per_unit.max(f32::EPSILON)
+    }
+
+    /// `p` relative to the desktop's top-left.
+    fn relative(&self, p: [i32; 2]) -> PhysicalPx {
+        let d = |v: i32, o: i32| {
+            (i64::from(v) - i64::from(o)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
+        PhysicalPx::new(d(p[0], self.desktop.x0), d(p[1], self.desktop.y0))
     }
 
     /// Top-left corner of desktop unit `p`, in viewport points.
     pub fn to_screen(&self, p: [i32; 2]) -> Pos2 {
-        let s = self.points_per_unit;
-        pos2(
-            (i64::from(p[0]) - i64::from(self.desktop.x0)) as f32 * s,
-            (i64::from(p[1]) - i64::from(self.desktop.y0)) as f32 * s,
-        )
+        self.relative(p)
+            .to_logical(self.units_per_point())
+            .to_pos2()
+    }
+
+    /// Centre of desktop unit `p`, in viewport points.
+    pub fn center_to_screen(&self, p: [i32; 2]) -> Pos2 {
+        self.relative(p)
+            .center_to_logical(self.units_per_point())
+            .to_pos2()
     }
 
     pub fn rect_to_screen(&self, r: Rect) -> ERect {
@@ -94,16 +127,11 @@ impl DesktopMapping {
 
     /// The desktop unit under viewport point `pos`.
     pub fn to_global(&self, pos: Pos2) -> [i32; 2] {
-        let s = self.points_per_unit.max(f32::EPSILON);
-        let f = |v: f32, o: i32| {
-            let g = (v / s).floor();
-            if g.is_finite() {
-                (g as i64 + i64::from(o)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-            } else {
-                o
-            }
+        let p = LogicalPt::from_pos2(pos).to_physical(self.units_per_point());
+        let f = |v: i32, o: i32| {
+            (i64::from(v) + i64::from(o)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
         };
-        [f(pos.x, self.desktop.x0), f(pos.y, self.desktop.y0)]
+        [f(p.x, self.desktop.x0), f(p.y, self.desktop.y0)]
     }
 
     /// Where and how large the overlay window opens, in points.
@@ -371,13 +399,14 @@ impl CrosshairOverlay<'_> {
         let snap = self.prefs.snap_to_windows;
         let desktop = self.desktop;
         let hit = |p: [i32; 2]| hover_target(&desktop.hit_test(PointI32::new(p[0], p[1])));
+        let displays = display_scales(desktop);
+        let m = self.mapping.with_pixels_per_point(ctx.pixels_per_point());
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::BLACK))
             .show(root, |ui| {
                 let screen = ui.max_rect();
                 let resp = ui.interact(screen, ui.id().with("crosshair"), Sense::click_and_drag());
-                let m = self.mapping;
 
                 // Input → events.
                 let mut events = Vec::new();
@@ -445,7 +474,8 @@ impl CrosshairOverlay<'_> {
                     _ => None,
                 };
                 if let Some((rect, text)) = label {
-                    let text = format!("{text}   {} × {}", rect.width(), rect.height());
+                    let (w, h) = physical_size(rect, &displays);
+                    let text = format!("{text}   {}", dimension_badge(w, h));
                     let r = m.rect_to_screen(rect);
                     let at = pos2(r.min.x, (r.min.y - t.space_sm).max(screen.min.y + 20.0));
                     badge(&painter, at, Align2::LEFT_BOTTOM, &text, t);
@@ -456,7 +486,7 @@ impl CrosshairOverlay<'_> {
                 if let Some(c) = cursor
                     && !selected
                 {
-                    let p = m.to_screen(c) + Vec2::splat(m.points_per_unit / 2.0);
+                    let p = m.center_to_screen(c);
                     if self.prefs.crosshair_lines {
                         let s = stroke(1.0, t.crosshair);
                         painter.hline(screen.x_range(), p.y, s);
@@ -465,7 +495,8 @@ impl CrosshairOverlay<'_> {
                     if let (OverlayPhase::Dragging { .. }, Some(sel), true) =
                         (&state.phase, selection, self.prefs.show_dimensions)
                     {
-                        let text = format!("{} × {} px", sel.width(), sel.height());
+                        let (w, h) = physical_size(sel, &displays);
+                        let text = dimension_badge(w, h);
                         badge(
                             &painter,
                             p + vec2(14.0, -14.0),
@@ -643,6 +674,18 @@ enum BarChoice {
     Redo,
 }
 
+/// Each display's global rect and frame pixels per desktop unit.
+pub fn display_scales(desktop: &FrozenDesktop) -> Vec<(Rect, f32)> {
+    desktop
+        .displays()
+        .iter()
+        .map(|d| {
+            let k = d.frame.width() as f32 / d.info.rect.width().max(1) as f32;
+            (d.info.rect, k)
+        })
+        .collect()
+}
+
 /// Dims `screen` except `hole` (all of it without one).
 fn draw_scrim(painter: &egui::Painter, screen: ERect, hole: Option<ERect>, color: Color32) {
     let Some(h) = hole.filter(|h| h.is_positive()) else {
@@ -696,6 +739,26 @@ mod tests {
         let m = DesktopMapping::new(Rect::new(0, 0, 10, 10), false, f32::NAN);
         assert_eq!(m.points_per_unit, 1.0);
         assert_eq!(m.to_global(pos2(f32::INFINITY, 3.5))[1], 3);
+    }
+
+    #[test]
+    fn fractional_scales_put_the_crosshair_on_the_reported_pixel() {
+        let base = DesktopMapping::new(Rect::new(-1366, -200, 3840, 2160), false, 1.0);
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let m = base.with_pixels_per_point(ppp);
+            for p in [[-1366, -200], [0, 0], [1, 1], [997, 13], [3839, 2159]] {
+                assert_eq!(m.to_global(m.to_screen(p)), p, "corner {p:?} @ {ppp}");
+                assert_eq!(
+                    m.to_global(m.center_to_screen(p)),
+                    p,
+                    "centre {p:?} @ {ppp}"
+                );
+            }
+        }
+        // macOS reports points: the scale does not change the mapping.
+        let mac = DesktopMapping::new(Rect::new(0, 0, 1440, 900), true, 2.0);
+        assert_eq!(mac.to_screen([100, 50]), pos2(100.0, 50.0));
+        assert_eq!(mac.with_pixels_per_point(1.0), mac);
     }
 
     #[test]

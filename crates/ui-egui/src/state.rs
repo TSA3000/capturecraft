@@ -73,6 +73,14 @@ impl CaptureHud {
             CaptureTab::Video => &self.video.capture,
         }
     }
+
+    pub fn current_mut(&mut self) -> &mut CaptureSettings {
+        match self.tab {
+            CaptureTab::AllInOne => &mut self.all_in_one,
+            CaptureTab::Image => &mut self.image,
+            CaptureTab::Video => &mut self.video.capture,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,13 +572,14 @@ pub enum ToolId {
     Highlighter,
     Blur,
     Magnify,
+    Spotlight,
     SmartMove,
     Simplify,
     Crop,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 16] = [
+    pub const ALL: [ToolId; 17] = [
         ToolId::Move,
         ToolId::Arrow,
         ToolId::Text,
@@ -584,6 +593,7 @@ impl ToolId {
         ToolId::Highlighter,
         ToolId::Blur,
         ToolId::Magnify,
+        ToolId::Spotlight,
         ToolId::SmartMove,
         ToolId::Simplify,
         ToolId::Crop,
@@ -604,6 +614,7 @@ impl ToolId {
             ToolId::Highlighter => "Highlighter",
             ToolId::Blur => "Blur",
             ToolId::Magnify => "Magnify",
+            ToolId::Spotlight => "Spotlight",
             ToolId::SmartMove => "Smart Move",
             ToolId::Simplify => "Simplify",
             ToolId::Crop => "Crop",
@@ -664,6 +675,7 @@ impl Default for ToolbarState {
             ToolId::Step,
             ToolId::Blur,
             ToolId::Magnify,
+            ToolId::Spotlight,
             ToolId::CutOut,
             ToolId::Crop,
         ];
@@ -1107,6 +1119,31 @@ pub enum CanvasGesture {
         from: f64,
         to: f64,
     },
+    /// A gizmo resize handle; `local` is the pointer in the node's
+    /// unrotated frame.
+    Resize {
+        id: NodeId,
+        handle: ResizeHandle,
+        local: Point,
+    },
+    /// The gizmo's rotation handle, canvas space.
+    Rotate {
+        id: NodeId,
+        from: Point,
+        to: Point,
+    },
+    /// The yellow corner-radius diamond.
+    CornerRadius {
+        id: NodeId,
+        radius: f32,
+    },
+    /// A rounded shadow frame's margin handle on `side`; `delta` in canvas
+    /// pixels since the drag began at margin `start`.
+    FrameMargin {
+        side: ResizeHandle,
+        start: f32,
+        delta: [f32; 2],
+    },
 }
 
 impl Default for CanvasViewState {
@@ -1322,6 +1359,11 @@ pub struct TrayItem {
     pub file_path: Option<String>,
     pub captured_at: String,
     pub unsaved: bool,
+    /// `LibraryMeta::tags`, for the Library's filters.
+    pub tags: Vec<String>,
+    /// `SourceInfo::app_name` of the capture.
+    pub app_name: String,
+    pub favorite: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
