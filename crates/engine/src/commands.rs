@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use std::sync::LazyLock;
 
-use crate::{EngineError, Result, Session, edit_commands, smart_commands};
+use crate::{EngineError, Result, Session, edit_commands, smart_commands, transform_commands};
 
 pub(crate) type Run = fn(&mut Session, &Value) -> Result<Value>;
 pub(crate) type Enabled = fn(&Session) -> std::result::Result<(), String>;
@@ -150,6 +150,7 @@ static ALL: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
         .iter()
         .chain(edit_commands::REGISTRY)
         .chain(smart_commands::REGISTRY)
+        .chain(transform_commands::REGISTRY)
         .copied()
         .collect()
 });
