@@ -128,15 +128,9 @@ pub const COMMANDS_USED: &[&str] = &[
     "canvas.expandBounds",
     "smart.simplify",
     "smart.setPalette",
-];
-
-/// Engine commands the transform gizmo and the frame UI emit
-/// ([`panels::gizmo`]). Not yet part of [`COMMANDS_USED`]: fold them in
-/// once the engine registers them.
-pub const GIZMO_COMMANDS: &[&str] = &[
+    // The transform gizmo and the frame UI (`panels::gizmo`).
     "node.resize",
     "node.rotate",
-    "node.transform",
     "canvas.setBackdrop",
 ];
 

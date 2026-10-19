@@ -21,8 +21,7 @@ capturecraft-engine = { workspace = true }
 capturecraft-capture = { workspace = true }
 capturecraft-ui-egui = { workspace = true }
 photocraft-geom = { workspace = true }
-photocraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x11", "persistence"] }
 dirs = "6"
-serde_json = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
