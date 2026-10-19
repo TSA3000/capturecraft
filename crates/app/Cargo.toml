@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft-app"
-version = "0.1.0"
+version.workspace = true
 description = "CaptureCraft desktop app on eframe + wgpu: hosts the editor, the floating capture HUD and the crosshair overlay"
 edition.workspace = true
 # The layered crates declare 1.95.

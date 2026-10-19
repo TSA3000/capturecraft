@@ -1,3 +1,22 @@
+# v0.24.1
+
+## Changes
+
+- **Text toolbar while typing**: the floating toolbar stays while you type in a text or
+  callout. Change the font, size, colour, B / I / U or alignment and keep typing; a new text
+  is added with what you picked.
+- **Callouts type like text boxes**: a callout you draw opens for typing straight away, a
+  click with the Callout tool types into an existing one, and its padding has a yellow
+  diamond in the top-right corner (the corner radius keeps its diamond top left).
+- **Eyedropper zoom**: while picking, a magnifier next to the pointer shows the pixels around
+  it (the sampled one framed), with a swatch, the hex value and `R:… G:… B:…`. The pointer
+  becomes a drop filled with the colour under it, its tip on the exact pixel.
+- **Fix: Help › About** showed version 0.1.0; it now shows the real version.
+
+## Upgrading
+
+- Install over v0.24.0; nothing else to do.
+
 # v0.24.0
 
 ## Changes

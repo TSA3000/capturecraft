@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft"
-version = "0.24.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -48,6 +48,8 @@ resolver = "3"
 members = [".", "crates/*", "xtask"]
 
 [workspace.package]
+# The one CaptureCraft version: every crate (and Help › About) has it.
+version = "0.24.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

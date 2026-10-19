@@ -145,10 +145,10 @@ Layout, top to bottom:
 | Tool or feature | How it works |
 |-----------------|--------------|
 | Arrow | Drag from tail to tip; drag the green handle to bend it |
-| Callout | Click for a default bubble or drag its size; the yellow diamond aims the tail, the `+` adds another; double-click it (or use Properties) to type its text |
+| Callout | Click for a default bubble or drag its size, then type; the yellow diamond aims the tail, the `+` adds another; click it with the Callout tool (or double-click it) to type its text, with the same toolbar as Text |
 | Step | Click to drop the next number (1, 2, 3 / A, B, C / I, II, III) |
 | Text | Click to type (or drag a box); Enter finishes, Shift+Enter breaks the line; double-click a text to edit it. A selected text shows a floating toolbar (colour, eyedropper, font, size, B / I / U, alignment) and a gizmo with a green rotation knob and a yellow padding diamond |
-| Eyedropper | The pipette next to a colour shows the colour under the pointer (`R:… G:… B:…`); click to take it, Esc cancels |
+| Eyedropper | The pipette next to a colour turns the pointer into a drop of the colour under it, with a magnifier, the hex and `R:… G:… B:…` values; click to take it, Esc cancels |
 | Shape | Drag a rectangle or ellipse, or click the corners of a polygon (double-click or Enter closes it), in the selected Quick Style |
 | Highlight | Drag over text for a translucent marker band (yellow, green, pink or blue) |
 | Blur | Drag over private details to blur or pixelate them, non-destructively: pick one of four blur or four pixelate Quick Styles, or set Type and Intensity (1–100); both also change the selected blurs |

@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft-compositor"
-version = "0.1.0"
+version.workspace = true
 description = "CaptureCraft compositor: tile-parallel CPU reference oracle and wgpu compositor (pixel parity) for annotation scenes"
 edition.workspace = true
 # photocraft-raster, -doc and -vector declare 1.95.

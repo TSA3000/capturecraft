@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.24.1 (2026-10-20)
+
+- Text toolbar stays while a text or callout is typed; a new text takes the picked format.
+- Callouts: open for typing when drawn, the Callout tool clicks into their text, padding
+  diamond.
+- Eyedropper: magnifier (15 × 15 pixels, hex and RGB) and a drop pointer in the sampled
+  colour.
+- Fix: Help › About shows the app version; every crate takes the workspace version.
+- Engine: `annotation.addText` takes `underline`, `valign` and `padding`.
+
 ## v0.24.0 (2026-10-20)
 
 - Floating text toolbar (colour, eyedropper, font, size, B / I / U, alignment incl. justify)

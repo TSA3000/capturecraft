@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft-ocr"
-version = "0.1.0"
+version.workspace = true
 description = "CaptureCraft on-device UI analysis: UI segmentation, background healing, palettes and text recognition (Smart Move, Simplify, Grab Text)"
 edition.workspace = true
 # photocraft-algo and photocraft-cms (via photocraft-color) declare 1.95.
