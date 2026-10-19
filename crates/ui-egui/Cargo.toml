@@ -1,19 +1,23 @@
 [package]
 name = "capturecraft-ui-egui"
 version = "0.1.0"
-description = "CaptureCraft egui shell: capture HUD and the five-zone editor (thin: every action is an engine command)"
+description = "CaptureCraft egui shell: capture HUD, crosshair overlay and the five-zone editor (thin: every action is an engine command)"
 edition.workspace = true
-rust-version.workspace = true
+# The engine, capture and compositor crates declare 1.95.
+rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 
-# egui/eframe join when the views move here from the app crate; state.rs
-# is plain serializable data so it can be tested and persisted without them.
 [dependencies]
 capturecraft-format = { workspace = true }
-photocraft-geom = { workspace = true }
-serde = { workspace = true }
-
-[dev-dependencies]
 capturecraft-engine = { workspace = true }
+capturecraft-capture = { workspace = true }
+# The wgpu compositor draws the editor canvas into a texture egui shows.
+capturecraft-compositor = { workspace = true, features = ["gpu"] }
+photocraft-geom = { workspace = true }
+# Same UI stack as storytold/photocraft. eframe re-exports egui-wgpu and its
+# wgpu, which is the major version the compositor is built against.
+egui = { version = "0.33.3", default-features = false, features = ["default_fonts"] }
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+serde = { workspace = true }
 serde_json = { workspace = true }

@@ -8,18 +8,27 @@
 //! here: the engine owns it, and the UI refers to documents by id and to
 //! annotations by [`NodeId`]. Colours and sizes of the chrome come from
 //! `theme::Tokens`, selected by [`SidebarState::theme`].
+//!
+//! Names used by the design docs: `CaptureHudState` is [`CaptureHud`],
+//! `ActiveTool` is [`ToolId`], `QuickStylePreset` is [`QuickStyle`] (with
+//! its [`StylePreset`]) and `RecentTrayItem` is [`TrayItem`].
 
 use capturecraft_format::{
-    Axis, Color, DropShadow, Fill, FontSpec, HeadStyle, NodeId, Offset, Stroke,
+    Axis, Color, DropShadow, Fill, FontSpec, HeadStyle, NodeId, Numbering, Offset, Stroke,
 };
-use photocraft_geom::Size;
+use photocraft_geom::{Point, Rect, Size};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppState {
     pub hud: CaptureHud,
     pub crosshair: CrosshairPrefs,
+    /// The crosshair session in progress; starts fresh on every capture.
+    /// The control channel serializes it on its own.
+    #[serde(skip)]
+    pub overlay: CrosshairOverlayState,
     pub editor: EditorState,
 }
 
@@ -302,9 +311,10 @@ impl Default for CapturePreset {
 #[serde(default)]
 pub struct CrosshairPrefs {
     pub loupe: bool,
-    /// Integer zoom of the loupe (nearest neighbour, pixel grid).
+    /// Points per desktop pixel in the loupe (nearest neighbour, pixel grid).
     pub loupe_zoom: u8,
-    pub loupe_size_px: f32,
+    /// The loupe shows `2 × radius + 1` pixels square (7 → 15 × 15).
+    pub loupe_radius: u32,
     pub color_code: ColorCode,
     /// `W × H` next to the cursor while dragging.
     pub show_dimensions: bool,
@@ -318,13 +328,25 @@ impl Default for CrosshairPrefs {
     fn default() -> Self {
         Self {
             loupe: true,
-            loupe_zoom: 8,
-            loupe_size_px: 120.0,
+            loupe_zoom: 10,
+            loupe_radius: 7,
             color_code: ColorCode::Hex,
             show_dimensions: true,
             snap_to_windows: true,
             crosshair_lines: true,
         }
+    }
+}
+
+impl CrosshairPrefs {
+    /// Loupe edge in desktop pixels (radius capped as `FrozenDesktop::loupe` caps it).
+    pub fn loupe_cells(&self) -> u32 {
+        2 * self.loupe_radius.min(64) + 1
+    }
+
+    /// Loupe edge in points.
+    pub fn loupe_side(&self) -> f32 {
+        self.loupe_cells() as f32 * f32::from(self.loupe_zoom.max(1))
     }
 }
 
@@ -336,8 +358,176 @@ pub enum ColorCode {
     Rgb,
 }
 
+/// One crosshair session over the frozen desktop. Coordinates are global
+/// desktop units (`capturecraft_capture` docs), not egui points.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrosshairOverlayState {
+    pub phase: OverlayPhase,
+    pub cursor: Option<[i32; 2]>,
+    /// What a click would capture right now.
+    pub hover: Option<HoverTarget>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OverlayPhase {
+    #[default]
+    Hovering,
+    Dragging {
+        from: [i32; 2],
+        to: [i32; 2],
+    },
+    /// Locked; the action bar is up.
+    Selected {
+        rect: Rect,
+        source: SelectionSource,
+    },
+}
+
+impl OverlayPhase {
+    /// The rectangle a drag covers, both corner pixels included.
+    pub fn drag_rect(from: [i32; 2], to: [i32; 2]) -> Rect {
+        Rect::new(
+            from[0].min(to[0]),
+            from[1].min(to[1]),
+            from[0].max(to[0]).saturating_add(1),
+            from[1].max(to[1]).saturating_add(1),
+        )
+    }
+
+    /// The selection on screen: the dragged rect or the locked one.
+    pub fn selection(&self) -> Option<Rect> {
+        match self {
+            OverlayPhase::Dragging { from, to } => Some(Self::drag_rect(*from, *to)),
+            OverlayPhase::Selected { rect, .. } => Some(*rect),
+            OverlayPhase::Hovering => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SelectionSource {
+    #[default]
+    Region,
+    /// A window or a control inside it (`element`).
+    Window {
+        id: u64,
+        element: bool,
+    },
+    Display {
+        id: u32,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HoverTarget {
+    pub rect: Rect,
+    pub source: SelectionSource,
+    /// `App — Title`, the element role, or the monitor name.
+    pub label: String,
+}
+
 // ---------------------------------------------------------------------------
 // Editor
+
+/// Tool settings the Property Inspector shows besides the style.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolOptions {
+    pub step: StepOptions,
+    pub callout: CalloutOptions,
+    pub cut_out: CutOutOptions,
+    pub simplify: SimplifyOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepOptions {
+    pub numbering: Numbering,
+    pub sequence: String,
+}
+
+impl Default for StepOptions {
+    fn default() -> Self {
+        Self {
+            numbering: Numbering::Decimal,
+            sequence: capturecraft_format::DEFAULT_SEQUENCE.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalloutOptions {
+    /// Tail bend of new tails, `-1..=1` (0 = straight).
+    pub tail_curve: f32,
+    pub tail_width: f32,
+}
+
+impl Default for CalloutOptions {
+    fn default() -> Self {
+        Self {
+            tail_curve: 0.0,
+            tail_width: 24.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CutOutOptions {
+    pub axis: Axis,
+    pub torn: bool,
+    /// `0..=1`, gain per noise octave.
+    pub roughness: f32,
+    pub amplitude_px: f32,
+}
+
+impl Default for CutOutOptions {
+    fn default() -> Self {
+        Self {
+            axis: Axis::Horizontal,
+            torn: false,
+            roughness: 0.5,
+            amplitude_px: 8.0,
+        }
+    }
+}
+
+impl CutOutOptions {
+    /// `canvas.cutOut` parameters removing `[a, b)` (either order).
+    pub fn params(&self, a: f64, b: f64) -> Value {
+        let mut p = json!({
+            "axis": self.axis,
+            "start": a.min(b),
+            "end": a.max(b),
+            "edge": if self.torn { "torn" } else { "straight" },
+        });
+        if self.torn {
+            p["roughness"] = json!(self.roughness);
+            p["amplitude_px"] = json!(self.amplitude_px);
+        }
+        p
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SimplifyOptions {
+    /// `smart.simplify` palette name.
+    pub palette: String,
+}
+
+impl Default for SimplifyOptions {
+    fn default() -> Self {
+        Self {
+            palette: "match".into(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -352,6 +542,8 @@ pub struct EditorState {
     pub tray: RecentTray,
     /// Zone 5, toggled over the canvas.
     pub library: LibraryState,
+    /// Per-tool options that are not style (numbering, cut-out edge, ...).
+    pub tools: ToolOptions,
 }
 
 /// Editor tools, in toolbar order.
@@ -422,6 +614,8 @@ impl ToolId {
     /// tools wired so far.
     pub fn command(self) -> Option<&'static str> {
         match self {
+            ToolId::Move => Some("annotation.move"),
+            ToolId::Arrow => Some("annotation.addArrow"),
             ToolId::Step => Some("annotation.addStep"),
             ToolId::Callout => Some("annotation.addCallout"),
             ToolId::CutOut => Some("canvas.cutOut"),
@@ -494,8 +688,92 @@ pub struct SidebarState {
     pub quick_styles: QuickStyles,
     /// Expanded property sections below the Quick Styles grid.
     pub expanded: Vec<PropertySection>,
-    /// `theme::ThemeKind` name (PhotoCraft themes).
+    /// `theme::ThemeKind` name.
     pub theme: String,
+    /// Property Inspector edits not yet saved as a Quick Style; `None`
+    /// shows the selected Quick Style.
+    pub draft: Option<StyleDraft>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StyleDraft {
+    pub tool: ToolId,
+    pub preset: StylePreset,
+}
+
+impl Default for StyleDraft {
+    fn default() -> Self {
+        Self {
+            tool: ToolId::Arrow,
+            preset: StylePreset::default(),
+        }
+    }
+}
+
+impl SidebarState {
+    /// The style the next `tool` annotation gets and the inspector shows.
+    pub fn effective_style(&self, tool: ToolId) -> Option<StylePreset> {
+        match &self.draft {
+            Some(d) if d.tool == tool => Some(d.preset.clone()),
+            _ => self.quick_styles.selected(tool).map(|q| q.preset.clone()),
+        }
+    }
+
+    /// The draft differs from the selected Quick Style ("+ Add Quick Style").
+    pub fn draft_is_new(&self, tool: ToolId) -> bool {
+        match &self.draft {
+            Some(d) if d.tool == tool => {
+                self.quick_styles.selected(tool).map(|q| &q.preset) != Some(&d.preset)
+            }
+            _ => false,
+        }
+    }
+
+    /// Edits the inspector's style for `tool`, starting a draft from the
+    /// selected Quick Style when there is none yet.
+    pub fn edit_draft(&mut self, tool: ToolId, f: impl FnOnce(&mut StylePreset)) {
+        let mut preset = self.effective_style(tool).unwrap_or_default();
+        f(&mut preset);
+        self.draft = Some(StyleDraft { tool, preset });
+    }
+
+    /// Saves the draft as a user Quick Style and selects it.
+    pub fn save_draft(&mut self, name: &str) -> bool {
+        let Some(d) = self.draft.take() else {
+            return false;
+        };
+        let tools = &mut self.quick_styles.tools;
+        let i = match tools.iter().position(|t| t.tool == d.tool) {
+            Some(i) => i,
+            None => {
+                tools.push(ToolStyles {
+                    tool: d.tool,
+                    styles: Vec::new(),
+                    selected: None,
+                });
+                tools.len() - 1
+            }
+        };
+        let Some(t) = tools.get_mut(i) else {
+            return false;
+        };
+        let n = (0..)
+            .find(|n| {
+                let id = format!("user.{}.{n}", d.tool.label().to_lowercase());
+                !t.styles.iter().any(|s| s.id == id)
+            })
+            .unwrap_or(0);
+        t.styles.push(QuickStyle {
+            id: format!("user.{}.{n}", d.tool.label().to_lowercase()),
+            name: name.into(),
+            builtin: false,
+            hidden: false,
+            preset: d.preset,
+        });
+        t.selected = Some(t.styles.len() - 1);
+        true
+    }
 }
 
 impl Default for SidebarState {
@@ -506,6 +784,7 @@ impl Default for SidebarState {
             quick_styles: QuickStyles::default(),
             expanded: vec![PropertySection::Style, PropertySection::Shadow],
             theme: "dark".into(),
+            draft: None,
         }
     }
 }
@@ -676,6 +955,44 @@ pub struct StylePreset {
     pub corner_radius: Option<f32>,
 }
 
+impl StylePreset {
+    /// The preset as `annotation.setStyle` fields: `None` fields are left
+    /// out (keep), so applying a preset never clears what it does not set.
+    pub fn style_params(&self) -> Map<String, Value> {
+        fn val<T: Serialize>(v: &T) -> Option<Value> {
+            serde_json::to_value(v).ok()
+        }
+        let fields = [
+            ("stroke", self.stroke.as_ref().and_then(val)),
+            (
+                "fill",
+                (!matches!(self.fill, Fill::None))
+                    .then(|| val(&self.fill))
+                    .flatten(),
+            ),
+            ("shadow", self.shadow.as_ref().and_then(val)),
+            ("opacity", val(&self.opacity)),
+            ("font", self.font.as_ref().and_then(val)),
+            ("text_color", self.text_color.as_ref().and_then(val)),
+            ("arrow_start", self.arrow_start.as_ref().and_then(val)),
+            ("arrow_end", self.arrow_end.as_ref().and_then(val)),
+            ("corner_radius", self.corner_radius.as_ref().and_then(val)),
+        ];
+        fields
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.to_string(), v?)))
+            .collect()
+    }
+
+    /// Solid fill colour, if any.
+    pub fn fill_color(&self) -> Option<Color> {
+        match self.fill {
+            Fill::Solid { color } => Some(color),
+            _ => None,
+        }
+    }
+}
+
 impl Default for StylePreset {
     fn default() -> Self {
         Self {
@@ -704,6 +1021,92 @@ pub struct CanvasViewState {
     #[serde(skip)]
     pub hovered: Option<NodeId>,
     pub resize: CanvasResize,
+    /// What fills the new margin when the canvas grows.
+    pub expand_backdrop: ExpandBackdrop,
+    /// Pointer gesture in progress; never persisted.
+    #[serde(skip)]
+    pub gesture: Option<CanvasGesture>,
+    /// The next canvas click samples a colour into the inspector.
+    #[serde(skip)]
+    pub eyedropper: Option<ColorTarget>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpandBackdrop {
+    #[default]
+    Transparent,
+    White,
+    /// The capture's own edge colour.
+    Auto,
+}
+
+impl ExpandBackdrop {
+    pub const ALL: [ExpandBackdrop; 3] = [
+        ExpandBackdrop::Transparent,
+        ExpandBackdrop::White,
+        ExpandBackdrop::Auto,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExpandBackdrop::Transparent => "Transparent",
+            ExpandBackdrop::White => "White",
+            ExpandBackdrop::Auto => "Match edge",
+        }
+    }
+
+    /// The `background` parameter of `canvas.expandBounds`.
+    pub fn param(self) -> Value {
+        match self {
+            ExpandBackdrop::Transparent => json!({ "kind": "transparent" }),
+            ExpandBackdrop::White => json!({ "kind": "solid", "color": Color::WHITE }),
+            ExpandBackdrop::Auto => json!({ "kind": "auto" }),
+        }
+    }
+}
+
+/// Which inspector colour the eyedropper fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorTarget {
+    Fill,
+    Stroke,
+    Text,
+}
+
+/// A drag on the canvas, in canvas pixels. The document changes once, by
+/// one command, when the drag ends; until then the canvas draws a preview.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CanvasGesture {
+    Pan,
+    /// Drawing a new annotation with the active tool.
+    Draw {
+        from: Point,
+        to: Point,
+    },
+    MoveSelection {
+        from: Point,
+        to: Point,
+    },
+    CalloutTail {
+        id: NodeId,
+        index: usize,
+        to: Point,
+    },
+    /// Dragging the "+" handle out of a callout adds a tail.
+    NewTail {
+        id: NodeId,
+        to: Point,
+    },
+    ArrowBend {
+        id: NodeId,
+        to: Point,
+    },
+    /// Cut Out strip between `from` and `to` along `ToolOptions::cut_out.axis`.
+    CutOut {
+        from: f64,
+        to: f64,
+    },
 }
 
 impl Default for CanvasViewState {
@@ -715,6 +1118,9 @@ impl Default for CanvasViewState {
             selection: Vec::new(),
             hovered: None,
             resize: CanvasResize::default(),
+            expand_backdrop: ExpandBackdrop::default(),
+            gesture: None,
+            eyedropper: None,
         }
     }
 }
@@ -799,7 +1205,7 @@ fn round_px(v: f32) -> i32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResizeHandle {
     N,
@@ -838,6 +1244,11 @@ pub struct RecentTray {
     pub scroll_px: f32,
     /// Items kept before the oldest saved ones drop off.
     pub max_items: usize,
+    /// Ctrl/Shift multi-selection, for Combine Images.
+    pub selected: Vec<String>,
+    /// Where a Shift+Click range starts.
+    #[serde(skip)]
+    pub anchor: Option<String>,
 }
 
 impl Default for RecentTray {
@@ -849,6 +1260,8 @@ impl Default for RecentTray {
             active: None,
             scroll_px: 0.0,
             max_items: 50,
+            selected: Vec::new(),
+            anchor: None,
         }
     }
 }
@@ -861,11 +1274,39 @@ impl RecentTray {
         while self.items.len() > self.max_items {
             match self.items.iter().rposition(|i| !i.unsaved) {
                 Some(i) => {
-                    self.items.remove(i);
+                    let gone = self.items.remove(i);
+                    self.selected.retain(|d| *d != gone.doc_id);
                 }
                 None => break,
             }
         }
+    }
+
+    /// Plain click: just this item. Ctrl/Cmd: toggle it. Shift: the range
+    /// from the anchor.
+    pub fn click(&mut self, doc_id: &str, toggle: bool, range: bool) {
+        let pos = |id: &str| self.items.iter().position(|i| i.doc_id == id);
+        if range && let (Some(a), Some(b)) = (self.anchor.as_deref().and_then(pos), pos(doc_id)) {
+            let (lo, hi) = (a.min(b), a.max(b));
+            self.selected = self
+                .items
+                .get(lo..=hi)
+                .unwrap_or_default()
+                .iter()
+                .map(|i| i.doc_id.clone())
+                .collect();
+            return;
+        }
+        if toggle {
+            if let Some(i) = self.selected.iter().position(|d| d == doc_id) {
+                self.selected.remove(i);
+            } else {
+                self.selected.push(doc_id.into());
+            }
+        } else {
+            self.selected = vec![doc_id.into()];
+        }
+        self.anchor = Some(doc_id.into());
     }
 }
 
@@ -888,8 +1329,21 @@ pub struct TrayItem {
 pub enum MediaKind {
     #[default]
     Image,
+    /// Scrolling capture.
+    Panorama,
     Video,
     Gif,
+}
+
+impl MediaKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            MediaKind::Image => "Image",
+            MediaKind::Panorama => "Panorama",
+            MediaKind::Video => "Video",
+            MediaKind::Gif => "GIF",
+        }
+    }
 }
 
 /// Searchable grid of past captures (from each document's capture metadata).
@@ -1052,6 +1506,82 @@ mod tests {
             ..d
         };
         assert_eq!(d.preview().0, Size::new(1, 80));
+    }
+
+    #[test]
+    fn overlay_drag_rect_includes_both_corners() {
+        let r = OverlayPhase::drag_rect([10, 20], [4, 5]);
+        assert_eq!(r, Rect::new(4, 5, 11, 21));
+        let p = OverlayPhase::Dragging {
+            from: [0, 0],
+            to: [0, 0],
+        };
+        assert_eq!(p.selection().map(|r| (r.width(), r.height())), Some((1, 1)));
+        assert_eq!(OverlayPhase::Hovering.selection(), None);
+    }
+
+    #[test]
+    fn style_params_leave_out_unset_fields() {
+        let p = StylePreset {
+            stroke: Some(Stroke::default()),
+            ..StylePreset::default()
+        }
+        .style_params();
+        assert!(p.contains_key("stroke") && p.contains_key("opacity"));
+        assert!(!p.contains_key("fill") && !p.contains_key("shadow"));
+        let p = CutOutOptions {
+            torn: true,
+            ..CutOutOptions::default()
+        }
+        .params(50.0, 20.0);
+        assert_eq!(
+            (p["start"].as_f64(), p["end"].as_f64()),
+            (Some(20.0), Some(50.0))
+        );
+        assert_eq!(p["edge"], "torn");
+    }
+
+    #[test]
+    fn drafts_become_quick_styles() {
+        let mut s = SidebarState::default();
+        assert!(!s.draft_is_new(ToolId::Arrow));
+        let mut preset = s.effective_style(ToolId::Arrow).unwrap();
+        preset.opacity = 0.5;
+        s.draft = Some(StyleDraft {
+            tool: ToolId::Arrow,
+            preset: preset.clone(),
+        });
+        assert!(s.draft_is_new(ToolId::Arrow));
+        assert!(!s.draft_is_new(ToolId::Step));
+        assert!(s.save_draft("Faded"));
+        assert_eq!(
+            s.quick_styles.selected(ToolId::Arrow).unwrap().preset,
+            preset
+        );
+        assert_eq!(
+            s.quick_styles.selected(ToolId::Arrow).unwrap().id,
+            "user.arrow.0"
+        );
+        assert!(s.draft.is_none() && !s.save_draft("again"));
+    }
+
+    #[test]
+    fn tray_selection_by_click_toggle_and_range() {
+        let mut t = RecentTray::default();
+        for id in ["a", "b", "c", "d"] {
+            t.push(TrayItem {
+                doc_id: id.into(),
+                ..TrayItem::default()
+            });
+        }
+        // Newest first: d, c, b, a.
+        t.click("c", false, false);
+        t.click("a", false, true);
+        assert_eq!(t.selected, ["c", "b", "a"]);
+        t.click("b", true, false);
+        assert_eq!(t.selected, ["c", "a"]);
+        t.click("d", false, false);
+        assert_eq!(t.selected, ["d"]);
     }
 
     #[test]

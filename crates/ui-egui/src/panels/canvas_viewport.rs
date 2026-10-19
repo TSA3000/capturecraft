@@ -1,0 +1,1280 @@
+//! Zone 3: the interactive canvas.
+//!
+//! The document is rendered by `capturecraft-compositor` from
+//! `capturecraft_engine::render::render_scene`, on the GPU into a wgpu
+//! texture egui samples directly ([`GpuCanvas`]), or by the CPU oracle into
+//! an egui texture where no wgpu device exists ([`CpuCanvas`]). The widget
+//! draws it over a transparency checkerboard with pan (middle mouse or
+//! Space + drag, the wheel) and cursor-centred zoom (Ctrl + wheel, pinch),
+//! and on top of it:
+//!
+//! - eight expansion handles outside the canvas edge; dragging one out
+//!   previews the new bounds and commits `canvas.expandBounds`;
+//! - selection outlines, yellow diamond callout tail handles (drag to move,
+//!   drag the `+` out of a callout to add a tail), and the arrow bend
+//!   handle (drag to curve, double-click to straighten);
+//! - the Cut Out guide: a full-width or full-height band with seam lines
+//!   showing the strip the drag would remove.
+//!
+//! Every drag changes the document once, by one command, when it ends.
+//! Geometry questions (which node is under the cursor, where an arrow's
+//! middle is) are answered by the engine.
+
+use capturecraft_compositor::{CpuCompositor, GpuCompositor, GpuError, RenderScene};
+use capturecraft_engine::DocState;
+use capturecraft_engine::edit_commands::{arrow_midpoint, node_at};
+use capturecraft_format::{Annotation, Axis, Color, NodeId, RectF};
+use eframe::egui_wgpu::{self, wgpu};
+use egui::{
+    Align2, Color32, ColorImage, CursorIcon, FontId, Id, Key, PointerButton, Pos2, Rect as ERect,
+    Response, Sense, Shape, StrokeKind, TextureHandle, TextureId, TextureOptions, Ui, Vec2, pos2,
+    vec2,
+};
+use photocraft_geom::{Point, Size};
+use serde_json::{Value, json};
+
+use crate::UiIntent;
+use crate::state::{
+    CanvasGesture, ColorTarget, EditorState, ExpandBackdrop, ResizeDrag, ResizeHandle, StylePreset,
+    ToolId, Zoom,
+};
+use crate::theme::{Tokens, stroke};
+
+/// Zoom limits, percent.
+pub const MIN_ZOOM: f32 = 5.0;
+pub const MAX_ZOOM: f32 = 3200.0;
+/// Space kept around the canvas in Fit, points (room for the handles).
+const FIT_MARGIN: f32 = 48.0;
+/// Pick tolerance around annotations, points.
+const PICK_SLOP: f32 = 4.0;
+
+// ---------------------------------------------------------------------------
+// Presentation
+
+/// A rendered document ready for egui.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanvasImage {
+    pub texture: TextureId,
+    /// Rendered size in canvas pixels.
+    pub size: [u32; 2],
+    /// Part of the texture holding it (textures are allocated at the
+    /// pre-Cut-Out size and reused).
+    pub uv: ERect,
+}
+
+/// The wgpu compositor writing into a texture egui shows, sharing eframe's
+/// device and queue.
+pub struct GpuCanvas {
+    compositor: GpuCompositor,
+    target: Option<Target>,
+    last: Option<(RenderScene, CanvasImage)>,
+}
+
+struct Target {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    id: TextureId,
+    size: (u32, u32),
+}
+
+impl GpuCanvas {
+    pub fn new(rs: &egui_wgpu::RenderState) -> Result<Self, GpuError> {
+        Ok(Self {
+            compositor: GpuCompositor::new(&rs.device, &rs.queue)?,
+            target: None,
+            last: None,
+        })
+    }
+
+    /// Renders `scene` (skipped when it equals the last one; the compositor
+    /// also caches per node revision).
+    pub fn render(
+        &mut self,
+        rs: &egui_wgpu::RenderState,
+        scene: &RenderScene,
+    ) -> Result<CanvasImage, GpuError> {
+        if let Some((s, img)) = &self.last
+            && s == scene
+        {
+            return Ok(*img);
+        }
+        let need = (scene.width.max(1), scene.height.max(1));
+        let max = rs.device.limits().max_texture_dimension_2d;
+        if need.0 > max || need.1 > max {
+            return Err(GpuError::Validation(format!(
+                "{}×{} is larger than this GPU's {max} px textures",
+                need.0, need.1
+            )));
+        }
+        let fits = self
+            .target
+            .as_ref()
+            .is_some_and(|t| t.size.0 >= need.0 && t.size.1 >= need.1);
+        if !fits {
+            let texture = rs.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capturecraft canvas"),
+                size: wgpu::Extent3d {
+                    width: need.0,
+                    height: need.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                // Premultiplied, sRGB-encoded values: what egui-wgpu's
+                // shader expects from a texture sample.
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut renderer = rs.renderer.write();
+            let id = match self.target.take() {
+                Some(old) => {
+                    renderer.update_egui_texture_from_wgpu_texture(
+                        &rs.device,
+                        &view,
+                        wgpu::FilterMode::Linear,
+                        old.id,
+                    );
+                    old.texture.destroy();
+                    old.id
+                }
+                None => {
+                    renderer.register_native_texture(&rs.device, &view, wgpu::FilterMode::Linear)
+                }
+            };
+            self.target = Some(Target {
+                texture,
+                view,
+                id,
+                size: need,
+            });
+        }
+        let Some(t) = &self.target else {
+            return Err(GpuError::Validation("no canvas texture".into()));
+        };
+        let (w, h) = self.compositor.render_to_texture(scene, &t.view)?;
+        let img = CanvasImage {
+            texture: t.id,
+            size: [w, h],
+            uv: ERect::from_min_max(
+                Pos2::ZERO,
+                pos2(w as f32 / t.size.0 as f32, h as f32 / t.size.1 as f32),
+            ),
+        };
+        self.last = Some((scene.clone(), img));
+        Ok(img)
+    }
+
+    /// Releases the texture (call before dropping with the render state).
+    pub fn free(&mut self, rs: &egui_wgpu::RenderState) {
+        if let Some(t) = self.target.take() {
+            rs.renderer.write().free_texture(&t.id);
+        }
+        self.last = None;
+    }
+}
+
+/// The CPU oracle into an egui texture (glow backend, no adapter, headless
+/// snapshots).
+#[derive(Default)]
+pub struct CpuCanvas {
+    texture: Option<TextureHandle>,
+    last: Option<(RenderScene, CanvasImage)>,
+}
+
+impl CpuCanvas {
+    pub fn render(&mut self, ctx: &egui::Context, scene: &RenderScene) -> Option<CanvasImage> {
+        if let Some((s, img)) = &self.last
+            && s == scene
+        {
+            return Some(*img);
+        }
+        let frame = CpuCompositor::render(scene).ok()?;
+        let pixels = frame
+            .pixels
+            .iter()
+            .map(|p| {
+                let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                Color32::from_rgba_premultiplied(c(p[0]), c(p[1]), c(p[2]), c(p[3]))
+            })
+            .collect();
+        let image = ColorImage::new([frame.width as usize, frame.height as usize], pixels);
+        let tex = match &mut self.texture {
+            Some(t) => {
+                t.set(image, TextureOptions::LINEAR);
+                t.clone()
+            }
+            None => {
+                let t = ctx.load_texture("capturecraft.canvas", image, TextureOptions::LINEAR);
+                self.texture = Some(t.clone());
+                t
+            }
+        };
+        let img = CanvasImage {
+            texture: tex.id(),
+            size: [frame.width, frame.height],
+            uv: ERect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+        };
+        self.last = Some((scene.clone(), img));
+        Some(img)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View transform
+
+/// `screen = origin + canvas × scale`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewTransform {
+    pub origin: Pos2,
+    /// Points per canvas pixel.
+    pub scale: f32,
+}
+
+impl ViewTransform {
+    /// Where `zoom` and `scroll` put a `canvas`-sized image in `view`.
+    /// Percent zoom is relative to physical pixels (100 % = 1:1 on screen);
+    /// Fit never enlarges past 100 %.
+    pub fn new(zoom: Zoom, scroll: [f32; 2], view: ERect, canvas: Size, ppp: f32) -> Self {
+        let ppp = if ppp.is_finite() && ppp > 0.0 {
+            ppp
+        } else {
+            1.0
+        };
+        let (w, h) = (canvas.width.max(1) as f32, canvas.height.max(1) as f32);
+        let scale = match zoom {
+            Zoom::Fit => {
+                let avail = (view.size() - Vec2::splat(2.0 * FIT_MARGIN)).max(Vec2::splat(1.0));
+                (avail.x / w).min(avail.y / h).min(1.0 / ppp)
+            }
+            Zoom::Percent { value } => clamp_zoom(value) / 100.0 / ppp,
+        };
+        let centred = view.center() - vec2(w, h) * scale / 2.0;
+        Self {
+            origin: centred + Vec2::from(scroll),
+            scale,
+        }
+    }
+
+    pub fn to_screen(&self, p: Point) -> Pos2 {
+        self.origin + vec2(p.x as f32, p.y as f32) * self.scale
+    }
+
+    pub fn to_canvas(&self, p: Pos2) -> Point {
+        let s = self.scale.max(f32::EPSILON);
+        let v = (p - self.origin) / s;
+        Point::new(f64::from(v.x), f64::from(v.y))
+    }
+
+    pub fn rect_to_screen(&self, r: RectF) -> ERect {
+        ERect::from_min_max(
+            self.to_screen(Point::new(r.x, r.y)),
+            self.to_screen(Point::new(r.x + r.w, r.y + r.h)),
+        )
+    }
+
+    /// Zoom percent this transform shows.
+    pub fn percent(&self, ppp: f32) -> f32 {
+        self.scale * ppp * 100.0
+    }
+}
+
+fn clamp_zoom(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(MIN_ZOOM, MAX_ZOOM)
+    } else {
+        100.0
+    }
+}
+
+/// Zoom by `factor` keeping the canvas point under `cursor` still; returns
+/// the new zoom and scroll.
+pub fn zoom_about(
+    current: &ViewTransform,
+    factor: f32,
+    cursor: Pos2,
+    view: ERect,
+    canvas: Size,
+    ppp: f32,
+) -> (Zoom, [f32; 2]) {
+    let pct = clamp_zoom(current.percent(ppp) * factor);
+    let zoom = Zoom::Percent { value: pct };
+    let fresh = ViewTransform::new(zoom, [0.0, 0.0], view, canvas, ppp);
+    let k = fresh.scale / current.scale.max(f32::EPSILON);
+    let origin = cursor - (cursor - current.origin) * k;
+    let scroll = origin - fresh.origin;
+    (zoom, [scroll.x, scroll.y])
+}
+
+// ---------------------------------------------------------------------------
+// Expansion handles
+
+/// The eight handles around `canvas` (screen rect), outside its edge.
+pub fn expand_handle_rects(canvas: ERect, t: &Tokens) -> [(ResizeHandle, ERect); 8] {
+    let g = t.expand_handle_gap + t.expand_handle_thickness / 2.0;
+    let (len, th) = (t.expand_handle_len, t.expand_handle_thickness);
+    let corner = Vec2::splat(th * 1.6);
+    let (c, r) = (canvas.center(), canvas);
+    let horiz = |y: f32| ERect::from_center_size(pos2(c.x, y), vec2(len, th));
+    let vert = |x: f32| ERect::from_center_size(pos2(x, c.y), vec2(th, len));
+    let at = |x: f32, y: f32| ERect::from_center_size(pos2(x, y), corner);
+    [
+        (ResizeHandle::N, horiz(r.min.y - g)),
+        (ResizeHandle::S, horiz(r.max.y + g)),
+        (ResizeHandle::W, vert(r.min.x - g)),
+        (ResizeHandle::E, vert(r.max.x + g)),
+        (ResizeHandle::NW, at(r.min.x - g, r.min.y - g)),
+        (ResizeHandle::NE, at(r.max.x + g, r.min.y - g)),
+        (ResizeHandle::SW, at(r.min.x - g, r.max.y + g)),
+        (ResizeHandle::SE, at(r.max.x + g, r.max.y + g)),
+    ]
+}
+
+/// Margins `[left, top, right, bottom]` a finished handle drag adds.
+pub fn expand_margins(d: &ResizeDrag) -> [i32; 4] {
+    let (size, origin) = d.preview();
+    let left = origin.x.saturating_sub(d.start_origin.x);
+    let top = origin.y.saturating_sub(d.start_origin.y);
+    let grow = |new: u32, old: u32, near: i32| {
+        (i64::from(new) - i64::from(old) - i64::from(near))
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    [
+        left,
+        top,
+        grow(size.width, d.start_size.width, left),
+        grow(size.height, d.start_size.height, top),
+    ]
+}
+
+/// `canvas.expandBounds` parameters, `None` when nothing changes.
+pub fn expand_params(d: &ResizeDrag, backdrop: ExpandBackdrop) -> Option<Value> {
+    let [left, top, right, bottom] = expand_margins(d);
+    (left != 0 || top != 0 || right != 0 || bottom != 0).then(|| {
+        json!({
+            "left": left, "top": top, "right": right, "bottom": bottom,
+            "background": backdrop.param(),
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tool parameters
+
+fn pt(p: Point) -> Value {
+    json!({ "x": p.x, "y": p.y })
+}
+
+/// The selected style as creation parameters of `tool`'s command.
+fn creation_params(tool: ToolId, style: &StylePreset) -> serde_json::Map<String, Value> {
+    let all = style.style_params();
+    let keep: &[&str] = match tool {
+        ToolId::Arrow => &["stroke", "shadow"],
+        ToolId::Callout => &["fill", "stroke", "shadow", "text_color", "font"],
+        ToolId::Step => &["text_color", "shadow"],
+        _ => &[],
+    };
+    let mut p: serde_json::Map<String, Value> = all
+        .into_iter()
+        .filter(|(k, _)| keep.contains(&k.as_str()))
+        .collect();
+    match tool {
+        ToolId::Arrow => {
+            if let Some(h) = style.arrow_start {
+                p.insert("start_head".into(), json!(h));
+            }
+            if let Some(h) = style.arrow_end {
+                p.insert("end_head".into(), json!(h));
+            }
+        }
+        ToolId::Step => {
+            if let Some(c) = style.fill_color() {
+                p.insert("fill".into(), json!(c));
+            }
+            if let Some(s) = &style.stroke {
+                p.insert("ring".into(), json!(s));
+            }
+        }
+        ToolId::Callout => {
+            if let Some(r) = style.corner_radius {
+                p.insert(
+                    "body".into(),
+                    json!({ "kind": "rounded_rect", "radius": r }),
+                );
+            }
+        }
+        _ => {}
+    }
+    p
+}
+
+fn normalized(a: Point, b: Point) -> RectF {
+    RectF::new(
+        a.x.min(b.x),
+        a.y.min(b.y),
+        (a.x - b.x).abs(),
+        (a.y - b.y).abs(),
+    )
+}
+
+/// The command a finished drawing gesture runs.
+pub fn draw_intent(editor: &EditorState, from: Point, to: Point) -> Option<UiIntent> {
+    let tool = editor.toolbar.active;
+    let style = editor.sidebar.effective_style(tool).unwrap_or_default();
+    let mut p = creation_params(tool, &style);
+    let dist = ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt();
+    match tool {
+        ToolId::Arrow if dist >= 3.0 => {
+            p.insert("start".into(), pt(from));
+            p.insert("end".into(), pt(to));
+            Some(UiIntent::command("annotation.addArrow", Value::Object(p)))
+        }
+        ToolId::Callout => {
+            let mut b = normalized(from, to);
+            if b.w < 8.0 || b.h < 8.0 {
+                // A click drops a default-sized bubble centred on it.
+                b = RectF::new(from.x - 100.0, from.y - 45.0, 200.0, 90.0);
+            }
+            let o = editor.tools.callout;
+            let tip = Point::new(b.x + b.w * 0.25, b.y + b.h + (b.h * 0.6).max(30.0));
+            p.insert(
+                "bounds".into(),
+                json!({ "x": b.x, "y": b.y, "w": b.w, "h": b.h }),
+            );
+            p.insert(
+                "tails".into(),
+                json!([{ "tip": pt(tip), "base_width": o.tail_width, "curve_bias": o.tail_curve }]),
+            );
+            Some(UiIntent::command("annotation.addCallout", Value::Object(p)))
+        }
+        ToolId::Step => {
+            let o = &editor.tools.step;
+            p.insert("at".into(), pt(to));
+            p.insert("sequence".into(), json!(o.sequence));
+            p.insert("numbering".into(), json!(o.numbering));
+            Some(UiIntent::command("annotation.addStep", Value::Object(p)))
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The widget
+
+pub struct CanvasViewport<'a> {
+    pub doc: Option<&'a DocState>,
+    pub image: Option<CanvasImage>,
+    pub tokens: &'a Tokens,
+}
+
+impl CanvasViewport<'_> {
+    pub fn show(
+        self,
+        ui: &mut Ui,
+        editor: &mut EditorState,
+        intents: &mut Vec<UiIntent>,
+    ) -> Response {
+        let t = self.tokens;
+        let view = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(view, Sense::click_and_drag());
+        let painter = ui.painter_at(view);
+        painter.rect_filled(view, 0.0, t.canvas_surround);
+        let Some(doc) = self.doc else {
+            painter.text(
+                view.center(),
+                Align2::CENTER_CENTER,
+                "No capture open — press the capture hotkey or New Capture",
+                FontId::proportional(14.0),
+                t.text_faint,
+            );
+            return resp;
+        };
+        let m = &doc.manifest;
+        let canvas = m.canvas.size;
+        let ppp = ui.ctx().pixels_per_point();
+        let state = &mut editor.canvas;
+        let mut xf = ViewTransform::new(state.zoom, state.scroll, view, canvas, ppp);
+
+        // --- Pan and zoom -------------------------------------------------
+        let (space, middle, primary, zoom_delta, wheel, pointer) = ui.input(|i| {
+            (
+                i.key_down(Key::Space),
+                i.pointer.button_down(PointerButton::Middle),
+                i.pointer.primary_down(),
+                i.zoom_delta(),
+                i.smooth_scroll_delta,
+                i.pointer.hover_pos(),
+            )
+        });
+        let hovered = resp.hovered() || resp.dragged();
+        let panning = hovered && (middle || (space && primary));
+        if panning || matches!(state.gesture, Some(CanvasGesture::Pan)) {
+            let d = ui.input(|i| i.pointer.delta());
+            if d != Vec2::ZERO {
+                if matches!(state.zoom, Zoom::Fit) {
+                    state.zoom = Zoom::Percent {
+                        value: xf.percent(ppp),
+                    };
+                }
+                state.scroll = [state.scroll[0] + d.x, state.scroll[1] + d.y];
+            }
+            state.gesture = (middle || primary).then_some(CanvasGesture::Pan);
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        } else if space && hovered {
+            ui.ctx().set_cursor_icon(CursorIcon::Grab);
+        }
+        if hovered && let Some(cur) = pointer {
+            if zoom_delta != 1.0 {
+                (state.zoom, state.scroll) = zoom_about(&xf, zoom_delta, cur, view, canvas, ppp);
+            } else if wheel != Vec2::ZERO {
+                if matches!(state.zoom, Zoom::Fit) {
+                    state.zoom = Zoom::Percent {
+                        value: xf.percent(ppp),
+                    };
+                }
+                state.scroll = [state.scroll[0] + wheel.x, state.scroll[1] + wheel.y];
+            }
+        }
+        xf = ViewTransform::new(state.zoom, state.scroll, view, canvas, ppp);
+        let canvas_rect = xf.rect_to_screen(RectF::new(
+            0.0,
+            0.0,
+            f64::from(canvas.width),
+            f64::from(canvas.height),
+        ));
+
+        // --- Pixels -------------------------------------------------------
+        if state.checkerboard {
+            let checker = checker_texture(ui.ctx(), t);
+            let n = 2.0 * t.checker_size;
+            painter.image(
+                checker.id(),
+                canvas_rect,
+                ERect::from_min_max(
+                    Pos2::ZERO,
+                    pos2(canvas_rect.width() / n, canvas_rect.height() / n),
+                ),
+                Color32::WHITE,
+            );
+        }
+        if let Some(img) = self.image {
+            let r = xf.rect_to_screen(RectF::new(
+                0.0,
+                0.0,
+                f64::from(img.size[0]),
+                f64::from(img.size[1]),
+            ));
+            painter.image(img.texture, r, img.uv, Color32::WHITE);
+        }
+        painter.rect_stroke(
+            canvas_rect,
+            0.0,
+            stroke(1.0, t.canvas_edge),
+            StrokeKind::Outside,
+        );
+
+        let tool = editor.toolbar.active;
+        let to_canvas = |p: Pos2| xf.to_canvas(p);
+        let slop = f64::from(PICK_SLOP / xf.scale.max(f32::EPSILON));
+
+        // --- Expansion handles -------------------------------------------
+        if editor.canvas.resize.handles_visible {
+            for (handle, rect) in expand_handle_rects(canvas_rect, t) {
+                let h = ui.interact(rect, Id::new(("canvas.expand", handle)), Sense::drag());
+                let hot = h.hovered() || h.dragged();
+                let fill = if hot {
+                    t.expand_preview
+                } else {
+                    t.expand_handle_fill
+                };
+                painter.rect(
+                    rect,
+                    Tokens::corner(t.radius_pill),
+                    fill,
+                    stroke(1.0, t.expand_handle_stroke),
+                    StrokeKind::Outside,
+                );
+                if hot {
+                    ui.ctx().set_cursor_icon(resize_cursor(handle));
+                }
+                let r = &mut editor.canvas.resize;
+                if h.drag_started() {
+                    r.drag = Some(ResizeDrag {
+                        handle,
+                        start_size: canvas,
+                        start_origin: m.canvas.base_origin,
+                        delta: [0.0, 0.0],
+                    });
+                }
+                if let Some(d) = r.drag.as_mut().filter(|d| d.handle == handle) {
+                    if h.dragged() {
+                        let dd = h.drag_delta() / xf.scale.max(f32::EPSILON);
+                        d.delta = [d.delta[0] + dd.x, d.delta[1] + dd.y];
+                    }
+                    if h.drag_stopped() {
+                        if let Some(p) = expand_params(d, editor.canvas.expand_backdrop) {
+                            intents.push(UiIntent::command("canvas.expandBounds", p));
+                        }
+                        r.drag = None;
+                    }
+                }
+            }
+            if let Some(d) = &editor.canvas.resize.drag {
+                let [l, tp, _, _] = expand_margins(d);
+                let (size, _) = d.preview();
+                let preview = xf.rect_to_screen(RectF::new(
+                    -f64::from(l),
+                    -f64::from(tp),
+                    f64::from(size.width),
+                    f64::from(size.height),
+                ));
+                dashed_rect(&painter, preview, t.expand_preview);
+                badge(
+                    &painter,
+                    preview.center_bottom() + vec2(0.0, t.space_lg + t.expand_handle_gap),
+                    &format!("{} × {} px", size.width, size.height),
+                    t,
+                );
+            }
+        }
+
+        // --- Selection and gizmos -----------------------------------------
+        let selection = editor.canvas.selection.clone();
+        let moving = match &editor.canvas.gesture {
+            Some(CanvasGesture::MoveSelection { from, to }) => (to.x - from.x, to.y - from.y),
+            _ => (0.0, 0.0),
+        };
+        if let Some(h) = editor.canvas.hovered.filter(|h| !selection.contains(h))
+            && let Some(b) = m
+                .node(h)
+                .and_then(|n| n.annotation())
+                .and_then(Annotation::bounds)
+        {
+            painter.rect_stroke(
+                xf.rect_to_screen(b),
+                0.0,
+                stroke(1.0, t.gizmo_stroke),
+                StrokeKind::Outside,
+            );
+        }
+        for &id in &selection {
+            let Some(a) = m.node(id).and_then(|n| n.annotation()) else {
+                continue;
+            };
+            if let Some(mut b) = a.bounds() {
+                b.translate(moving.0, moving.1);
+                let r = xf.rect_to_screen(b).expand(2.0);
+                painter.rect_stroke(r, 0.0, stroke(3.0, t.gizmo_outline), StrokeKind::Middle);
+                painter.rect_stroke(r, 0.0, stroke(1.5, t.gizmo_stroke), StrokeKind::Middle);
+                for c in [
+                    r.left_top(),
+                    r.right_top(),
+                    r.left_bottom(),
+                    r.right_bottom(),
+                ] {
+                    let hr = ERect::from_center_size(c, Vec2::splat(t.handle_size));
+                    painter.rect(
+                        hr,
+                        1.0,
+                        t.handle_fill,
+                        stroke(1.0, t.handle_stroke),
+                        StrokeKind::Middle,
+                    );
+                }
+            }
+            match a {
+                Annotation::Callout(c) => {
+                    for (index, tail) in c.tails.iter().enumerate() {
+                        let preview = match &editor.canvas.gesture {
+                            Some(CanvasGesture::CalloutTail {
+                                id: g,
+                                index: gi,
+                                to,
+                            }) if *g == id && *gi == index => Some(*to),
+                            _ => None,
+                        };
+                        let at = xf.to_screen(preview.unwrap_or(tail.tip));
+                        let h = ui.interact(
+                            ERect::from_center_size(xf.to_screen(tail.tip), Vec2::splat(16.0)),
+                            Id::new(("canvas.tail", id.0, index)),
+                            Sense::drag(),
+                        );
+                        diamond(
+                            &painter,
+                            at,
+                            if h.hovered() { 8.0 } else { 6.5 },
+                            t.tail_handle,
+                            t,
+                        );
+                        if let Some(p) = h.interact_pointer_pos() {
+                            if h.dragged() {
+                                editor.canvas.gesture = Some(CanvasGesture::CalloutTail {
+                                    id,
+                                    index,
+                                    to: to_canvas(p),
+                                });
+                            }
+                            if h.drag_stopped() {
+                                intents.push(UiIntent::command(
+                                    "annotation.moveCalloutTail",
+                                    json!({ "id": id.0, "index": index, "tip": pt(to_canvas(p)) }),
+                                ));
+                                editor.canvas.gesture = None;
+                            }
+                        }
+                    }
+                    // "+" below the body: drag out a new tail.
+                    let body = xf.rect_to_screen(c.bounds);
+                    let plus = body.center_bottom() + vec2(0.0, 18.0);
+                    let h = ui.interact(
+                        ERect::from_center_size(plus, Vec2::splat(16.0)),
+                        Id::new(("canvas.newtail", id.0)),
+                        Sense::drag(),
+                    );
+                    let new_tip = match &editor.canvas.gesture {
+                        Some(CanvasGesture::NewTail { id: g, to }) if *g == id => Some(*to),
+                        _ => None,
+                    };
+                    if let Some(tip) = new_tip {
+                        let s = xf.to_screen(tip);
+                        painter.line_segment([body.center(), s], stroke(1.0, t.tail_handle));
+                        diamond(&painter, s, 6.5, t.tail_handle, t);
+                    }
+                    diamond(&painter, plus, 6.5, t.handle_fill, t);
+                    painter.text(
+                        plus,
+                        Align2::CENTER_CENTER,
+                        "+",
+                        FontId::proportional(11.0),
+                        t.handle_stroke,
+                    );
+                    if let Some(p) = h.interact_pointer_pos() {
+                        if h.dragged() {
+                            editor.canvas.gesture = Some(CanvasGesture::NewTail {
+                                id,
+                                to: to_canvas(p),
+                            });
+                        }
+                        if h.drag_stopped() {
+                            let o = editor.tools.callout;
+                            intents.push(UiIntent::command(
+                                "annotation.addCalloutTail",
+                                json!({ "id": id.0, "tail": {
+                                    "tip": pt(to_canvas(p)),
+                                    "base_width": o.tail_width,
+                                    "curve_bias": o.tail_curve,
+                                } }),
+                            ));
+                            editor.canvas.gesture = None;
+                        }
+                    }
+                }
+                Annotation::CurvedArrow(arrow) => {
+                    let mid = arrow_midpoint(arrow);
+                    let preview = match &editor.canvas.gesture {
+                        Some(CanvasGesture::ArrowBend { id: g, to }) if *g == id => Some(*to),
+                        _ => None,
+                    };
+                    if let Some(to) = preview {
+                        let pts: Vec<Pos2> = [arrow.start, to, arrow.end]
+                            .into_iter()
+                            .map(|p| xf.to_screen(p))
+                            .collect();
+                        painter.extend(Shape::dashed_line(
+                            &pts,
+                            stroke(1.0, t.bend_handle),
+                            5.0,
+                            4.0,
+                        ));
+                    }
+                    let at = xf.to_screen(preview.unwrap_or(mid));
+                    let h = ui.interact(
+                        ERect::from_center_size(xf.to_screen(mid), Vec2::splat(16.0)),
+                        Id::new(("canvas.bend", id.0)),
+                        Sense::click_and_drag(),
+                    );
+                    painter.circle(
+                        at,
+                        if h.hovered() { 7.0 } else { 5.5 },
+                        t.bend_handle,
+                        stroke(1.5, t.gizmo_outline),
+                    );
+                    h.clone()
+                        .on_hover_text("Drag to bend · double-click to straighten");
+                    if h.double_clicked() {
+                        intents.push(UiIntent::command(
+                            "annotation.setArrowCurve",
+                            json!({ "id": id.0 }),
+                        ));
+                    }
+                    if let Some(p) = h.interact_pointer_pos() {
+                        if h.dragged() {
+                            editor.canvas.gesture = Some(CanvasGesture::ArrowBend {
+                                id,
+                                to: to_canvas(p),
+                            });
+                        }
+                        if h.drag_stopped() {
+                            intents.push(UiIntent::command(
+                                "annotation.setArrowCurve",
+                                json!({ "id": id.0, "through": pt(to_canvas(p)) }),
+                            ));
+                            editor.canvas.gesture = None;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // --- Cut Out guide -------------------------------------------------
+        let axis = editor.tools.cut_out.axis;
+        if tool == ToolId::CutOut {
+            let band = match (&editor.canvas.gesture, resp.hover_pos()) {
+                (Some(CanvasGesture::CutOut { from, to }), _) => Some((*from, *to)),
+                (None, Some(p)) => {
+                    let c = to_canvas(p);
+                    let v = if axis == Axis::Horizontal { c.y } else { c.x };
+                    Some((v, v))
+                }
+                _ => None,
+            };
+            if let Some((a, b)) = band {
+                draw_cut_band(
+                    &painter,
+                    &xf,
+                    canvas,
+                    axis,
+                    a.min(b),
+                    a.max(b),
+                    editor.tools.cut_out.torn,
+                    t,
+                );
+            }
+        }
+
+        // --- Canvas gestures (tools) ---------------------------------------
+        if panning || matches!(editor.canvas.gesture, Some(CanvasGesture::Pan)) {
+            return resp;
+        }
+        let along = |p: Point| if axis == Axis::Horizontal { p.y } else { p.x };
+        if tool == ToolId::Move
+            && let Some(p) = resp.hover_pos()
+        {
+            editor.canvas.hovered = node_at(m, to_canvas(p), slop);
+        } else {
+            editor.canvas.hovered = None;
+        }
+
+        if resp.clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let c = to_canvas(p);
+            if let Some(target) = editor.canvas.eyedropper.take() {
+                pick_color(doc, c, target, editor);
+            } else if tool == ToolId::Move {
+                let shift = ui.input(|i| i.modifiers.shift);
+                match node_at(m, c, slop) {
+                    Some(id) if shift => toggle(&mut editor.canvas.selection, id),
+                    Some(id) => editor.canvas.selection = vec![id],
+                    None if !shift => editor.canvas.selection.clear(),
+                    None => {}
+                }
+            } else if let Some(i) = draw_intent(editor, c, c) {
+                intents.push(i);
+            }
+        }
+        if resp.drag_started_by(PointerButton::Primary)
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
+        {
+            let c = to_canvas(o);
+            editor.canvas.gesture = match tool {
+                ToolId::Move => {
+                    let hit = node_at(m, c, slop);
+                    if let Some(id) = hit
+                        && !editor.canvas.selection.contains(&id)
+                    {
+                        editor.canvas.selection = vec![id];
+                    }
+                    hit.map(|_| CanvasGesture::MoveSelection { from: c, to: c })
+                }
+                ToolId::CutOut => Some(CanvasGesture::CutOut {
+                    from: along(c),
+                    to: along(c),
+                }),
+                _ => Some(CanvasGesture::Draw { from: c, to: c }),
+            };
+        }
+        if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
+            let c = to_canvas(p);
+            match &mut editor.canvas.gesture {
+                Some(CanvasGesture::Draw { to, .. } | CanvasGesture::MoveSelection { to, .. }) => {
+                    *to = c;
+                }
+                Some(CanvasGesture::CutOut { to, .. }) => *to = along(c),
+                _ => {}
+            }
+        }
+        if let Some(CanvasGesture::Draw { from, to }) = &editor.canvas.gesture {
+            draw_preview(&painter, &xf, tool, *from, *to, t);
+        }
+        if resp.drag_stopped() {
+            match editor.canvas.gesture.take() {
+                Some(CanvasGesture::Draw { from, to }) => {
+                    if let Some(i) = draw_intent(editor, from, to) {
+                        intents.push(i);
+                    }
+                }
+                Some(CanvasGesture::MoveSelection { from, to }) => {
+                    let (dx, dy) = (to.x - from.x, to.y - from.y);
+                    if dx != 0.0 || dy != 0.0 {
+                        let ids: Vec<u64> = editor.canvas.selection.iter().map(|n| n.0).collect();
+                        intents.push(UiIntent::command(
+                            "annotation.move",
+                            json!({ "ids": ids, "dx": dx, "dy": dy }),
+                        ));
+                    }
+                }
+                Some(CanvasGesture::CutOut { from, to }) if (to - from).abs() >= 1.0 => {
+                    intents.push(UiIntent::command(
+                        "canvas.cutOut",
+                        editor.tools.cut_out.params(from, to),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if resp.hovered() && (editor.canvas.eyedropper.is_some() || tool != ToolId::Move) {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+        resp
+    }
+}
+
+fn toggle(sel: &mut Vec<NodeId>, id: NodeId) {
+    match sel.iter().position(|n| *n == id) {
+        Some(i) => {
+            sel.remove(i);
+        }
+        None => sel.push(id),
+    }
+}
+
+/// Eyedropper: the displayed capture pixel under `c` into the draft.
+/// Canvas → base by the base origin (pixels under a Cut Out seam sample the
+/// uncut capture at that offset).
+fn pick_color(doc: &DocState, c: Point, target: ColorTarget, editor: &mut EditorState) {
+    let Some(px) = doc.display_pixels() else {
+        return;
+    };
+    let o = doc.manifest.canvas.base_origin;
+    let (x, y) = (
+        (c.x.floor() as i64) - i64::from(o.x),
+        (c.y.floor() as i64) - i64::from(o.y),
+    );
+    let s = px.size();
+    if x < 0 || y < 0 || x >= i64::from(s.width) || y >= i64::from(s.height) {
+        return;
+    }
+    let [r, g, b, _] = px.pixel(x as i32, y as i32);
+    let color = Color::rgb(r, g, b);
+    let tool = editor.toolbar.active;
+    editor.sidebar.edit_draft(tool, |p| match target {
+        ColorTarget::Fill => p.fill = capturecraft_format::Fill::Solid { color },
+        ColorTarget::Stroke => {
+            p.stroke.get_or_insert_with(Default::default).color = color;
+        }
+        ColorTarget::Text => p.text_color = Some(color),
+    });
+}
+
+fn resize_cursor(h: ResizeHandle) -> CursorIcon {
+    match h {
+        ResizeHandle::N | ResizeHandle::S => CursorIcon::ResizeVertical,
+        ResizeHandle::E | ResizeHandle::W => CursorIcon::ResizeHorizontal,
+        ResizeHandle::NE | ResizeHandle::SW => CursorIcon::ResizeNeSw,
+        ResizeHandle::NW | ResizeHandle::SE => CursorIcon::ResizeNwSe,
+    }
+}
+
+/// A 2 × 2 checker texture, repeated by UV (one draw call at any zoom).
+fn checker_texture(ctx: &egui::Context, t: &Tokens) -> TextureHandle {
+    let id = Id::new(("canvas.checker", t.checker_light, t.checker_dark));
+    if let Some(tex) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
+        return tex;
+    }
+    let (a, b) = (t.checker_light, t.checker_dark);
+    let image = ColorImage::new([2, 2], vec![a, b, b, a]);
+    let tex = ctx.load_texture("canvas.checker", image, TextureOptions::NEAREST_REPEAT);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
+}
+
+fn diamond(painter: &egui::Painter, c: Pos2, r: f32, fill: Color32, t: &Tokens) {
+    let pts = vec![
+        c + vec2(0.0, -r),
+        c + vec2(r, 0.0),
+        c + vec2(0.0, r),
+        c + vec2(-r, 0.0),
+    ];
+    painter.add(Shape::convex_polygon(
+        pts,
+        fill,
+        stroke(1.5, t.gizmo_outline),
+    ));
+}
+
+fn dashed_rect(painter: &egui::Painter, r: ERect, color: Color32) {
+    let pts = [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+        r.left_top(),
+    ];
+    painter.extend(Shape::dashed_line(&pts, stroke(1.5, color), 6.0, 4.0));
+}
+
+fn badge(painter: &egui::Painter, at: Pos2, text: &str, t: &Tokens) {
+    let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(12.0), t.badge_text);
+    let pad = vec2(t.space_md, t.space_sm);
+    let rect = ERect::from_center_size(at, galley.size() + 2.0 * pad);
+    painter.rect_filled(rect, Tokens::corner(t.radius_pill), t.badge_bg);
+    painter.galley(rect.min + pad, galley, t.badge_text);
+}
+
+/// The strip `[a, b]` a Cut Out would remove, edge to edge, with its seams
+/// (a zig-zag hint for torn edges).
+#[allow(clippy::too_many_arguments)]
+fn draw_cut_band(
+    painter: &egui::Painter,
+    xf: &ViewTransform,
+    canvas: Size,
+    axis: Axis,
+    a: f64,
+    b: f64,
+    torn: bool,
+    t: &Tokens,
+) {
+    let (w, h) = (f64::from(canvas.width), f64::from(canvas.height));
+    let (band, len) = match axis {
+        Axis::Horizontal => (RectF::new(0.0, a, w, b - a), w),
+        Axis::Vertical => (RectF::new(a, 0.0, b - a, h), h),
+    };
+    let r = xf.rect_to_screen(band);
+    painter.rect_filled(r, 0.0, t.cutout_band);
+    let s = stroke(1.5, t.cutout_seam);
+    let line = |v: f64| -> Vec<Pos2> {
+        let at = |u: f64| match axis {
+            Axis::Horizontal => Point::new(u, v),
+            Axis::Vertical => Point::new(v, u),
+        };
+        if !torn {
+            return vec![xf.to_screen(at(0.0)), xf.to_screen(at(len))];
+        }
+        let step = (12.0 / f64::from(xf.scale.max(0.01))).max(1.0);
+        let n = (len / step).ceil().min(4096.0) as usize;
+        (0..=n)
+            .map(|i| {
+                let u = (i as f64 * step).min(len);
+                let off = if i % 2 == 0 { -3.0 } else { 3.0 } / f64::from(xf.scale.max(0.01));
+                let p = at(u);
+                xf.to_screen(match axis {
+                    Axis::Horizontal => Point::new(p.x, p.y + off),
+                    Axis::Vertical => Point::new(p.x + off, p.y),
+                })
+            })
+            .collect()
+    };
+    for v in [a, b] {
+        painter.add(Shape::line(line(v), s));
+    }
+}
+
+/// Outline of the annotation a drawing drag would create.
+fn draw_preview(
+    painter: &egui::Painter,
+    xf: &ViewTransform,
+    tool: ToolId,
+    a: Point,
+    b: Point,
+    t: &Tokens,
+) {
+    let (pa, pb) = (xf.to_screen(a), xf.to_screen(b));
+    let s = stroke(2.0, t.gizmo_stroke);
+    match tool {
+        ToolId::Arrow => painter.arrow(pa, pb - pa, s),
+        ToolId::Callout | ToolId::Shape | ToolId::Blur | ToolId::Magnify | ToolId::Highlighter => {
+            dashed_rect(painter, ERect::from_two_pos(pa, pb), t.gizmo_stroke)
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use capturecraft_format::Offset;
+
+    fn view() -> ERect {
+        ERect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))
+    }
+
+    #[test]
+    fn fit_centres_and_never_enlarges() {
+        let xf = ViewTransform::new(Zoom::Fit, [0.0, 0.0], view(), Size::new(200, 100), 1.0);
+        assert_eq!(xf.scale, 1.0);
+        assert_eq!(xf.origin, pos2(400.0, 350.0));
+        let xf = ViewTransform::new(Zoom::Fit, [0.0, 0.0], view(), Size::new(4000, 1000), 2.0);
+        assert!((xf.scale - (1000.0 - 2.0 * FIT_MARGIN) / 4000.0).abs() < 1e-6);
+        let xf = ViewTransform::new(
+            Zoom::Percent { value: 100.0 },
+            [0.0; 2],
+            view(),
+            Size::new(10, 10),
+            2.0,
+        );
+        assert_eq!(xf.scale, 0.5, "100 % is one image pixel per physical pixel");
+        let p = Point::new(3.0, 7.0);
+        let back = xf.to_canvas(xf.to_screen(p));
+        assert!((back.x - 3.0).abs() < 1e-4 && (back.y - 7.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_keeps_the_point_under_the_cursor() {
+        let size = Size::new(800, 600);
+        let xf = ViewTransform::new(Zoom::Fit, [0.0; 2], view(), size, 1.0);
+        let cursor = pos2(300.0, 250.0);
+        let before = xf.to_canvas(cursor);
+        let (zoom, scroll) = zoom_about(&xf, 2.0, cursor, view(), size, 1.0);
+        let after = ViewTransform::new(zoom, scroll, view(), size, 1.0);
+        let p = after.to_canvas(cursor);
+        assert!((p.x - before.x).abs() < 1e-3 && (p.y - before.y).abs() < 1e-3);
+        let (zoom, _) = zoom_about(&after, 1e9, cursor, view(), size, 1.0);
+        assert_eq!(zoom, Zoom::Percent { value: MAX_ZOOM });
+    }
+
+    #[test]
+    fn handles_sit_outside_the_canvas() {
+        let canvas = ERect::from_min_size(pos2(100.0, 100.0), vec2(400.0, 300.0));
+        let rects = expand_handle_rects(canvas, &Tokens::default());
+        for (h, r) in rects {
+            assert!(!canvas.intersects(r), "{h:?}");
+        }
+        let n = rects.iter().find(|(h, _)| *h == ResizeHandle::N).unwrap().1;
+        assert!((n.center().x - canvas.center().x).abs() < 1e-3 && n.max.y < canvas.min.y);
+    }
+
+    #[test]
+    fn handle_drags_become_margins() {
+        let d = ResizeDrag {
+            handle: ResizeHandle::NW,
+            start_size: Size::new(100, 80),
+            start_origin: Offset { x: 5, y: 0 },
+            delta: [-20.4, -10.0],
+        };
+        assert_eq!(expand_margins(&d), [20, 10, 0, 0]);
+        let p = expand_params(&d, ExpandBackdrop::Auto).unwrap();
+        assert_eq!(p["left"], 20);
+        assert_eq!(p["background"]["kind"], "auto");
+        let d = ResizeDrag {
+            handle: ResizeHandle::SE,
+            delta: [30.0, -15.0],
+            ..d
+        };
+        assert_eq!(expand_margins(&d), [0, 0, 30, -15]);
+        let d = ResizeDrag {
+            delta: [0.2, -0.3],
+            ..d
+        };
+        assert!(expand_params(&d, ExpandBackdrop::White).is_none());
+    }
+
+    #[test]
+    fn drawing_gestures_carry_the_selected_style() {
+        let mut e = EditorState::default();
+        e.toolbar.active = ToolId::Arrow;
+        let UiIntent::Command { id, params } =
+            draw_intent(&e, Point::new(0.0, 0.0), Point::new(50.0, 20.0)).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "annotation.addArrow");
+        assert_eq!(params["end"], json!({ "x": 50.0, "y": 20.0 }));
+        assert_eq!(params["end_head"], "triangle");
+        assert!(params.get("stroke").is_some());
+        assert!(draw_intent(&e, Point::new(0.0, 0.0), Point::new(1.0, 1.0)).is_none());
+
+        e.toolbar.active = ToolId::Step;
+        let UiIntent::Command { params, .. } =
+            draw_intent(&e, Point::new(5.0, 5.0), Point::new(5.0, 5.0)).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(params["numbering"], "decimal");
+        assert!(params["fill"].as_str().is_some_and(|c| c.starts_with("#")));
+
+        e.toolbar.active = ToolId::Callout;
+        let UiIntent::Command { params, .. } =
+            draw_intent(&e, Point::new(10.0, 10.0), Point::new(110.0, 60.0)).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(params["bounds"]["w"], 100.0);
+        assert_eq!(params["tails"].as_array().unwrap().len(), 1);
+        assert_eq!(params["body"]["kind"], "rounded_rect");
+    }
+
+    /// The emitted parameters are accepted by the real commands.
+    #[test]
+    fn emitted_commands_run_in_the_engine() {
+        use capturecraft_engine::{Pixels, Session};
+        use capturecraft_format::Manifest;
+        let mut s = Session::new();
+        let size = Size::new(300, 200);
+        s.open(
+            Manifest::new(size),
+            Pixels::new(size, vec![200; 300 * 200 * 4]),
+        )
+        .unwrap();
+        let mut e = EditorState::default();
+        for tool in [ToolId::Arrow, ToolId::Callout, ToolId::Step] {
+            e.toolbar.active = tool;
+            let i = draw_intent(&e, Point::new(20.0, 20.0), Point::new(120.0, 80.0)).unwrap();
+            let out = crate::dispatch(&mut s, vec![i]);
+            assert!(
+                matches!(out[0], crate::Dispatched::Ran { .. }),
+                "{tool:?}: {out:?}"
+            );
+        }
+        let cut = e.tools.cut_out.params(150.0, 120.0);
+        let d = ResizeDrag {
+            handle: ResizeHandle::SW,
+            start_size: size,
+            start_origin: Offset::default(),
+            delta: [-40.0, 25.0],
+        };
+        let out = crate::dispatch(
+            &mut s,
+            vec![
+                UiIntent::command("canvas.cutOut", cut),
+                UiIntent::command(
+                    "canvas.expandBounds",
+                    expand_params(&d, ExpandBackdrop::White).unwrap(),
+                ),
+            ],
+        );
+        assert!(
+            out.iter()
+                .all(|o| matches!(o, crate::Dispatched::Ran { .. })),
+            "{out:?}"
+        );
+        assert_eq!(
+            s.active().unwrap().manifest.canvas.size,
+            Size::new(340, 195)
+        );
+    }
+}

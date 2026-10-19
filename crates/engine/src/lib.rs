@@ -14,6 +14,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 pub mod commands;
+pub mod edit_commands;
+pub mod render;
 pub mod smart_commands;
 
 use std::collections::BTreeMap;
