@@ -59,6 +59,7 @@ capturecraft-engine = { path = "crates/engine" }
 # Without default features: only the UI turns on the wgpu backend.
 capturecraft-compositor = { path = "crates/compositor", default-features = false }
 capturecraft-capture = { path = "crates/capture" }
+capturecraft-ui-egui = { path = "crates/ui-egui" }
 photocraft-geom = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
 photocraft-color = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
 photocraft-raster = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }

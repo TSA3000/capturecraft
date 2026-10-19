@@ -1,0 +1,27 @@
+[package]
+name = "capturecraft-app"
+version = "0.1.0"
+description = "CaptureCraft desktop app on eframe + wgpu: hosts the editor, the floating capture HUD and the crosshair overlay"
+edition.workspace = true
+# The layered crates declare 1.95.
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+
+# Runs next to the shipped `capturecraft` binary (the root package) until it
+# reaches parity with it (tray, global hotkey, autostart, installers).
+[[bin]]
+name = "capturecraft-app"
+path = "src/main.rs"
+
+[dependencies]
+capturecraft-format = { workspace = true }
+capturecraft-engine = { workspace = true }
+capturecraft-capture = { workspace = true }
+capturecraft-ui-egui = { workspace = true }
+photocraft-geom = { workspace = true }
+photocraft-ui-egui = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x11", "persistence"] }
+dirs = "6"
+serde_json = { workspace = true }
