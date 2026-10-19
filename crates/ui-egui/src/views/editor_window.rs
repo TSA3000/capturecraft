@@ -1474,4 +1474,173 @@ mod tests {
         let (undo, _) = h.session.active().unwrap().history_labels();
         assert_eq!(undo.iter().filter(|l| **l == "Format Text").count(), 6);
     }
+
+    /// The text toolbar stays while a text is typed: a new text takes its
+    /// format when it is added, an existing one changes at once, and the
+    /// typing goes on after each toolbar click.
+    #[test]
+    fn the_text_toolbar_formats_text_while_it_is_typed() {
+        use capturecraft_format::{Callout, TextAlign};
+        let mut h = Harness::new();
+        h.state.editor.toolbar.active = ToolId::Text;
+        h.frame(Vec::new());
+        let typed = |h: &mut Harness, text: &str| {
+            let out = h.frame(vec![egui::Event::Text(text.into())]);
+            crate::dispatch(&mut h.session, out);
+        };
+        let bold = Id::new(("text_format.bold", "toolbar"));
+        let right = Id::new(("text_format.align", "toolbar", "Align right"));
+
+        // A new text: click the canvas, type, format, type on, Enter.
+        h.click_at(egui::pos2(560.0, 420.0));
+        typed(&mut h, "Hel");
+        h.click(bold);
+        h.click(right);
+        assert!(h.state.editor.canvas.text_edit.is_some(), "still typing");
+        typed(&mut h, "lo");
+        let out = h.frame(vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        crate::dispatch(&mut h.session, out);
+        let texts = |h: &Harness| -> Vec<(capturecraft_format::NodeId, Callout)> {
+            h.session
+                .active()
+                .unwrap()
+                .manifest
+                .annotations
+                .iter()
+                .filter_map(|n| match n.annotation() {
+                    Some(Annotation::Callout(c)) => Some((n.id, c.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let [(id, c)] = texts(&h).try_into().unwrap();
+        assert_eq!(c.text.text(), "Hello");
+        assert_eq!(c.text.runs[0].font.weight, 700);
+        assert_eq!(c.text.align, TextAlign::Right);
+
+        // The same text typed in again: the toolbar changes the node.
+        h.state.editor.canvas.text_edit =
+            crate::panels::canvas_tools::begin_edit_text(&h.session.active().unwrap().manifest, id);
+        h.frame(Vec::new());
+        h.click(Id::new(("text_format.underline", "toolbar")));
+        assert!(h.state.editor.canvas.text_edit.is_some(), "still typing");
+        assert!(texts(&h)[0].1.text.runs[0].underline);
+        typed(&mut h, "!");
+        assert!(
+            h.state
+                .editor
+                .canvas
+                .text_edit
+                .as_ref()
+                .is_some_and(|e| e.text.ends_with('!'))
+        );
+    }
+
+    /// Help › About shows the workspace version, the one release tags use.
+    #[test]
+    fn every_crate_has_the_workspace_version() {
+        let root = include_str!("../../../../Cargo.toml");
+        let line = format!("version = \"{}\"", env!("CARGO_PKG_VERSION"));
+        let workspace = root
+            .split("[workspace.package]")
+            .nth(1)
+            .and_then(|s| s.split("\n[").next())
+            .unwrap();
+        assert!(workspace.contains(&line), "{line}");
+        assert_ne!(env!("CARGO_PKG_VERSION"), "0.1.0");
+    }
+
+    /// A callout gets the text box's text features: typed into at once
+    /// after it is drawn, formatted with the toolbar while typed, and the
+    /// Callout tool clicks back into its text.
+    #[test]
+    fn callouts_are_typed_and_formatted_like_text_boxes() {
+        use capturecraft_format::Callout;
+        let mut h = Harness::new();
+        h.state.editor.toolbar.active = ToolId::Callout;
+        h.frame(Vec::new());
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Runs a frame's intents like the app: dispatch, then after_command.
+        fn run(h: &mut Harness, events: Vec<egui::Event>) {
+            let out = h.frame(events);
+            for d in crate::dispatch(&mut h.session, out) {
+                if let crate::Dispatched::Ran { id, result } = d {
+                    crate::after_command(&mut h.state.editor, h.session.active(), id, &result);
+                }
+            }
+        }
+        let (a, b) = (egui::pos2(480.0, 380.0), egui::pos2(640.0, 460.0));
+        run(&mut h, vec![egui::Event::PointerMoved(a)]);
+        run(&mut h, vec![button(a, true)]);
+        for k in 1..=8 {
+            run(
+                &mut h,
+                vec![egui::Event::PointerMoved(a + (b - a) * (k as f32 / 8.0))],
+            );
+        }
+        run(&mut h, vec![button(b, false)]);
+        run(&mut h, vec![egui::Event::PointerGone]);
+        let callout = |h: &Harness| -> (capturecraft_format::NodeId, Callout) {
+            let m = &h.session.active().unwrap().manifest;
+            let n = m.annotations.last().unwrap();
+            match n.annotation() {
+                Some(Annotation::Callout(c)) => (n.id, c.clone()),
+                _ => unreachable!(),
+            }
+        };
+        let (id, _) = callout(&h);
+        assert_eq!(h.state.editor.canvas.selection, vec![id]);
+        assert!(
+            h.state
+                .editor
+                .canvas
+                .text_edit
+                .as_ref()
+                .is_some_and(|e| e.node == Some(id) && e.bubble),
+            "a new callout opens for typing"
+        );
+        run(&mut h, vec![egui::Event::Text("Look".into())]);
+        h.click(Id::new(("text_format.italic", "toolbar")));
+        assert!(callout(&h).1.text.runs[0].font.italic);
+        assert!(h.state.editor.canvas.text_edit.is_some(), "still typing");
+        run(&mut h, vec![egui::Event::Text("!".into())]);
+        run(
+            &mut h,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(h.state.editor.canvas.text_edit.is_none());
+        let (_, c) = callout(&h);
+        assert_eq!(c.text.text(), "Look!");
+        assert!(c.text.runs[0].font.italic);
+
+        // A click with the Callout tool inside it types into it again.
+        h.state.editor.canvas.selection.clear();
+        h.click_at(egui::pos2(560.0, 420.0));
+        assert!(
+            h.state
+                .editor
+                .canvas
+                .text_edit
+                .as_ref()
+                .is_some_and(|e| e.node == Some(id) && e.text == "Look!")
+        );
+        assert_eq!(h.session.active().unwrap().manifest.annotations.len(), 1);
+    }
 }

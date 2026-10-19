@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft-ui-egui"
-version = "0.1.0"
+version.workspace = true
 description = "CaptureCraft egui shell: capture HUD, crosshair overlay and the five-zone editor (thin: every action is an engine command)"
 edition.workspace = true
 # The engine, capture and compositor crates declare 1.95.

@@ -38,7 +38,7 @@ pub enum GizmoHandle {
     Rotate,
     /// Yellow diamond setting a rounded body's corner radius.
     CornerRadius,
-    /// Yellow diamond setting a text box's padding.
+    /// Yellow diamond setting a text box's or callout's padding.
     Padding,
 }
 
@@ -196,10 +196,11 @@ pub fn is_text_node(a: &Annotation) -> bool {
     matches!(a, Annotation::Callout(_))
 }
 
-/// The box and padding a padding diamond edits: text boxes only.
+/// The box and padding a padding diamond edits: text boxes and callouts
+/// (whose corner-radius diamond sits in the opposite, top-left corner).
 pub fn padding_of(a: &Annotation) -> Option<(RectF, f32)> {
     match a {
-        Annotation::Callout(c) if is_text_box(c) => Some((c.bounds, finite(c.text.padding))),
+        Annotation::Callout(c) => Some((c.bounds, finite(c.text.padding))),
         _ => None,
     }
 }
@@ -831,10 +832,24 @@ mod tests {
         let n = AnnotationNode::new(NodeId(1), a.clone());
         let f = NodeFrame::of(&n).unwrap();
         assert_eq!(hit_handle(&f, &a, at, 1.0, 8.0), Some(GizmoHandle::Padding));
-        // A callout keeps its corner-radius diamond.
+        // A callout has both: radius top left, padding top right.
         let callout = Annotation::Callout(capturecraft_format::Callout::default());
-        assert!(is_text_node(&callout) && padding_of(&callout).is_none());
+        let body = capturecraft_format::Callout::default().bounds;
+        assert!(is_text_node(&callout));
+        assert_eq!(padding_of(&callout), Some((body, 10.0)));
         assert!(corner_radius_of(&callout).is_some());
+        let n = AnnotationNode::new(NodeId(2), callout.clone());
+        let f = NodeFrame::of(&n).unwrap();
+        let pad = padding_point(body, 10.0, 12.0);
+        assert_eq!(
+            hit_handle(&f, &callout, pad, 1.0, 8.0),
+            Some(GizmoHandle::Padding)
+        );
+        let radius = corner_radius_point(body, 12.0, 12.0);
+        assert_eq!(
+            hit_handle(&f, &callout, radius, 1.0, 8.0),
+            Some(GizmoHandle::CornerRadius)
+        );
         let UiIntent::Command { id, params } = padding_intent(NodeId(3), 8.0) else {
             panic!()
         };

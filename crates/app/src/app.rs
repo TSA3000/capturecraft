@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use capturecraft_capture::{CaptureBackend, HitTestOptions, backends};
 use capturecraft_engine::Session;
 use capturecraft_engine::render::{Flattened, flatten, render_scene};
-use capturecraft_format::{CaptureMode, NodeId};
+use capturecraft_format::CaptureMode;
 use capturecraft_ui_egui::panels::canvas_viewport::{CanvasImage, CpuCanvas, GpuCanvas};
 use capturecraft_ui_egui::panels::gizmo::backdrop_intent;
 use capturecraft_ui_egui::panels::recent_tray::{Thumbnail, sync_tray};
@@ -694,17 +694,12 @@ impl CaptureCraftApp {
     fn run_intents(&mut self, ctx: &egui::Context, intents: Vec<UiIntent>) {
         for d in dispatch(&mut self.session, intents) {
             match d {
-                // A new text is selected, so its gizmo and the text
-                // toolbar show at once.
-                Dispatched::Ran {
-                    id: "annotation.addText",
-                    result,
-                } => {
-                    if let Some(id) = result["id"].as_u64() {
-                        self.state.editor.canvas.selection = vec![NodeId(id)];
-                    }
-                }
-                Dispatched::Ran { .. } => {}
+                Dispatched::Ran { id, result } => capturecraft_ui_egui::after_command(
+                    &mut self.state.editor,
+                    self.session.active(),
+                    id,
+                    &result,
+                ),
                 Dispatched::Failed { id, error } => self.notice = Some(format!("{id}: {error}")),
                 Dispatched::Shell(intent) => match shell_action(&intent) {
                     ShellAction::Capture { tab, delay } => {

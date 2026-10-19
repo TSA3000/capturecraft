@@ -142,6 +142,33 @@ pub fn dispatch(session: &mut Session, intents: Vec<UiIntent>) -> Vec<Dispatched
         .collect()
 }
 
+/// What the editor does once a command it sent has run: a new text box or
+/// callout is selected (its gizmo and the text toolbar show), and a new
+/// callout opens for typing, as a new text box does.
+pub fn after_command(
+    editor: &mut state::EditorState,
+    doc: Option<&capturecraft_engine::DocState>,
+    id: &str,
+    result: &Value,
+) {
+    let Some(node) = result["id"].as_u64().map(capturecraft_format::NodeId) else {
+        return;
+    };
+    match id {
+        "annotation.addText" => editor.canvas.selection = vec![node],
+        "annotation.addCallout" => {
+            editor.canvas.selection = vec![node];
+            if editor.canvas.text_edit.is_none()
+                && let Some(doc) = doc
+            {
+                editor.canvas.text_edit =
+                    panels::canvas_tools::begin_edit_text(&doc.manifest, node);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Every engine command id the panels emit; a test checks that the
 /// registry has each of them.
 pub const COMMANDS_USED: &[&str] = &[

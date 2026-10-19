@@ -24,10 +24,10 @@ use std::sync::Arc;
 
 use capturecraft_compositor::{CpuCompositor, RenderScene};
 use capturecraft_engine::DocState;
-use capturecraft_engine::node_commands::BOLD_FROM;
+use capturecraft_engine::node_commands::{BOLD_FROM, BOLD_WEIGHT, REGULAR_WEIGHT};
 use capturecraft_engine::render::{Flattened, render_scene, straight_rgba8};
 use capturecraft_format::{
-    Annotation, Callout, Color, Fill, Manifest, NodeId, Stroke, TextAlign, VAlign,
+    Annotation, Callout, Color, Fill, FontSpec, Manifest, NodeId, Stroke, TextAlign, VAlign,
 };
 use egui::text::{LayoutJob, TextFormat as GlyphFormat};
 use egui::{
@@ -126,6 +126,51 @@ pub struct TextFormat {
 }
 
 impl TextFormat {
+    /// What a new text box starts with: `font` and `color` (the Text
+    /// tool's style), set like `annotation.addText` sets them.
+    pub fn new_text(font: &FontSpec, color: Color) -> Self {
+        Self {
+            family: font.family.clone(),
+            size: font.size,
+            bold: font.weight >= BOLD_FROM,
+            italic: font.italic,
+            underline: false,
+            color,
+            align: TextAlign::Left,
+            valign: VAlign::Top,
+            padding: 4.0,
+        }
+    }
+
+    /// The font these settings describe.
+    pub fn font(&self) -> FontSpec {
+        FontSpec {
+            family: self.family.clone(),
+            size: self.size,
+            weight: if self.bold {
+                BOLD_WEIGHT
+            } else {
+                REGULAR_WEIGHT
+            },
+            italic: self.italic,
+        }
+    }
+
+    /// `e` applied here (a text being typed that has no node yet).
+    pub fn apply(&mut self, e: &TextEdit) {
+        match e {
+            TextEdit::Family(f) => self.family = f.clone(),
+            TextEdit::Size(v) => self.size = *v,
+            TextEdit::Bold(b) => self.bold = *b,
+            TextEdit::Italic(i) => self.italic = *i,
+            TextEdit::Underline(u) => self.underline = *u,
+            TextEdit::Color(c) => self.color = *c,
+            TextEdit::Align(a) => self.align = *a,
+            TextEdit::VAlign(v) => self.valign = *v,
+            TextEdit::Padding(p) => self.padding = *p,
+        }
+    }
+
     pub fn of(c: &Callout) -> Self {
         let run = c.text.runs.first().cloned().unwrap_or_default();
         Self {
@@ -417,6 +462,14 @@ pub fn size_control(ui: &mut Ui, salt: &str, current: f32) -> Option<f32> {
         )
         .on_hover_text("Font size, px");
     let dragged = held(ui, id, resp.changed().then_some(v));
+    if resp.has_focus() {
+        ui.data_mut(|d| {
+            d.insert_temp(
+                Id::new(("text_format.size_focus", salt)),
+                ui.ctx().cumulative_frame_nr(),
+            )
+        });
+    }
     let mut preset = None;
     ComboBox::from_id_salt(("text_format.sizes", salt))
         .selected_text("")
@@ -491,25 +544,25 @@ pub fn toolbar_pos(anchor: Rect, size: Vec2, view: Rect, gap: f32) -> Pos2 {
     pos2(x, y)
 }
 
-/// The toolbar of text node `id` (screen bounds `anchor`) in the canvas
-/// `view`.
+/// The toolbar for a text whose screen bounds are `anchor`, in the canvas
+/// `view`, showing `f`; returns the change made. Its eyedropper targets
+/// text node `node` (`None`: the text being typed, not added yet).
 #[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     ctx: &Context,
-    id: NodeId,
-    c: &Callout,
+    f: &TextFormat,
+    node: Option<NodeId>,
     anchor: Rect,
     view: Rect,
     editor: &mut EditorState,
-    intents: &mut Vec<UiIntent>,
     t: &Tokens,
-) {
+) -> Option<TextEdit> {
     let area = Id::new("canvas.text_toolbar");
     // Last frame's size: the first frame guesses.
     let size = ctx
         .data(|d| d.get_temp::<Vec2>(area))
         .unwrap_or(vec2(440.0, BUTTON + 10.0));
-    let f = TextFormat::of(c);
+    let salt = "toolbar";
     let mut edit = None;
     let out = egui::Area::new(area)
         .order(Order::Foreground)
@@ -524,7 +577,6 @@ pub fn toolbar(
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     ui.horizontal(|ui| {
-                        let salt = "toolbar";
                         if let Some(col) = color_swatch(
                             ui,
                             Id::new(("text_format.color", salt)),
@@ -533,21 +585,18 @@ pub fn toolbar(
                         ) {
                             edit = Some(TextEdit::Color(col));
                         }
-                        let picking = editor.canvas.eyedropper
-                            == Some(Eyedropper {
-                                target: ColorTarget::Text,
-                                node: Some(id),
-                            });
+                        let eye = Eyedropper {
+                            target: ColorTarget::Text,
+                            node,
+                        };
+                        let picking = editor.canvas.eyedropper == Some(eye);
                         if eyedropper_button(
                             ui,
                             Id::new(("text_format.eyedropper", salt)),
                             picking,
                             t,
                         ) {
-                            editor.canvas.eyedropper = (!picking).then_some(Eyedropper {
-                                target: ColorTarget::Text,
-                                node: Some(id),
-                            });
+                            editor.canvas.eyedropper = (!picking).then_some(eye);
                         }
                         ui.add_space(4.0);
                         if let Some(fam) = family_combo(ui, salt, &f.family, 120.0) {
@@ -557,7 +606,7 @@ pub fn toolbar(
                             edit = Some(TextEdit::Size(s));
                         }
                         ui.add_space(4.0);
-                        if let Some(e) = style_toggles(ui, salt, &f, t) {
+                        if let Some(e) = style_toggles(ui, salt, f, t) {
                             edit = Some(e);
                         }
                         ui.add_space(4.0);
@@ -567,10 +616,26 @@ pub fn toolbar(
                     });
                 });
         });
-    ctx.data_mut(|d| d.insert_temp(area, out.response.rect.size()));
-    if let Some(e) = edit {
-        intents.push(format_intent(id, &e));
-    }
+    let frame = ctx.cumulative_frame_nr();
+    let size_focused =
+        ctx.data(|d| d.get_temp::<u64>(Id::new(("text_format.size_focus", salt)))) == Some(frame);
+    let engaged = out.response.contains_pointer() || egui::Popup::is_any_open(ctx) || size_focused;
+    ctx.data_mut(|d| {
+        d.insert_temp(area, out.response.rect.size());
+        d.insert_temp(Id::new(ENGAGED), (frame, engaged));
+    });
+    edit
+}
+
+/// Temp-data key of "the toolbar is in use" (with the frame it was seen).
+const ENGAGED: &str = "canvas.text_toolbar.engaged";
+
+/// The pointer is on the toolbar, one of its menus is open or its size
+/// field is being typed in (this or the last frame): a text being typed
+/// stays open while the toolbar changes it.
+pub fn toolbar_engaged(ctx: &Context) -> bool {
+    ctx.data(|d| d.get_temp::<(u64, bool)>(Id::new(ENGAGED)))
+        .is_some_and(|(frame, on)| on && frame + 1 >= ctx.cumulative_frame_nr())
 }
 
 // ---------------------------------------------------------------------------
@@ -624,9 +689,12 @@ pub fn rgb_label(c: [u8; 4]) -> String {
     format!("R:{} G:{} B:{}", c[0], c[1], c[2])
 }
 
-/// The colour the eyedropper takes at `c`: the composited canvas, else
-/// the capture pixels; `None` off the canvas or on a transparent pixel.
-pub fn sample_doc(ctx: &Context, doc: &DocState, c: Point) -> Option<[u8; 4]> {
+/// Reads canvas pixel `(x, y)` (straight RGBA): from the composited
+/// document, else from the capture pixels; `None` off the canvas.
+pub fn sampler<'a>(
+    ctx: &Context,
+    doc: &'a DocState,
+) -> Box<dyn Fn(i64, i64) -> Option<[u8; 4]> + 'a> {
     if let Some(comp) = composite(ctx, doc) {
         let canvas = doc.manifest.canvas.size;
         let off = gizmo::image_offset(
@@ -634,19 +702,51 @@ pub fn sample_doc(ctx: &Context, doc: &DocState, c: Point) -> Option<[u8; 4]> {
             [canvas.width, canvas.height],
             [comp.1.width, comp.1.height],
         );
-        return sample(&comp.1, off, c).filter(|p| p[3] > 0);
+        return Box::new(move |x, y| {
+            sample(&comp.1, off, Point::new(x as f64 + 0.5, y as f64 + 0.5))
+        });
     }
-    let px = doc.display_pixels()?;
+    let Some(px) = doc.display_pixels() else {
+        return Box::new(|_, _| None);
+    };
     let o = doc.manifest.canvas.base_origin;
-    let (x, y) = (
-        (c.x.floor() as i64) - i64::from(o.x),
-        (c.y.floor() as i64) - i64::from(o.y),
-    );
-    let s = px.size();
-    if x < 0 || y < 0 || x >= i64::from(s.width) || y >= i64::from(s.height) {
-        return None;
-    }
-    Some(px.pixel(x as i32, y as i32)).filter(|p| p[3] > 0)
+    Box::new(move |x, y| {
+        let (x, y) = (x - i64::from(o.x), y - i64::from(o.y));
+        let s = px.size();
+        (x >= 0 && y >= 0 && x < i64::from(s.width) && y < i64::from(s.height))
+            .then(|| px.pixel(x as i32, y as i32))
+    })
+}
+
+/// The colour the eyedropper takes at `c`; `None` off the canvas or on a
+/// transparent pixel.
+pub fn sample_doc(ctx: &Context, doc: &DocState, c: Point) -> Option<[u8; 4]> {
+    sampler(ctx, doc)(c.x.floor() as i64, c.y.floor() as i64).filter(|p| p[3] > 0)
+}
+
+/// Side of the loupe's pixel grid (odd: the sampled pixel is the middle).
+pub const LOUPE_CELLS: i64 = 15;
+/// Size of one magnified pixel, points.
+pub const LOUPE_CELL_PT: f32 = 8.0;
+
+/// The `n × n` pixels around canvas point `c`, row by row, the sampled
+/// one in the middle (`None` off the canvas).
+pub fn loupe_grid(
+    read: &dyn Fn(i64, i64) -> Option<[u8; 4]>,
+    c: Point,
+    n: i64,
+) -> Vec<Option<[u8; 4]>> {
+    let (cx, cy) = (c.x.floor() as i64, c.y.floor() as i64);
+    let r = n / 2;
+    (-r..=r)
+        .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
+        .map(|(dx, dy)| read(cx + dx, cy + dy))
+        .collect()
+}
+
+/// `#RRGGBB`.
+pub fn hex_label(c: [u8; 4]) -> String {
+    format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])
 }
 
 /// The command that gives text node `eye.node` the sampled `color`;
@@ -669,23 +769,97 @@ pub fn eyedropper_intent(m: &Manifest, eye: Eyedropper, color: Color) -> Option<
     })
 }
 
-/// The eyedropper's tooltip: a swatch and the RGB values, below right of
-/// the pointer (flipped to stay inside `view`).
-pub fn eyedropper_tooltip(painter: &Painter, pointer: Pos2, view: Rect, c: [u8; 4], t: &Tokens) {
-    let text = rgb_label(c);
-    let galley = painter.layout_no_wrap(text, FontId::monospace(12.0), t.badge_text);
-    let swatch = 14.0;
-    let pad = vec2(t.space_md, t.space_sm);
+/// Radius of the eyedropper drop's round end, and how far above the tip
+/// its centre sits, points.
+pub const DROP_RADIUS: f32 = 9.0;
+pub const DROP_HEIGHT: f32 = 24.0;
+
+/// A drop's outline: the tip at `tip`, the round end `height` above it,
+/// running from the tip along one tangent, over the top and back down the
+/// other tangent.
+pub fn drop_outline(tip: Pos2, radius: f32, height: f32) -> Vec<Pos2> {
+    let c = tip - vec2(0.0, height.max(radius + 1.0));
+    let d = (tip - c).length();
+    // The tangent points sit `acos(r / d)` either side of the tip's
+    // direction (straight down).
+    let half = (radius / d).clamp(-1.0, 1.0).acos();
+    let down = std::f32::consts::FRAC_PI_2;
+    let steps = 24;
+    let from = down + half;
+    let sweep = std::f32::consts::TAU - 2.0 * half;
+    std::iter::once(tip)
+        .chain((0..=steps).map(|i| {
+            let a = from + sweep * i as f32 / steps as f32;
+            c + vec2(a.cos(), a.sin()) * radius
+        }))
+        .collect()
+}
+
+/// The eyedropper pointer: a drop filled with the sampled colour (empty
+/// off the canvas) whose tip is on the pixel being sampled.
+pub fn eyedropper_drop(ctx: &Context, tip: Pos2, color: Option<[u8; 4]>) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        Order::Tooltip,
+        Id::new("canvas.eyedropper.drop"),
+    ));
+    let pts = drop_outline(tip, DROP_RADIUS, DROP_HEIGHT);
+    let fill = match color {
+        Some(c) if c[3] > 0 => Color32::from_rgb(c[0], c[1], c[2]),
+        _ => Color32::TRANSPARENT,
+    };
+    painter.add(egui::Shape::convex_polygon(
+        pts.clone(),
+        fill,
+        stroke(3.0, Color32::BLACK),
+    ));
+    painter.add(egui::Shape::closed_line(pts, stroke(1.5, Color32::WHITE)));
+    // The sampled pixel itself.
+    painter.circle_filled(tip, 1.5, Color32::WHITE);
+    painter.circle_stroke(tip, 2.5, stroke(1.0, Color32::BLACK));
+}
+
+/// The eyedropper's loupe next to the pointer (flipped to stay inside
+/// `view`): the pixels around it magnified (nearest neighbour, a frame on
+/// the sampled middle one, a checkerboard off the canvas and under
+/// transparency), a swatch of the sampled colour and its hex and RGB
+/// values. Drawn on the tooltip layer, above the text toolbar.
+pub fn eyedropper_loupe(
+    ctx: &Context,
+    pointer: Pos2,
+    view: Rect,
+    grid: &[Option<[u8; 4]>],
+    t: &Tokens,
+) {
+    let n = (grid.len() as f64).sqrt().round() as usize;
+    if n == 0 || n * n != grid.len() {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        Order::Tooltip,
+        Id::new("canvas.eyedropper.loupe"),
+    ));
+    let center = grid[grid.len() / 2];
+    let font = FontId::monospace(12.0);
+    let (hex, rgb) = match center {
+        Some(c) if c[3] > 0 => (hex_label(c), rgb_label(c)),
+        _ => ("—".to_string(), "Off the canvas".to_string()),
+    };
+    let hex_g = painter.layout_no_wrap(hex, FontId::monospace(14.0), t.badge_text);
+    let rgb_g = painter.layout_no_wrap(rgb, font, t.badge_text);
+    let side = n as f32 * LOUPE_CELL_PT;
+    let pad = t.space_md;
+    let text_h = hex_g.size().y.max(18.0) + t.space_sm + rgb_g.size().y;
     let size = vec2(
-        swatch + t.space_sm + galley.size().x,
-        galley.size().y.max(swatch),
-    ) + 2.0 * pad;
-    let mut at = pointer + vec2(16.0, 16.0);
+        side.max(18.0 + t.space_sm + hex_g.size().x)
+            .max(rgb_g.size().x),
+        side + t.space_sm + text_h,
+    ) + Vec2::splat(2.0 * pad);
+    let mut at = pointer + vec2(20.0, 20.0);
     if at.x + size.x > view.right() {
-        at.x = pointer.x - 16.0 - size.x;
+        at.x = pointer.x - 20.0 - size.x;
     }
     if at.y + size.y > view.bottom() {
-        at.y = pointer.y - 16.0 - size.y;
+        at.y = pointer.y - 20.0 - size.y;
     }
     let r = Rect::from_min_size(at, size);
     painter.rect(
@@ -695,33 +869,85 @@ pub fn eyedropper_tooltip(painter: &Painter, pointer: Pos2, view: Rect, c: [u8; 
         stroke(1.0, t.badge_text.gamma_multiply(0.35)),
         StrokeKind::Inside,
     );
-    let sw = Rect::from_min_size(
-        pos2(r.left() + pad.x, r.center().y - swatch / 2.0),
-        Vec2::splat(swatch),
+    let loupe = Rect::from_min_size(
+        pos2(r.center().x - side / 2.0, r.top() + pad),
+        Vec2::splat(side),
     );
-    painter.rect(
-        sw,
+    for (i, px) in grid.iter().enumerate() {
+        let (col, row) = ((i % n) as f32, (i / n) as f32);
+        let cell = Rect::from_min_size(
+            loupe.min + vec2(col, row) * LOUPE_CELL_PT,
+            Vec2::splat(LOUPE_CELL_PT),
+        );
+        let checker = if (i % n + i / n).is_multiple_of(2) {
+            t.checker_light
+        } else {
+            t.checker_dark
+        };
+        painter.rect_filled(cell, 0.0, checker);
+        if let Some(c) = px {
+            painter.rect_filled(
+                cell,
+                0.0,
+                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+            );
+        }
+    }
+    // Faint grid lines, then the sampled pixel framed black and white.
+    for k in 1..n {
+        let d = k as f32 * LOUPE_CELL_PT;
+        let line = stroke(1.0, Color32::from_black_alpha(40));
+        painter.line_segment(
+            [loupe.min + vec2(d, 0.0), loupe.left_bottom() + vec2(d, 0.0)],
+            line,
+        );
+        painter.line_segment(
+            [loupe.min + vec2(0.0, d), loupe.right_top() + vec2(0.0, d)],
+            line,
+        );
+    }
+    let mid = Rect::from_center_size(loupe.center(), Vec2::splat(LOUPE_CELL_PT));
+    painter.rect_stroke(mid, 0.0, stroke(1.0, Color32::WHITE), StrokeKind::Outside);
+    painter.rect_stroke(
+        mid.expand(1.0),
+        0.0,
+        stroke(1.0, Color32::BLACK),
+        StrokeKind::Outside,
+    );
+    painter.rect_stroke(
+        loupe,
+        0.0,
+        stroke(1.0, t.badge_text.gamma_multiply(0.5)),
+        StrokeKind::Outside,
+    );
+
+    let row1 = loupe.bottom() + t.space_sm;
+    let swatch = Rect::from_min_size(pos2(r.left() + pad, row1), Vec2::splat(18.0));
+    painter.rect_filled(swatch, Tokens::corner(t.radius_sm), t.checker_dark);
+    if let Some(c) = center {
+        painter.rect_filled(
+            swatch,
+            Tokens::corner(t.radius_sm),
+            Color32::from_rgb(c[0], c[1], c[2]),
+        );
+    }
+    painter.rect_stroke(
+        swatch,
         Tokens::corner(t.radius_sm),
-        Color32::from_rgb(c[0], c[1], c[2]),
         stroke(1.0, t.badge_text),
         StrokeKind::Inside,
     );
+    let hex_y = swatch.center().y - hex_g.size().y / 2.0;
     painter.galley(
-        pos2(
-            sw.right() + t.space_sm,
-            r.center().y - galley.size().y / 2.0,
-        ),
-        galley,
+        pos2(swatch.right() + t.space_sm, hex_y),
+        hex_g,
         t.badge_text,
     );
-    // A ring round the hotspot in the sampled colour.
-    painter.circle(
-        pointer,
-        6.0,
-        Color32::TRANSPARENT,
-        stroke(3.0, Color32::from_rgb(c[0], c[1], c[2])),
+    painter.galley(
+        pos2(r.left() + pad, swatch.bottom() + t.space_sm),
+        rgb_g,
+        t.badge_text,
     );
-    painter.circle_stroke(pointer, 7.5, stroke(1.0, t.gizmo_outline));
 }
 
 #[cfg(test)]
@@ -803,6 +1029,48 @@ mod tests {
         assert_eq!(toolbar_pos(tall, size, view, 8.0), pos2(8.0, 8.0));
         let right = Rect::from_min_size(pos2(780.0, 300.0), vec2(100.0, 50.0));
         assert_eq!(toolbar_pos(right, size, view, 8.0).x, 392.0);
+    }
+
+    #[test]
+    fn the_drop_points_at_the_pixel() {
+        let tip = pos2(100.0, 200.0);
+        let pts = drop_outline(tip, DROP_RADIUS, DROP_HEIGHT);
+        assert_eq!(pts[0], tip);
+        // Everything else is above the tip, within the round end's width.
+        for p in &pts[1..] {
+            assert!(
+                p.y < tip.y && (p.x - tip.x).abs() <= DROP_RADIUS + 1e-3,
+                "{p:?}"
+            );
+        }
+        let top = pts.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!(
+            (top - (tip.y - DROP_HEIGHT - DROP_RADIUS)).abs() < 0.5,
+            "{top}"
+        );
+        // Symmetric about the tip's vertical.
+        let (first, last) = (pts[1], pts[pts.len() - 1]);
+        assert!(
+            (first.x - tip.x + (last.x - tip.x)).abs() < 1e-3 && (first.y - last.y).abs() < 1e-3
+        );
+    }
+
+    #[test]
+    fn the_loupe_reads_the_pixels_around_the_pointer() {
+        let read = |x: i64, y: i64| {
+            ((0..10).contains(&x) && (0..10).contains(&y)).then_some([x as u8, y as u8, 0, 255])
+        };
+        let g = loupe_grid(&read, Point::new(5.7, 2.2), 5);
+        assert_eq!(g.len(), 25);
+        // The middle is the pixel under the pointer, row-major around it.
+        assert_eq!(g[12], Some([5, 2, 0, 255]));
+        assert_eq!(g[0], Some([3, 0, 0, 255]));
+        assert_eq!(g[24], Some([7, 4, 0, 255]));
+        // Off the canvas: empty cells.
+        let edge = loupe_grid(&read, Point::new(0.0, 0.0), 3);
+        assert_eq!(edge[0], None);
+        assert_eq!(edge[4], Some([0, 0, 0, 255]));
+        assert_eq!(hex_label([255, 8, 171, 255]), "#FF08AB");
     }
 
     #[test]

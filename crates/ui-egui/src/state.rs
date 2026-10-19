@@ -1490,6 +1490,9 @@ pub struct TextEditState {
     /// The text of a callout bubble: typed inside the body, and emptying
     /// it clears the text instead of deleting the callout.
     pub bubble: bool,
+    /// A new text box's format, changed by the text toolbar while it is
+    /// typed (an existing node is formatted directly).
+    pub format: Option<crate::panels::text_format::TextFormat>,
 }
 
 /// What a Crop drag grabbed: a handle (`hx`, `hy` each -1, 0 or 1; 0 is

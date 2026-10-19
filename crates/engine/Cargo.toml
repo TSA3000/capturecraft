@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft-engine"
-version = "0.1.0"
+version.workspace = true
 description = "CaptureCraft session and command registry: every tool action is a command (UI, CLI, JSON channel, MCP)"
 edition.workspace = true
 # photocraft-raster and photocraft-color declare 1.95.

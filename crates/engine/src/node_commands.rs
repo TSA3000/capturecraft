@@ -110,7 +110,8 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         shortcut: None,
         params: r##"{ bounds: {x, y, w, h}, text?: string = "Text", font?: FontSpec, color?: "#rrggbb[aa]",
   align?: "left"|"center"|"right"|"justify" = "left", shadow?: DropShadow|null, fill?: Fill = none,
-  stroke?: Stroke|null = null } -> { id }"##,
+  stroke?: Stroke|null = null, underline?: bool = false, valign?: "top"|"middle"|"bottom" = "top",
+  padding?: f32 = 4 } -> { id }"##,
         enabled: has_doc,
         run: add_text,
         journal: true,
@@ -562,6 +563,12 @@ struct AddTextParams {
     fill: Option<capturecraft_format::Fill>,
     #[serde(default, deserialize_with = "double_option")]
     stroke: Option<Option<capturecraft_format::Stroke>>,
+    #[serde(default)]
+    underline: bool,
+    #[serde(default)]
+    valign: Option<VAlign>,
+    #[serde(default)]
+    padding: Option<f32>,
 }
 
 fn double_option<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
@@ -621,6 +628,18 @@ fn add_text(s: &mut Session, p: &Value) -> Result<Value> {
         c.fill = f;
     }
     c.stroke = p.stroke.flatten();
+    for run in &mut c.text.runs {
+        run.underline = p.underline;
+    }
+    if let Some(v) = p.valign {
+        c.text.valign = v;
+    }
+    if let Some(pad) = p.padding {
+        if !(pad.is_finite() && pad >= 0.0) {
+            return Err(bad(CMD, "padding must be a non-negative number"));
+        }
+        c.text.padding = pad;
+    }
     let id = push_node(s.manifest_mut()?, Annotation::Callout(c));
     Ok(json!({ "id": id.0 }))
 }
@@ -1187,6 +1206,24 @@ mod tests {
             panic!()
         };
         assert!(is_text_box(f) && f.stroke.is_some_and(|s| s.width == 2.0));
+        let formatted = s
+            .run(
+                "annotation.addText",
+                &json!({ "bounds": { "x": 10, "y": 110, "w": 120, "h": 40 }, "text": "U",
+                         "underline": true, "valign": "bottom", "padding": 9, "align": "justify" }),
+            )
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let m = &s.active().unwrap().manifest;
+        let Some(Annotation::Callout(u)) = m.node(NodeId(formatted)).unwrap().annotation() else {
+            panic!()
+        };
+        assert!(u.text.runs[0].underline);
+        assert_eq!(
+            (u.text.valign, u.text.padding, u.text.align),
+            (VAlign::Bottom, 9.0, TextAlign::Justify)
+        );
         assert!(!is_text_box(&Callout::default()));
     }
 

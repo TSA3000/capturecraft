@@ -23,8 +23,8 @@
 //!   (`annotation.setStyle`);
 //! - a selected text box or callout (also with the Text and Callout tools)
 //!   gets the text gizmo: a dashed border, round handles, a green rotation
-//!   knob and, on a text box, a yellow padding diamond in the top-right
-//!   corner (`annotation.setTextFormat`), plus the floating text toolbar
+//!   knob and a yellow padding diamond in the top-right corner
+//!   (`annotation.setTextFormat`), plus the floating text toolbar
 //!   ([`super::text_format`]);
 //! - the eyedropper: the colour under the pointer (sampled from the
 //!   composited document) in a tooltip; a click takes it, Esc cancels;
@@ -46,7 +46,7 @@
 use capturecraft_compositor::{CpuCompositor, GpuCompositor, GpuError, RenderScene};
 use capturecraft_engine::DocState;
 use capturecraft_engine::edit_commands::{arrow_midpoint, node_at};
-use capturecraft_engine::node_commands::expand_groups;
+use capturecraft_engine::node_commands::{expand_groups, is_text_box};
 use capturecraft_format::{Annotation, Axis, Color, NodeId, RectF, TextAlign};
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{
@@ -1218,20 +1218,42 @@ impl CanvasViewport<'_> {
         {
             editor.canvas.text_edit = Some(e);
         }
+        // The eyedropper also picks while a text is typed (for its colour).
+        let mut picked = false;
         if resp.clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && let Some(eye) = editor.canvas.eyedropper.take()
+        {
+            pick_color(ui.ctx(), doc, to_canvas(p), eye, editor, intents);
+            picked = true;
+        }
+        if resp.clicked()
+            && !picked
             && !over_handle
             && !typing_before
             && let Some(p) = resp.interact_pointer_pos()
         {
             let c = to_canvas(p);
-            if let Some(eye) = editor.canvas.eyedropper.take() {
-                pick_color(ui.ctx(), doc, c, eye, editor, intents);
-            } else if tool == ToolId::Text {
+            if tool == ToolId::Text {
                 let e = canvas_tools::text_box_at(m, c)
                     .and_then(|id| canvas_tools::begin_edit_text(m, id))
                     .unwrap_or_else(|| canvas_tools::begin_new_text(editor, c, None));
                 // The text being typed is the selection (none for a new one
                 // until it is added).
+                editor.canvas.selection = e.node.into_iter().collect();
+                editor.canvas.text_edit = Some(e);
+            } else if tool == ToolId::Callout
+                && let Some(e) = canvas_tools::text_box_at(m, c)
+                    .filter(|id| {
+                        matches!(
+                            m.node(*id).and_then(|n| n.annotation()),
+                            Some(Annotation::Callout(cl)) if !is_text_box(cl)
+                        )
+                    })
+                    .and_then(|id| canvas_tools::begin_edit_text(m, id))
+            {
+                // The Callout tool clicks into a callout's text, like the
+                // Text tool into a text box.
                 editor.canvas.selection = e.node.into_iter().collect();
                 editor.canvas.text_edit = Some(e);
             } else if tool == ToolId::Shape && editor.tools.shape.kind == ShapeKind::Polygon {
@@ -1559,43 +1581,36 @@ impl CanvasViewport<'_> {
                 }
             }
         }
-        inline_text(ui, &xf, editor, intents, t);
-        // The floating text toolbar of a single selected text.
-        if gizmo_tool
-            && editor.canvas.text_edit.is_none()
-            && editor.canvas.gesture.is_none()
-            && let Some((id, c)) = text_format::selected_text(m, &editor.canvas.selection)
-            && let Some(node) = m.node(id).filter(|n| !n.locked)
-            && let Some(f) = NodeFrame::of(node)
+        // A node being typed in shows its current font and colour (the
+        // toolbar may have just changed them).
+        if let Some(e) = &mut editor.canvas.text_edit
+            && let Some(id) = e.node
+            && let Some(Annotation::Callout(c)) = m.node(id).and_then(|n| n.annotation())
         {
-            let s = f64::from(xf.scale.max(f32::EPSILON));
-            let knob = f.to_canvas(rotate_handle_point(f.bounds, f64::from(STEM_PT) / s));
-            let anchor = f
-                .corners()
-                .into_iter()
-                .chain([knob])
-                .map(|p| ERect::from_center_size(xf.to_screen(p), Vec2::splat(t.handle_size)))
-                .reduce(|a, b| a.union(b))
-                .unwrap_or(ERect::NOTHING);
-            text_format::toolbar(ui.ctx(), id, c, anchor, view, editor, intents, t);
+            let run = c.text.runs.first().cloned().unwrap_or_default();
+            e.style = Some((run.font, run.color, c.text.align));
         }
+        inline_text(ui, &xf, editor, intents, t);
+        text_toolbar(ui, &xf, view, m, gizmo_tool, editor, intents, t);
         intents.extend(context_menu::show(ui.ctx(), editor, Some(doc), t));
         if editor.canvas.eyedropper.is_some() {
             if ui.input(|i| i.key_pressed(Key::Escape)) {
                 editor.canvas.eyedropper = None;
-            } else if let Some(p) = resp.hover_pos()
-                && let Some(px) = text_format::sample_doc(ui.ctx(), doc, to_canvas(p))
-            {
-                text_format::eyedropper_tooltip(&painter, p, view, px, t);
+            } else if let Some(p) = resp.hover_pos() {
+                let read = text_format::sampler(ui.ctx(), doc);
+                let grid = text_format::loupe_grid(&read, to_canvas(p), text_format::LOUPE_CELLS);
+                text_format::eyedropper_loupe(ui.ctx(), p, view, &grid, t);
+                // The drop is the pointer: its tip on the sampled pixel.
+                let middle = grid.get(grid.len() / 2).copied().flatten();
+                text_format::eyedropper_drop(ui.ctx(), p, middle);
             }
         }
         if editor.canvas.eyedropper.is_none() {
             text_format::drop_composite(ui.ctx());
         }
-        if resp.hovered()
-            && (editor.canvas.eyedropper.is_some()
-                || !matches!(tool, ToolId::Move | ToolId::Selection))
-        {
+        if resp.hovered() && editor.canvas.eyedropper.is_some() {
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+        } else if resp.hovered() && !matches!(tool, ToolId::Move | ToolId::Selection) {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
         if let Some(p) = resp.hover_pos()
@@ -1704,6 +1719,80 @@ fn draw_trace(painter: &egui::Painter, xf: &ViewTransform, editor: &EditorState,
     }
 }
 
+/// The floating text toolbar: over the text being typed (a new one's
+/// format is kept in the edit until it is added; an existing node changes
+/// at once), else over a single selected text.
+#[allow(clippy::too_many_arguments)]
+fn text_toolbar(
+    ui: &Ui,
+    xf: &ViewTransform,
+    view: ERect,
+    m: &capturecraft_format::Manifest,
+    gizmo_tool: bool,
+    editor: &mut EditorState,
+    intents: &mut Vec<UiIntent>,
+    t: &Tokens,
+) {
+    if let Some(e) = editor.canvas.text_edit.clone() {
+        let (font, _, _) = canvas_tools::edit_style(editor, &e);
+        let fit = if e.bubble {
+            e.rect
+        } else {
+            canvas_tools::fit_text_rect(e.rect, &e.text, font.size)
+        };
+        let anchor = xf.rect_to_screen(fit).expand(4.0);
+        match e.node {
+            Some(id) => {
+                let Some(Annotation::Callout(c)) = m.node(id).and_then(|n| n.annotation()) else {
+                    return;
+                };
+                let f = text_format::TextFormat::of(c);
+                if let Some(edit) =
+                    text_format::toolbar(ui.ctx(), &f, Some(id), anchor, view, editor, t)
+                {
+                    intents.push(text_format::format_intent(id, &edit));
+                }
+            }
+            None => {
+                let mut f = e
+                    .format
+                    .clone()
+                    .unwrap_or_else(|| text_format::TextFormat::new_text(&font, Color::BLACK));
+                if let Some(edit) =
+                    text_format::toolbar(ui.ctx(), &f, None, anchor, view, editor, t)
+                    && let Some(e) = &mut editor.canvas.text_edit
+                {
+                    f.apply(&edit);
+                    e.format = Some(f);
+                }
+            }
+        }
+        return;
+    }
+    if gizmo_tool
+        && editor.canvas.gesture.is_none()
+        && let Some((id, c)) = text_format::selected_text(m, &editor.canvas.selection)
+        && let Some(node) = m.node(id).filter(|n| !n.locked)
+        && let Some(f) = NodeFrame::of(node)
+    {
+        let s = f64::from(xf.scale.max(f32::EPSILON));
+        let knob = f.to_canvas(rotate_handle_point(f.bounds, f64::from(STEM_PT) / s));
+        let anchor = f
+            .corners()
+            .into_iter()
+            .chain([knob])
+            .map(|p| ERect::from_center_size(xf.to_screen(p), Vec2::splat(t.handle_size)))
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(ERect::NOTHING);
+        let format = text_format::TextFormat::of(c);
+        if let Some(edit) =
+            text_format::toolbar(ui.ctx(), &format, Some(id), anchor, view, editor, t)
+        {
+            intents.push(text_format::format_intent(id, &edit));
+        }
+    }
+}
+
 /// The text being typed, as a text field over its box (a callout's: inside
 /// its body) at the canvas zoom. Enter (or a click elsewhere) finishes,
 /// Shift+Enter starts a new line, Esc finishes too; the commit is one
@@ -1758,7 +1847,21 @@ fn inline_text(
         resp.request_focus();
         ui.ctx().data_mut(|d| d.insert_temp(id, true));
     }
-    let done = enter || (!first && (resp.lost_focus() || !resp.has_focus()));
+    // Using the text toolbar (or its eyedropper) keeps the text open, and
+    // the typing goes on in it afterwards.
+    let ctx = ui.ctx().clone();
+    let engaged = text_format::toolbar_engaged(&ctx) || editor.canvas.eyedropper.is_some();
+    let done = enter || (!first && !resp.has_focus() && !engaged);
+    if !done
+        && !first
+        && !resp.has_focus()
+        && ctx.memory(|m| m.focused().is_none())
+        && !egui::Popup::is_any_open(&ctx)
+        && !ctx.input(|i| i.pointer.any_down())
+        && editor.canvas.eyedropper.is_none()
+    {
+        resp.request_focus();
+    }
     if done {
         ui.ctx().data_mut(|d| d.remove::<bool>(id));
         resp.surrender_focus();
@@ -2135,6 +2238,17 @@ fn pick_color(
         return;
     };
     let color = Color::rgb(r, g, b);
+    // The colour of a text being typed that has no node yet.
+    if eye.node.is_none()
+        && eye.target == ColorTarget::Text
+        && let Some(e) = editor.canvas.text_edit.as_mut()
+        && e.node.is_none()
+    {
+        e.format
+            .get_or_insert_with(|| text_format::TextFormat::new_text(&Default::default(), color))
+            .color = color;
+        return;
+    }
     if eye.node.is_some() {
         intents.extend(text_format::eyedropper_intent(&doc.manifest, eye, color));
         return;

@@ -9,6 +9,7 @@ use capturecraft_format::{Annotation, FontSpec, Manifest, NodeId, RectF, TextAli
 use photocraft_geom::Point;
 use serde_json::{Map, Value, json};
 
+use super::text_format::TextFormat;
 use crate::UiIntent;
 use crate::state::{CropHit, EditorState, TextEditState, ToolId};
 
@@ -177,7 +178,7 @@ pub fn text_style(editor: &EditorState) -> (FontSpec, capturecraft_format::Color
 
 /// Starts typing a new text box at `rect` (a click gives a one-line box).
 pub fn begin_new_text(editor: &EditorState, at: Point, rect: Option<RectF>) -> TextEditState {
-    let (font, _) = text_style(editor);
+    let (font, color) = text_style(editor);
     let line = f64::from(font.size) * 1.5 + 8.0;
     let rect = rect
         .filter(|r| r.w >= 8.0 && r.h >= 8.0)
@@ -189,6 +190,7 @@ pub fn begin_new_text(editor: &EditorState, at: Point, rect: Option<RectF>) -> T
         original: String::new(),
         style: None,
         bubble: false,
+        format: Some(TextFormat::new_text(&font, color)),
     }
 }
 
@@ -225,6 +227,7 @@ pub fn begin_edit_text(m: &Manifest, id: NodeId) -> Option<TextEditState> {
                 original: text,
                 style: Some((run.font, run.color, c.text.align)),
                 bubble,
+                format: None,
             })
         }
         _ => None,
@@ -253,6 +256,9 @@ pub fn edit_style(
     editor: &EditorState,
     e: &TextEditState,
 ) -> (FontSpec, capturecraft_format::Color, TextAlign) {
+    if let Some(f) = &e.format {
+        return (f.font(), f.color, f.align);
+    }
     e.style.clone().unwrap_or_else(|| {
         let (font, color) = text_style(editor);
         (font, color, TextAlign::Left)
@@ -281,6 +287,11 @@ pub fn text_commit_intent(editor: &EditorState, e: &TextEditState) -> Option<UiI
         None if text.trim().is_empty() => None,
         None => {
             let (font, color) = text_style(editor);
+            let f = e
+                .format
+                .clone()
+                .unwrap_or_else(|| TextFormat::new_text(&font, color));
+            let (font, color) = (f.font(), f.color);
             let r = fit_text_rect(e.rect, text, font.size);
             let style = editor
                 .sidebar
@@ -291,6 +302,10 @@ pub fn text_commit_intent(editor: &EditorState, e: &TextEditState) -> Option<UiI
                 "text": text,
                 "font": font,
                 "color": color,
+                "align": f.align,
+                "valign": f.valign,
+                "padding": f.padding,
+                "underline": f.underline,
             });
             if let Some(s) = style.shadow {
                 p["shadow"] = json!(s);
