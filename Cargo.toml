@@ -1,6 +1,6 @@
 [package]
 name = "capturecraft"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -59,6 +59,7 @@ capturecraft-engine = { path = "crates/engine" }
 # Without default features: only the UI turns on the wgpu backend.
 capturecraft-compositor = { path = "crates/compositor", default-features = false }
 capturecraft-capture = { path = "crates/capture" }
+capturecraft-ocr = { path = "crates/ocr" }
 capturecraft-ui-egui = { path = "crates/ui-egui" }
 photocraft-geom = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
 photocraft-color = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }

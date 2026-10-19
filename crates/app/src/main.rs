@@ -1,5 +1,6 @@
-//! `capturecraft-next`: the CaptureCraft desktop app on eframe + wgpu
-//! (crate `capturecraft-app`), a preview of the layered architecture.
+//! `capturecraft-editor`: the CaptureCraft Editor on eframe + wgpu (crate
+//! `capturecraft-app`); the tray and the capture window open it with the
+//! capture's path.
 //!
 //! Follows PhotoCraft's bootstrap: one `NativeOptions` with the wgpu
 //! renderer and a persisted window layout, then `run_native` with an app
@@ -8,11 +9,14 @@
 //! asks that device for what the compositor needs). Everything else is in
 //! [`app`] (viewports), [`export`] (Share / Export, Copy All) and
 //! `capturecraft-ui-egui` (drawing).
+// No console window next to the editor on Windows.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod app;
 mod capture_flow;
+mod documents;
 mod export;
 
 use std::sync::Arc;
@@ -66,7 +70,7 @@ fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(APP_ID)
-            .with_title("CaptureCraft")
+            .with_title("CaptureCraft Editor")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([720.0, 460.0])
             .with_drag_and_drop(true),
@@ -78,11 +82,17 @@ fn native_options() -> eframe::NativeOptions {
     }
 }
 
+/// `capturecraft-editor [image …]`: the images open as documents.
 fn main() -> eframe::Result {
+    let paths: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+    if paths.iter().any(|p| p == "-h" || p == "--help") {
+        println!("usage: capturecraft-editor [image.png …]");
+        return Ok(());
+    }
     eframe::run_native(
         "CaptureCraft",
         native_options(),
-        Box::new(|cc| Ok(Box::new(app::CaptureCraftApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::CaptureCraftApp::new(cc, &paths)))),
     )
 }
 

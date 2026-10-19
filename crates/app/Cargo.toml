@@ -8,17 +8,19 @@ rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 
-# A preview next to the shipped binaries of the root package (which already
-# has a `capturecraft-app`) until it reaches parity with them (tray, global
-# hotkey, autostart, installers).
+# The editor the root package's tray and capture window open (and the
+# installers ship). The tray, global hotkey and autostart stay in the root
+# package for now.
 [[bin]]
-name = "capturecraft-next"
+name = "capturecraft-editor"
 path = "src/main.rs"
 
 [dependencies]
 capturecraft-format = { workspace = true }
 capturecraft-engine = { workspace = true }
 capturecraft-capture = { workspace = true }
+# The UI analyzer behind Smart Move, Simplify and the Selection tool's Auto Fill.
+capturecraft-ocr = { workspace = true }
 capturecraft-ui-egui = { workspace = true }
 photocraft-geom = { workspace = true }
 egui = { workspace = true }
@@ -31,3 +33,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Copy All (the root package uses the same version).
 arboard = "3.7"
 base64 = "0.22"
+serde_json = { workspace = true }

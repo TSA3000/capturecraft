@@ -46,6 +46,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --target ${{ matrix.target }}
+      - run: cargo build --target ${{ matrix.target }} -p capturecraft -p capturecraft-app
       - if: ${{ !matrix.cross }}
         run: cargo test --workspace --target ${{ matrix.target }}

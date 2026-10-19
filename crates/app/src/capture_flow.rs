@@ -63,7 +63,11 @@ impl CaptureFlow {
 
 /// Opens a finished capture as the active document; returns its index.
 pub fn open_capture(session: &mut Session, payload: RawCapturePayload) -> Result<usize, String> {
-    let doc = payload.into_document().map_err(|e| e.to_string())?;
+    let mut doc = payload.into_document().map_err(|e| e.to_string())?;
+    // The tray and Library key documents by id.
+    if doc.manifest.id.is_empty() {
+        doc.manifest.id = crate::documents::unique_doc_id(session);
+    }
     let size = doc.manifest.base.size;
     let pixels = Pixels::from_surface(size, doc.base)
         .ok_or_else(|| "the capture is not RGBA8".to_string())?;

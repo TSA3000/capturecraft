@@ -20,8 +20,10 @@
 //! destination, appears in front of the Recent Captures tray and the
 //! editor comes to the front.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use capturecraft_capture::{CaptureBackend, HitTestOptions, backends};
@@ -30,7 +32,7 @@ use capturecraft_engine::render::{Flattened, flatten, render_scene};
 use capturecraft_format::CaptureMode;
 use capturecraft_ui_egui::panels::canvas_viewport::{CanvasImage, CpuCanvas, GpuCanvas};
 use capturecraft_ui_egui::panels::gizmo::backdrop_intent;
-use capturecraft_ui_egui::panels::recent_tray::sync_tray;
+use capturecraft_ui_egui::panels::recent_tray::{Thumbnail, sync_tray};
 use capturecraft_ui_egui::state::{
     AppState, CaptureSettings, CaptureTab, CrosshairOverlayState, ImageFormat, SelectionSource,
     ShareDestination,
@@ -42,12 +44,13 @@ use capturecraft_ui_egui::views::capture_hud::{
 use capturecraft_ui_egui::views::crosshair_overlay::{
     CrosshairOverlay, DesktopMapping, DesktopTextures, OverlayAction,
 };
-use capturecraft_ui_egui::views::editor_window::EditorWindow;
+use capturecraft_ui_egui::views::editor_window::{EditorWindow, window_title};
 use capturecraft_ui_egui::{Dispatched, UiIntent, dispatch};
 use eframe::egui_wgpu;
 use egui::{ViewportCommand, ViewportId};
 
 use crate::capture_flow::{CaptureFlow, open_capture};
+use crate::documents::{self, index_of, open_blank, open_image};
 use crate::export;
 
 /// eframe storage key of [`AppState`].
@@ -70,6 +73,11 @@ pub enum ShellAction {
     Copy,
     /// Share / Export to the captures folder.
     Export(ImageFormat),
+    /// Close documents (the tray's ×, Delete: nothing is on disk yet).
+    Close(Vec<String>),
+    Duplicate(String),
+    CopyDocument(String),
+    NewBlank,
     /// Not wired up yet; shown as a notice.
     Unavailable(&'static str),
 }
@@ -92,7 +100,14 @@ pub fn shell_action(intent: &UiIntent) -> ShellAction {
         UiIntent::Export { format } => ShellAction::Export(*format),
         UiIntent::OpenSettings => ShellAction::Unavailable("Preferences"),
         UiIntent::CombineImages { .. } => ShellAction::Unavailable("Combine Images"),
-        UiIntent::DeleteDocuments { .. } => ShellAction::Unavailable("Delete from Library"),
+        UiIntent::DeleteDocuments { doc_ids } | UiIntent::CloseDocuments { doc_ids } => {
+            ShellAction::Close(doc_ids.clone())
+        }
+        UiIntent::DuplicateDocument { doc_id } => ShellAction::Duplicate(doc_id.clone()),
+        UiIntent::CopyDocument { doc_id } => ShellAction::CopyDocument(doc_id.clone()),
+        UiIntent::SaveAs { .. } => ShellAction::Unavailable("The Save As dialog"),
+        UiIntent::NewBlankImage => ShellAction::NewBlank,
+        UiIntent::Unavailable(what) => ShellAction::Unavailable(what),
         UiIntent::Command { .. } | UiIntent::ActivateDocument { .. } => {
             ShellAction::Unavailable("engine intent")
         }
@@ -142,10 +157,30 @@ pub struct CaptureCraftApp {
     /// One-line status (failed commands, capture errors, saved files),
     /// drawn over the editor until the next one.
     notice: Option<String>,
+    /// Recent Captures thumbnails by document id, with the content key
+    /// they were drawn from.
+    thumbnails: HashMap<String, (u64, Thumbnail, egui::TextureHandle)>,
+    /// The window title last sent.
+    title: String,
+}
+
+/// Blank images start at this size.
+const BLANK_SIZE: photocraft_geom::Size = photocraft_geom::Size::new(800, 600);
+
+/// Changes whenever what a document looks like changes (its manifest or
+/// its edited pixels).
+fn content_key(doc: &capturecraft_engine::DocState) -> u64 {
+    let mut h = DefaultHasher::new();
+    serde_json::to_vec(&doc.manifest)
+        .unwrap_or_default()
+        .hash(&mut h);
+    doc.edited_pixels().map(|p| p.revision()).hash(&mut h);
+    h.finish()
 }
 
 impl CaptureCraftApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// The app with `open` (image files) as its first documents.
+    pub fn new(cc: &eframe::CreationContext<'_>, open: &[PathBuf]) -> Self {
         let state: AppState = cc
             .storage
             .and_then(|s| eframe::get_value(s, STATE_KEY))
@@ -159,8 +194,10 @@ impl CaptureCraftApp {
             ),
             None => (None, None),
         };
-        Self {
-            session: Session::new(),
+        let mut session = Session::new();
+        session.set_analyzer(Box::new(capturecraft_ocr::Analyzer::auto()));
+        let mut app = Self {
+            session,
             state,
             render_state,
             canvas,
@@ -170,9 +207,80 @@ impl CaptureCraftApp {
             textures: None,
             pending: None,
             clipboard: None,
-            hud_open: true,
+            // Opened with images (Open editor): straight to the editor.
+            hud_open: open.is_empty(),
             notice,
+            thumbnails: HashMap::new(),
+            title: String::new(),
+        };
+        for p in open {
+            app.open_file(p);
         }
+        app
+    }
+
+    fn open_file(&mut self, path: &Path) {
+        match open_image(&mut self.session, path) {
+            Ok(_) => {
+                sync_tray(&mut self.state.editor.tray, &self.session);
+                self.state.editor.library.visible = false;
+            }
+            Err(e) => self.notice = Some(format!("Could not open {e}")),
+        }
+    }
+
+    /// Closes the documents `ids` and forgets their thumbnails.
+    fn close_documents(&mut self, ids: &[String]) {
+        for id in ids {
+            if let Some(i) = index_of(&self.session, id) {
+                let _ = self.session.close(i);
+            }
+            self.thumbnails.remove(id);
+        }
+        self.state.editor.canvas.selection.clear();
+        self.state.editor.canvas.marquee = None;
+        sync_tray(&mut self.state.editor.tray, &self.session);
+    }
+
+    /// Uploads thumbnails of new documents and of the active one when it
+    /// changed (not mid-drag: flattening a large capture takes a while).
+    fn refresh_thumbnails(&mut self, ctx: &egui::Context) {
+        let busy = ctx.input(|i| i.pointer.any_down());
+        let active = self.session.active().map(|d| d.manifest.id.clone());
+        for doc in self.session.documents() {
+            let id = &doc.manifest.id;
+            let have = self.thumbnails.get(id).map(|(k, ..)| *k);
+            let stale = match have {
+                None => true,
+                Some(k) => !busy && active.as_ref() == Some(id) && k != content_key(doc),
+            };
+            if !stale {
+                continue;
+            }
+            let Some((w, h, rgba)) = flatten(doc).ok().as_ref().and_then(documents::thumbnail)
+            else {
+                continue;
+            };
+            let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            let tex = ctx.load_texture(
+                format!("capturecraft.thumb.{id}"),
+                img,
+                egui::TextureOptions::LINEAR,
+            );
+            let th = Thumbnail {
+                texture: tex.id(),
+                size: [w, h],
+            };
+            self.thumbnails
+                .insert(id.clone(), (content_key(doc), th, tex));
+        }
+        let open: Vec<&str> = self
+            .session
+            .documents()
+            .iter()
+            .map(|d| d.manifest.id.as_str())
+            .collect();
+        self.thumbnails.retain(|id, _| open.contains(&id.as_str()));
     }
 
     fn tokens(&self) -> Tokens {
@@ -311,11 +419,20 @@ impl CaptureCraftApp {
     }
 
     fn copy_active(&mut self) {
+        let id = self.session.active().map(|d| d.manifest.id.clone());
+        match id {
+            Some(id) => self.copy_document(&id),
+            None => self.notice = Some("Copy failed: No capture open".into()),
+        }
+    }
+
+    fn copy_document(&mut self, id: &str) {
+        let flat = index_of(&self.session, id)
+            .and_then(|i| self.session.documents().get(i))
+            .ok_or_else(|| "the capture is closed".to_string())
+            .and_then(|d| flatten(d).map_err(|e| e.to_string()));
         self.notice = Some(
-            match self
-                .flatten_active()
-                .and_then(|f| export::copy(&mut self.clipboard, &f).map(|()| f))
-            {
+            match flat.and_then(|f| export::copy(&mut self.clipboard, &f).map(|()| f)) {
                 Ok(f) => format!("Copied {} × {} px", f.width, f.height),
                 Err(e) => format!("Copy failed: {e}"),
             },
@@ -368,6 +485,27 @@ impl CaptureCraftApp {
                     }
                     ShellAction::Copy => self.copy_active(),
                     ShellAction::Export(format) => self.export(format, None, None),
+                    ShellAction::Close(ids) => self.close_documents(&ids),
+                    ShellAction::Duplicate(id) => {
+                        let new_id = documents::unique_doc_id(&self.session);
+                        match index_of(&self.session, &id)
+                            .map(|i| self.session.duplicate(i, &new_id))
+                        {
+                            Some(Ok(_)) => sync_tray(&mut self.state.editor.tray, &self.session),
+                            Some(Err(e)) => self.notice = Some(format!("Duplicate failed: {e}")),
+                            None => {
+                                self.notice = Some("Duplicate failed: the capture is closed".into())
+                            }
+                        }
+                    }
+                    ShellAction::CopyDocument(id) => self.copy_document(&id),
+                    ShellAction::NewBlank => match open_blank(&mut self.session, BLANK_SIZE) {
+                        Ok(_) => {
+                            sync_tray(&mut self.state.editor.tray, &self.session);
+                            self.state.editor.library.visible = false;
+                        }
+                        Err(e) => self.notice = Some(format!("New image failed: {e}")),
+                    },
                     ShellAction::Unavailable(what) => {
                         self.notice = Some(format!("{what} is not available yet"));
                     }
@@ -427,13 +565,20 @@ impl CaptureCraftApp {
     fn show_editor(&mut self, ui: &mut egui::Ui) -> Vec<UiIntent> {
         let image = self.render_canvas(ui.ctx());
         sync_tray(&mut self.state.editor.tray, &self.session);
+        self.refresh_thumbnails(ui.ctx());
+        let title = window_title(self.session.active());
+        if title != self.title {
+            ui.ctx()
+                .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        // Thumbnails are not loaded yet: the tray and Library show
-        // placeholders.
+        let thumbs = &self.thumbnails;
+        let thumbnail = |id: &str| thumbs.get(id).map(|(_, th, _)| *th);
         let intents = EditorWindow {
             session: &self.session,
             image,
-            thumbnail: &|_| None,
+            thumbnail: &thumbnail,
             today: &today,
         }
         .show(ui, &mut self.state);
@@ -525,6 +670,26 @@ mod tests {
             shell_action(&UiIntent::CombineImages { doc_ids: vec![] }),
             ShellAction::Unavailable(_)
         ));
+        assert_eq!(
+            shell_action(&UiIntent::CloseDocuments {
+                doc_ids: vec!["a".into()]
+            }),
+            ShellAction::Close(vec!["a".into()])
+        );
+        assert_eq!(
+            shell_action(&UiIntent::DeleteDocuments {
+                doc_ids: vec!["b".into()]
+            }),
+            ShellAction::Close(vec!["b".into()])
+        );
+        assert_eq!(
+            shell_action(&UiIntent::NewBlankImage),
+            ShellAction::NewBlank
+        );
+        assert_eq!(
+            shell_action(&UiIntent::Unavailable("Assets")),
+            ShellAction::Unavailable("Assets")
+        );
     }
 
     #[test]

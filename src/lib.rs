@@ -4,8 +4,6 @@ pub mod app;
 mod autostart;
 pub mod config;
 pub(crate) mod draw;
-pub mod editor;
-pub mod editor_ui;
 pub mod overlay;
 pub mod prefs_ui;
 mod region;
