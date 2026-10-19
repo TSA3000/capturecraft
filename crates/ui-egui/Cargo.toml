@@ -1,0 +1,19 @@
+[package]
+name = "capturecraft-ui-egui"
+version = "0.1.0"
+description = "CaptureCraft egui shell: capture HUD and the five-zone editor (thin: every action is an engine command)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# egui/eframe join when the views move here from the app crate; state.rs
+# is plain serializable data so it can be tested and persisted without them.
+[dependencies]
+capturecraft-format = { workspace = true }
+photocraft-geom = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+capturecraft-engine = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "capturecraft-format"
+version = "0.1.0"
+description = "CaptureCraft native .capturecraft archive: manifest, sparse tiles, cursor layer, annotation tree"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+photocraft-geom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
