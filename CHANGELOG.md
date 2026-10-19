@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.22.0 (2026-10-19)
+
+- Text, Polygon, Pen, Eraser, Magnify, Spotlight and Crop tools draw.
+- Canvas right-click menu; Ctrl+Z / Ctrl+Y / Ctrl+C and the other edit shortcuts; a
+  fading toast for messages.
+- Layers and History drawer tabs.
+- `.capturecraft` save and open (with history) through native dialogs; Save As exports images.
+- Grab Text tool and modal (Copy Text, Replace as Editable Text).
+- Engine: annotation.delete, arrange, reorder, setProps, group, ungroup, paste, duplicate,
+  addText, setText, addPen, addMagnifier, addSpotlight; canvas.crop, canvas.erase; edit.jump;
+  ocr.replaceLines; Session::save_archive / open_archive. Format: pen annotations, node groups,
+  the edited raster layer, the archive container.
+
 ## v0.21.0 (2026-10-19)
 
 - Shape (rectangle / ellipse), Highlight, Blur and Pixelate tools draw on the canvas.

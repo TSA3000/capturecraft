@@ -1,3 +1,37 @@
+# v0.22.0
+
+## Changes
+
+- **Every annotation tool draws**: Text (click to type, Enter finishes, double-click to edit),
+  Shape with a new Polygon mode, Pen (smooth freehand curves, PhotoCraft's Freeform Pen fit),
+  Eraser (erases the capture to transparency), Magnify, Spotlight and Crop (PhotoCraft-style
+  frame: handles, thirds guides, Enter to crop, Esc to reset).
+- **Right-click menu** on the canvas: Cut, Copy, Paste, Duplicate, Bring to Front / Forward,
+  Send Backward / to Back, Group, Ungroup, Delete, Grab Text, Copy All, the selection's Quick
+  Styles and a tool strip.
+- **Keyboard shortcuts**: Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z, Ctrl+C (selected annotations, or the
+  whole image when nothing is selected), Ctrl+X, Ctrl+V, Ctrl+D, Delete, Ctrl+G,
+  Ctrl+Shift+G, Ctrl+A, Ctrl+O, Ctrl+S, Ctrl+Shift+S. Messages appear as a toast at the bottom
+  that fades out ("Copied to clipboard!").
+- **Layers and History** tabs in the drawer: show/hide, lock, rename and drag to restack
+  annotations; click any step in the history to go back or forward to it.
+- **Save and open `.capturecraft` documents** (File › Open, Save, Save As) with native
+  dialogs. A document keeps its annotations, the edited pixels, Smart Move objects and the
+  whole undo/redo history; Save As can also write PNG, JPEG or WebP. The Library lists saved
+  documents too.
+- **Grab Text**: a new tool (on the toolbar and in the right-click menu). Drag over text to
+  read it; copy it ("Text copied to clipboard!"), choose reading order or the on-screen column
+  layout, or replace it with editable text boxes in one step.
+
+## Upgrading
+
+- Install over v0.21.0; nothing else to do.
+- Grab Text reads words only when the text recognition models are installed
+  (`cargo xtask models` for source builds); without them it finds the lines but cannot read
+  them, and says so.
+- A toolbar layout saved by an earlier version is kept, so Grab Text appears under More there;
+  pin it from More to put it on the toolbar (new installs have it pinned).
+
 # v0.21.0
 
 ## Changes

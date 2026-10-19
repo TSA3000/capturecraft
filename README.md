@@ -140,9 +140,16 @@ Layout, top to bottom:
 | Arrow | Drag from tail to tip; drag the green handle to bend it |
 | Callout | Click for a default bubble or drag its size; the yellow diamond aims the tail, the `+` adds another |
 | Step | Click to drop the next number (1, 2, 3 / A, B, C / I, II, III) |
-| Shape | Drag a rectangle or ellipse (switch in Tool Properties) in the selected Quick Style |
+| Text | Click to type (or drag a box); Enter finishes, Shift+Enter breaks the line; double-click a text to edit it |
+| Shape | Drag a rectangle or ellipse, or click the corners of a polygon (double-click or Enter closes it), in the selected Quick Style |
 | Highlight | Drag over text for a translucent marker band (yellow, green, pink or blue) |
 | Blur / Pixelate | Drag over private details; pick Light / Medium / Strong blur or Fine / Medium / Coarse blocks |
+| Pen | Drag a freehand line, smoothed into curves the way PhotoCraft's Freeform Pen fits them |
+| Eraser | Drag over the capture to erase it to transparency (size and hardness); annotations stay |
+| Magnify | Click to drop a 1.5×–4× lens (or drag its size); move the source ring afterwards |
+| Spotlight | Drag a rectangle or ellipse; everything around it is dimmed |
+| Crop | Adjust the frame over the canvas (handles, move, draw a new one, Alt from the centre); Enter or double-click crops, Esc resets |
+| Grab Text | Drag over text (a click reads the whole capture): the text appears in reading order or as on screen, to copy or to turn into editable text boxes |
 | Move | Select, Shift+click to add, drag to move; handles resize (Shift keeps the aspect, Alt from the centre), rotate (Shift snaps to 15°) and round corners |
 | Selection | Rectangle: drag to select part of the capture, drag inside it to move it, Delete to remove it; the hole is Transparent or Auto Fill |
 | Cut Out | Drag across the capture to remove a strip and close the gap (straight or torn seam) |
@@ -152,21 +159,24 @@ Layout, top to bottom:
 | Canvas | Resize squares on the border add padding; Resize / Trim Canvas from the size button |
 | Share / Save | PNG to the captures folder; JPG, WebP, SVG, PDF (every open capture, one per page) and Clipboard from the arrow; Copy All |
 | Captures | Recent Captures strip (switch, close, Duplicate, Copy, Delete), Tag, New Blank Image, zoom, Undo / Redo |
-| Library | The open captures plus every image in the captures folders (Pictures/CaptureCraft, the tray's output folder, Share › File folders); double-click opens one |
+| Files | File › Open, Save, Save As: `.capturecraft` documents keep every annotation, the edited pixels and the whole undo history; Save As also writes PNG, JPEG or WebP |
+| Library | The open captures plus every image and `.capturecraft` document in the captures folders (Pictures/CaptureCraft, the tray's output folder, Share › File folders); double-click opens one |
+| Layers / History | Drawer tabs: hide, lock, rename and restack annotations; click any past step to go back to it |
+| Right-click | Cut, Copy, Paste, Duplicate, Bring to Front / Forward, Send Backward / to Back, Group, Ungroup, Delete, Grab Text, Copy All, the selection's Quick Styles and a tool strip |
+| Shortcuts | Ctrl+Z undo; Ctrl+Y or Ctrl+Shift+Z redo; Ctrl+C copies the selected annotations, or the whole image ("Copied to clipboard!") with nothing selected; Ctrl+X, Ctrl+V, Ctrl+D, Delete, Ctrl+G / Ctrl+Shift+G, Ctrl+A, Ctrl+O, Ctrl+S, Ctrl+Shift+S |
 | Pointer | The canvas pointer carries the active tool's icon |
 
 #### Not working yet
 
 The buttons are there and say "not available yet" when used:
 
-- **Tools**: Text, Stamp, Fill, Pen, Eraser, Magnify, Spotlight, Smart Move
-  and Crop. They can be selected
-  and their Quick Styles edited, but they do not draw yet.
+- **Tools**: Stamp, Fill and Smart Move. They can be selected and their
+  Quick Styles edited, but they do not draw yet.
 - **Selection**: Ellipse, Polygon and Freehand Lasso modes, Snap to Object.
 - **Effects**: Torn Edge, Perspective / Shear, Spotlight and Color Filter.
-- **Files**: `.capturecraft` documents are not saved yet (captures live
-  while the editor is open; use Share to keep an image), and Save As has no
-  file dialog yet.
+- **Files**: Simplify's palette and exclude choices are not kept in a
+  saved document (its shapes and heals are), and closing an unsaved capture
+  does not ask to save it yet.
 - **Other**: Assets, Create › Image from Template / Video from Images, the
   Video menu, Combine Images and Preferences.
 
@@ -174,14 +184,11 @@ The buttons are there and say "not available yet" when used:
 
 Roughly in this order:
 
-1. **Text and Crop**: Text needs an annotation type of its own and editing
-   on the canvas.
-2. **Pen, Eraser, Magnify, Spotlight, Stamp, Fill and the Smart Move tool.**
-3. **Saving and opening `.capturecraft` documents**, a Save As dialog, and
-   Combine Images.
-4. **Ellipse, Polygon and Lasso selections** and Snap to Object.
-5. **Torn Edge, Perspective, Spotlight and Color Filter effects.**
-6. **Video and scrolling capture**, Preferences, and moving the tray, global
+1. **Stamp, Fill and the Smart Move tool**, and Combine Images.
+2. **Ellipse, Polygon and Lasso selections** and Snap to Object.
+3. **Torn Edge, Perspective, Spotlight and Color Filter effects.**
+4. **A save prompt for unsaved captures**, autosave and recovery.
+5. **Video and scrolling capture**, Preferences, and moving the tray, global
    hotkey and autostart into the new app.
 
 ### Menus and preferences
