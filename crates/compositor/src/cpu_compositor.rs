@@ -591,9 +591,10 @@ mod tests {
                     1,
                     RenderNode::Shape(ShapeSpec {
                         geometry: ShapeGeometry::Rect(RectF32::new(rect_x, 40.0, 60.0, 50.0)),
-                        fill: Some(Color::new(0.1, 0.4, 0.9, 1.0)),
+                        fill: Some(Color::new(0.1, 0.4, 0.9, 1.0).into()),
                         stroke: None,
                         shadow: None,
+                        text: None,
                     }),
                 ),
                 SceneNode::new(
@@ -602,6 +603,7 @@ mod tests {
                     RenderNode::BackdropFilter(BackdropFilterSpec {
                         shape: ShapeGeometry::Rect(RectF32::new(0.0, 0.0, 700.0, 120.0)),
                         filter: BackdropFilterKind::GaussianBlur { sigma: 3.0 },
+                        feather_px: 0.0,
                     }),
                 ),
             ],

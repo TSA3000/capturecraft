@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 pub use photocraft_doc::{LineCap, LineJoin};
+pub use photocraft_geom::Affine;
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 
@@ -116,6 +117,84 @@ impl Color {
     }
 }
 
+/// One colour stop of a gradient; `offset` is `0..=1` along it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: Color,
+}
+
+/// What a fill paints with. Gradient geometry is in canvas pixels (frame
+/// pixels for a [`ShadowFrameSpec`] backdrop) and is not moved by the
+/// node's transform: the engine passes it already placed. Stops are
+/// interpolated in straight sRGB-encoded floats, like Snagit and CSS.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Paint {
+    Solid(Color),
+    /// Offset 0 at `from`, 1 at `to`, constant beyond either end.
+    Linear {
+        from: PointF32,
+        to: PointF32,
+        stops: Vec<GradientStop>,
+    },
+    /// Offset 0 at `center`, 1 at `radius`, constant beyond.
+    Radial {
+        center: PointF32,
+        radius: f32,
+        stops: Vec<GradientStop>,
+    },
+}
+
+impl From<Color> for Paint {
+    fn from(c: Color) -> Self {
+        Paint::Solid(c)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextVAlign {
+    Top,
+    #[default]
+    Middle,
+    Bottom,
+}
+
+/// A run of uniformly styled text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextRunSpec {
+    pub text: String,
+    /// Family name, resolved by photocraft-text (system fonts, its bundled
+    /// fonts and craft-fonts when built with `CRAFT_FONTS_DIR`).
+    pub family: String,
+    pub size_px: f32,
+    /// CSS weight `1..=1000`.
+    pub weight: u16,
+    pub italic: bool,
+    pub color: Color,
+    pub underline: bool,
+    pub strike: bool,
+}
+
+/// Shaped, wrapped text laid out in `frame` (canvas pixels, before the
+/// node's transform): callout text, step badge labels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextSpec {
+    pub runs: Vec<TextRunSpec>,
+    pub frame: RectF32,
+    pub align: TextAlign,
+    pub valign: TextVAlign,
+    /// Break lines at `frame.w`; otherwise one line per `\n`.
+    pub wrap: bool,
+}
+
 /// Outline of a shape or annotation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrokeSpec {
@@ -191,13 +270,15 @@ pub enum ShapeGeometry {
     Polygon(Vec<PointF32>),
 }
 
-/// A filled and/or stroked plain shape (the Shape tool).
+/// A filled and/or stroked plain shape (the Shape tool, step badges).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapeSpec {
     pub geometry: ShapeGeometry,
-    pub fill: Option<Color>,
+    pub fill: Option<Paint>,
     pub stroke: Option<StrokeSpec>,
     pub shadow: Option<DropShadowStyle>,
+    /// Drawn above the fill and stroke (a step badge's number).
+    pub text: Option<TextSpec>,
 }
 
 /// The body of a callout.
@@ -256,9 +337,11 @@ pub struct CalloutTail {
 pub struct CalloutSpec {
     pub body: CalloutBody,
     pub tails: Vec<CalloutTail>,
-    pub fill: Option<Color>,
+    pub fill: Option<Paint>,
     pub stroke: Option<StrokeSpec>,
     pub shadow: Option<DropShadowStyle>,
+    /// Drawn above the fill and stroke, inside the body.
+    pub text: Option<TextSpec>,
 }
 
 /// Shaft geometry of an arrow.
@@ -372,6 +455,8 @@ pub enum BackdropFilterKind {
 pub struct BackdropFilterSpec {
     pub shape: ShapeGeometry,
     pub filter: BackdropFilterKind,
+    /// Width of the soft edge, centred on the outline (`0` = hard edge).
+    pub feather_px: f32,
 }
 
 /// Dims (and optionally blurs) everything outside the targets.
@@ -381,7 +466,7 @@ pub struct SpotlightSpec {
     /// `0..=1`: how much of `dim_color` is laid over the outside.
     pub dim_opacity: f32,
     pub dim_color: Color,
-    /// Width of the soft edge around the targets, in pixels.
+    /// Width of the soft edge, centred on the target outlines, in pixels.
     pub feather_px: f32,
     /// Blur of the outside (`0` = none).
     pub blur_sigma: f32,
@@ -452,6 +537,21 @@ impl PartialEq for RasterSpec {
     }
 }
 
+/// Presents the finished canvas: grows it by `margin` on every side,
+/// paints `backdrop` there, and draws the canvas over it clipped to a
+/// rounded rectangle, with a drop shadow and an optional border (centred
+/// on the clip edge). Later nodes are in frame coordinates, so it is
+/// normally last.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowFrameSpec {
+    pub margin: u32,
+    pub corner_radius: f32,
+    /// In frame coordinates (canvas `(0, 0)` is frame `(margin, margin)`).
+    pub backdrop: Paint,
+    pub shadow: Option<DropShadowStyle>,
+    pub border: Option<StrokeSpec>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderNode {
     Raster(RasterSpec),
@@ -463,6 +563,8 @@ pub enum RenderNode {
     Spotlight(SpotlightSpec),
     /// Restructures the canvas: later nodes are in post-cut coordinates.
     CutOut(CutOutSeamSpec),
+    /// Restructures the canvas: later nodes are in frame coordinates.
+    ShadowFrame(ShadowFrameSpec),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -470,6 +572,12 @@ pub struct SceneNode {
     pub id: NodeId,
     pub revision: RevisionId,
     pub node: RenderNode,
+    /// Node space → canvas space (rotation, the scale of a resized
+    /// raster). Applies to the node's geometry, text and pixels; a
+    /// magnifier's lens and a spotlight's targets turn but what they show
+    /// does not. Ignored by cut outs and shadow frames. Part of the cache
+    /// key together with the revision.
+    pub transform: Option<Affine>,
 }
 
 impl SceneNode {
@@ -478,7 +586,14 @@ impl SceneNode {
             id: NodeId(id),
             revision: RevisionId(revision),
             node,
+            transform: None,
         }
+    }
+
+    /// The same node drawn through `t` (`None` for the identity).
+    pub fn with_transform(mut self, t: Affine) -> Self {
+        self.transform = (t != Affine::IDENTITY).then_some(t);
+        self
     }
 }
 

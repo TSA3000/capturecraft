@@ -10,9 +10,16 @@
 //!
 //! Annotations are drawn bottom to top in [`Manifest::annotations`] order;
 //! backdrop nodes (blur, magnifier, spotlight) sample everything below
-//! them.
+//! them. A node's geometry is stored unrotated; [`AnnotationNode::rotation_rad`]
+//! turns it about [`Annotation::pivot`] when drawn
+//! ([`AnnotationNode::transform`], a `photocraft-geom` affine).
+//!
+//! **Frame space**: with a [`CanvasBackdrop::RoundedShadowFrame`] the
+//! exported image is the canvas plus `margin_px` on every side; frame
+//! space is that image, origin top-left, so canvas `(0, 0)` is frame
+//! `(margin_px, margin_px)`.
 
-use photocraft_geom::{Point, Rect, Size, TILE_SIZE, TileCoord};
+use photocraft_geom::{Affine, Point, Rect, Size, TILE_SIZE, TileCoord};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -145,6 +152,12 @@ impl Manifest {
         }
         let v = &mut V::default();
         check_size(v, "canvas.size", self.canvas.size);
+        v.at("canvas.backdrop", |v| self.canvas.backdrop.validate(v));
+        check_size(
+            v,
+            "canvas.backdrop.margin_px",
+            self.canvas.backdrop.frame_size(self.canvas.size),
+        );
         check_size(v, "base.size", self.base.size);
         self.base.validate(v);
         if let Some(c) = &self.cursor {
@@ -176,6 +189,9 @@ pub struct Canvas {
     pub base_origin: Offset,
     /// Shown where the canvas extends past the base raster.
     pub background: Background,
+    /// Presentation around the finished canvas (the export grows by its
+    /// margin).
+    pub backdrop: CanvasBackdrop,
 }
 
 impl Default for Canvas {
@@ -184,6 +200,91 @@ impl Default for Canvas {
             size: Size::new(0, 0),
             base_origin: Offset::default(),
             background: Background::Transparent,
+            backdrop: CanvasBackdrop::None,
+        }
+    }
+}
+
+/// Largest backdrop margin, in pixels.
+pub const MAX_BACKDROP_MARGIN_PX: f32 = 2048.0;
+
+/// What surrounds the canvas in the exported image.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CanvasBackdrop {
+    /// The canvas is the image.
+    #[default]
+    None,
+    /// The canvas with rounded corners, a drop shadow and an optional
+    /// border, centred on `backdrop_fill` with `margin_px` on every side.
+    /// Gradient points of `backdrop_fill` are in frame space.
+    RoundedShadowFrame {
+        margin_px: f32,
+        corner_radius_px: f32,
+        backdrop_fill: Fill,
+        shadow: Option<DropShadow>,
+        border: Option<Stroke>,
+    },
+}
+
+impl CanvasBackdrop {
+    /// Snagit's default frame: 48 px of soft grey-blue gradient, 12 px
+    /// corners, a soft shadow.
+    pub fn rounded_shadow_frame() -> Self {
+        CanvasBackdrop::RoundedShadowFrame {
+            margin_px: 48.0,
+            corner_radius_px: 12.0,
+            backdrop_fill: Fill::Solid {
+                color: Color::rgb(0xE2, 0xE8, 0xF0),
+            },
+            shadow: Some(DropShadow {
+                color: Color::rgba(0x0F, 0x17, 0x2A, 0x59),
+                offset_x: 0.0,
+                offset_y: 8.0,
+                blur: 24.0,
+                spread: 0.0,
+            }),
+            border: None,
+        }
+    }
+
+    /// Margin on each side, whole pixels (0 without a frame).
+    pub fn margin(&self) -> u32 {
+        match self {
+            CanvasBackdrop::None => 0,
+            CanvasBackdrop::RoundedShadowFrame { margin_px, .. } => {
+                margin_px.clamp(0.0, MAX_BACKDROP_MARGIN_PX).round() as u32
+            }
+        }
+    }
+
+    /// Size of the exported image for a canvas of `canvas`.
+    pub fn frame_size(&self, canvas: Size) -> Size {
+        let m = self.margin() * 2;
+        Size::new(
+            canvas.width.saturating_add(m),
+            canvas.height.saturating_add(m),
+        )
+    }
+
+    fn validate(&self, v: &mut V) {
+        if let CanvasBackdrop::RoundedShadowFrame {
+            margin_px,
+            corner_radius_px,
+            backdrop_fill,
+            shadow,
+            border,
+        } = self
+        {
+            check_range(v, "margin_px", *margin_px, 0.0, MAX_BACKDROP_MARGIN_PX);
+            check_len(v, "corner_radius_px", *corner_radius_px);
+            backdrop_fill.validate(v, "backdrop_fill");
+            if let Some(s) = shadow {
+                s.validate(v, "shadow");
+            }
+            if let Some(s) = border {
+                s.validate(v, "border");
+            }
         }
     }
 }
@@ -493,6 +594,10 @@ pub struct AnnotationNode {
     pub locked: bool,
     #[serde(default = "one")]
     pub opacity: f32,
+    /// Clockwise rotation (y down) about [`Annotation::pivot`], radians,
+    /// within `-π..=π`. The stored geometry is unrotated.
+    #[serde(default)]
+    pub rotation_rad: f32,
     /// Command that generated the node (`smart.simplify`), so re-running it
     /// replaces its own output.
     #[serde(default)]
@@ -502,6 +607,24 @@ pub struct AnnotationNode {
 
 fn yes() -> bool {
     true
+}
+
+/// Rotation by `rad` (clockwise on screen, y down) about `c`.
+pub fn rotation_about(c: Point, rad: f32) -> Affine {
+    // `a.then(b)` applies `a` first.
+    Affine::translate(-c.x, -c.y)
+        .then(&Affine::rotate(f64::from(rad)))
+        .then(&Affine::translate(c.x, c.y))
+}
+
+/// `rad` wrapped into `-π..=π`.
+pub fn normalize_angle(rad: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    if !rad.is_finite() {
+        return 0.0;
+    }
+    let r = (rad + PI).rem_euclid(TAU) - PI;
+    if r <= -PI { PI } else { r }
 }
 fn one() -> f32 {
     1.0
@@ -516,6 +639,7 @@ impl AnnotationNode {
             visible: true,
             locked: false,
             opacity: 1.0,
+            rotation_rad: 0.0,
             generated_by: None,
             kind: NodeKind::Known(annotation),
         }
@@ -540,8 +664,27 @@ impl AnnotationNode {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Geometry space → canvas space: the rotation about the pivot, or the
+    /// identity for unrotated nodes, unknown nodes and cut outs (which are
+    /// never rotated).
+    pub fn transform(&self) -> Affine {
+        match self.annotation() {
+            Some(a) if self.rotation_rad != 0.0 && self.rotation_rad.is_finite() => a
+                .pivot()
+                .map_or(Affine::IDENTITY, |c| rotation_about(c, self.rotation_rad)),
+            _ => Affine::IDENTITY,
+        }
+    }
+
     fn validate(&self, v: &mut V) {
         check_range(v, "opacity", self.opacity, 0.0, 1.0);
+        check_range(
+            v,
+            "rotation_rad",
+            self.rotation_rad,
+            -std::f32::consts::PI,
+            std::f32::consts::PI,
+        );
         if let NodeKind::Known(a) = &self.kind {
             v.at("kind", |v| a.validate(v));
         }
@@ -701,6 +844,97 @@ impl Annotation {
             Annotation::CutOutSeam(_) => None,
             Annotation::Shape(s) => Some(s.shape.bounds()),
             Annotation::SmartObject(o) => Some(o.rect),
+        }
+    }
+
+    /// The point rotation turns about: the callout body's centre (so
+    /// dragging a tail does not move the body), the centre of
+    /// [`Annotation::bounds`] otherwise; `None` for cut outs.
+    pub fn pivot(&self) -> Option<Point> {
+        match self {
+            Annotation::Callout(c) => Some(c.bounds.center()),
+            _ => self.bounds().map(|b| b.center()),
+        }
+    }
+
+    /// Scales and moves the geometry so [`Annotation::bounds`] `from` maps
+    /// onto `to` (corner to corner; a negative `to` size mirrors). Radii
+    /// scale with the geometric mean of the two factors; stroke widths,
+    /// font sizes and effect strengths stay. Cut outs do not move.
+    pub fn resize(&mut self, from: RectF, to: RectF) {
+        let sx = if from.w.abs() > 1e-9 {
+            to.w / from.w
+        } else {
+            1.0
+        };
+        let sy = if from.h.abs() > 1e-9 {
+            to.h / from.h
+        } else {
+            1.0
+        };
+        let map = |p: Point| Point::new(to.x + (p.x - from.x) * sx, to.y + (p.y - from.y) * sy);
+        let k = (sx * sy).abs().sqrt();
+        self.map_geometry(&map, k);
+    }
+
+    /// Applies `f` to every canvas-space point (rectangles map corner to
+    /// corner) and scales radii by `k`.
+    pub fn map_geometry(&mut self, f: &dyn Fn(Point) -> Point, k: f64) {
+        let len = |r: &mut f32| *r = (f64::from(*r) * k) as f32;
+        match self {
+            Annotation::Callout(c) => {
+                c.bounds = c.bounds.map(f);
+                for t in &mut c.tails {
+                    t.tip = f(t.tip);
+                }
+                match &mut c.body {
+                    CalloutBody::RoundedRect { radius } => len(radius),
+                    CalloutBody::Banner { fold } => len(fold),
+                    CalloutBody::Rect | CalloutBody::Ellipse | CalloutBody::Cloud { .. } => {}
+                }
+                c.fill.map(f);
+            }
+            Annotation::StepBadge(b) => {
+                b.center = f(b.center);
+                len(&mut b.radius);
+            }
+            Annotation::CurvedArrow(a) => {
+                a.start = f(a.start);
+                a.end = f(a.end);
+                match &mut a.curve {
+                    ArrowCurve::Straight => {}
+                    ArrowCurve::Quadratic { control } => *control = f(*control),
+                    ArrowCurve::Cubic { c0, c1 } => {
+                        *c0 = f(*c0);
+                        *c1 = f(*c1);
+                    }
+                }
+            }
+            Annotation::BlurRegion(b) => b.shape.map(f, k),
+            Annotation::MagnifierLens(m) => {
+                m.source_center = f(m.source_center);
+                match &mut m.lens {
+                    LensShape::Circle { center, radius } => {
+                        *center = f(*center);
+                        len(radius);
+                    }
+                    LensShape::RoundedRect { rect, radius } => {
+                        *rect = rect.map(f);
+                        len(radius);
+                    }
+                }
+            }
+            Annotation::Spotlight(s) => {
+                for t in &mut s.targets {
+                    t.map(f, k);
+                }
+            }
+            Annotation::CutOutSeam(_) => {}
+            Annotation::Shape(s) => {
+                s.shape.map(f, k);
+                s.fill.map(f);
+            }
+            Annotation::SmartObject(o) => o.rect = o.rect.map(f),
         }
     }
 
@@ -1571,6 +1805,14 @@ impl RectF {
         self.y += dy;
     }
 
+    /// The rectangle spanned by the two mapped corners.
+    pub fn map(self, f: &dyn Fn(Point) -> Point) -> RectF {
+        RectF::from_corners(
+            f(Point::new(self.x, self.y)),
+            f(Point::new(self.x + self.w, self.y + self.h)),
+        )
+    }
+
     fn validate(&self, v: &mut V, path: &str) {
         let lim = f64::from(MAX_SIDE) * 2.0;
         let ok = [self.x, self.y, self.w, self.h]
@@ -1614,6 +1856,22 @@ impl RegionShape {
                 for p in points {
                     p.x += dx;
                     p.y += dy;
+                }
+            }
+        }
+    }
+
+    /// See [`Annotation::map_geometry`].
+    pub fn map(&mut self, f: &dyn Fn(Point) -> Point, k: f64) {
+        match self {
+            RegionShape::Rect { rect } | RegionShape::Ellipse { rect } => *rect = rect.map(f),
+            RegionShape::RoundedRect { rect, radius } => {
+                *rect = rect.map(f);
+                *radius = (f64::from(*radius) * k) as f32;
+            }
+            RegionShape::Polygon { points } => {
+                for p in points {
+                    *p = f(*p);
                 }
             }
         }
@@ -1759,19 +2017,56 @@ pub enum Fill {
         to: Point,
         stops: Vec<GradientStop>,
     },
+    /// Circular gradient: `stops` run from `center` (offset 0) to
+    /// `radius` (offset 1).
+    Radial {
+        center: Point,
+        radius: f32,
+        stops: Vec<GradientStop>,
+    },
 }
 
 impl Fill {
+    /// Moves gradient points with the geometry (see
+    /// [`Annotation::map_geometry`]); the radius follows the mapped x axis.
+    pub fn map(&mut self, f: &dyn Fn(Point) -> Point) {
+        match self {
+            Fill::None | Fill::Solid { .. } => {}
+            Fill::Linear { from, to, .. } => {
+                *from = f(*from);
+                *to = f(*to);
+            }
+            Fill::Radial { center, radius, .. } => {
+                let edge = f(Point::new(center.x + f64::from(*radius), center.y));
+                *center = f(*center);
+                *radius = (edge.x - center.x).hypot(edge.y - center.y) as f32;
+            }
+        }
+    }
+
     fn validate(&self, v: &mut V, path: &str) {
-        if let Fill::Linear { from, to, stops } = self {
-            check_point(v, &format!("{path}.from"), *from);
-            check_point(v, &format!("{path}.to"), *to);
-            if !(2..=16).contains(&stops.len()) {
-                v.err(&format!("{path}.stops"), "needs 2..=16 stops");
+        let stops = match self {
+            Fill::None | Fill::Solid { .. } => return,
+            Fill::Linear { from, to, stops } => {
+                check_point(v, &format!("{path}.from"), *from);
+                check_point(v, &format!("{path}.to"), *to);
+                stops
             }
-            for s in stops {
-                check_range(v, &format!("{path}.stops.offset"), s.offset, 0.0, 1.0);
+            Fill::Radial {
+                center,
+                radius,
+                stops,
+            } => {
+                check_point(v, &format!("{path}.center"), *center);
+                check_len(v, &format!("{path}.radius"), *radius);
+                stops
             }
+        };
+        if !(2..=16).contains(&stops.len()) {
+            v.err(&format!("{path}.stops"), "needs 2..=16 stops");
+        }
+        for s in stops {
+            check_range(v, &format!("{path}.stops.offset"), s.offset, 0.0, 1.0);
         }
     }
 }
@@ -2187,5 +2482,166 @@ mod tests {
         let a = m.alloc_node_id();
         let b = m.alloc_node_id();
         assert!(b > a);
+    }
+
+    fn close(a: Point, b: Point) -> bool {
+        (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9
+    }
+
+    #[test]
+    fn rotation_turns_clockwise_about_the_pivot() {
+        let mut n = AnnotationNode::new(
+            NodeId(1),
+            Annotation::Shape(ShapeNode {
+                shape: RegionShape::Rect {
+                    rect: RectF::new(0.0, 0.0, 100.0, 60.0),
+                },
+                ..ShapeNode::default()
+            }),
+        );
+        assert_eq!(n.transform(), Affine::IDENTITY);
+        n.rotation_rad = std::f32::consts::FRAC_PI_2;
+        let t = n.transform();
+        // The centre stays; the right-edge midpoint swings down (y down).
+        assert!(close(
+            t.apply(Point::new(50.0, 30.0)),
+            Point::new(50.0, 30.0)
+        ));
+        let p = t.apply(Point::new(100.0, 30.0));
+        assert!(
+            (p.x - 50.0).abs() < 1e-5 && (p.y - 80.0).abs() < 1e-5,
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn rotation_is_optional_and_bounded() {
+        let mut m = sample();
+        let json = String::from_utf8(m.to_json().unwrap_or_default()).unwrap_or_default();
+        let old = json.replace("\"rotation_rad\": 0.0,", "");
+        assert!(!old.contains("rotation_rad"));
+        assert_eq!(Manifest::from_json(old.as_bytes()).ok(), Some(m.clone()));
+        m.annotations[0].rotation_rad = 4.0;
+        assert!(m.validate().is_err());
+        m.annotations[0].rotation_rad = normalize_angle(4.0);
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn angles_wrap_into_minus_pi_to_pi() {
+        use std::f32::consts::PI;
+        for (a, want) in [
+            (0.0, 0.0),
+            (PI, PI),
+            (-PI, PI),
+            (1.5 * PI, -0.5 * PI),
+            (f32::NAN, 0.0),
+        ] {
+            assert!(
+                (normalize_angle(a) - want).abs() < 1e-5,
+                "{a} -> {}",
+                normalize_angle(a)
+            );
+        }
+    }
+
+    #[test]
+    fn resize_maps_bounds_onto_the_target() {
+        let mut a = Annotation::Callout(Callout {
+            bounds: RectF::new(10.0, 10.0, 100.0, 50.0),
+            body: CalloutBody::RoundedRect { radius: 10.0 },
+            tails: vec![CalloutTail {
+                tip: Point::new(110.0, 110.0),
+                ..CalloutTail::default()
+            }],
+            ..Callout::default()
+        });
+        let Some(from) = a.bounds() else {
+            panic!("no bounds")
+        };
+        let to = RectF::new(0.0, 0.0, 200.0, 50.0);
+        a.resize(from, to);
+        let Some(b) = a.bounds() else {
+            panic!("no bounds")
+        };
+        assert!(close(Point::new(b.x, b.y), Point::new(0.0, 0.0)));
+        assert!(close(Point::new(b.w, b.h), Point::new(200.0, 50.0)));
+        let Annotation::Callout(c) = &a else {
+            panic!("kind changed")
+        };
+        assert_eq!(c.bounds, RectF::new(0.0, 0.0, 200.0, 25.0));
+        assert_eq!(c.body, CalloutBody::RoundedRect { radius: 10.0 });
+    }
+
+    #[test]
+    fn resize_scales_radii_and_gradients() {
+        let mut a = Annotation::StepBadge(StepBadge {
+            center: Point::new(50.0, 50.0),
+            radius: 10.0,
+            ..StepBadge::default()
+        });
+        a.resize(
+            RectF::new(40.0, 40.0, 20.0, 20.0),
+            RectF::new(0.0, 0.0, 40.0, 40.0),
+        );
+        let Annotation::StepBadge(b) = &a else {
+            panic!("kind changed")
+        };
+        assert!(close(b.center, Point::new(20.0, 20.0)));
+        assert_eq!(b.radius, 20.0);
+
+        let mut f = Fill::Radial {
+            center: Point::new(10.0, 10.0),
+            radius: 5.0,
+            stops: Vec::new(),
+        };
+        f.map(&|p| Point::new(p.x * 2.0, p.y * 2.0));
+        assert_eq!(
+            f,
+            Fill::Radial {
+                center: Point::new(20.0, 20.0),
+                radius: 10.0,
+                stops: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn backdrop_defaults_to_none_and_grows_the_frame() {
+        let mut m = sample();
+        assert_eq!(m.canvas.backdrop, CanvasBackdrop::None);
+        assert_eq!(m.canvas.backdrop.frame_size(m.canvas.size), m.canvas.size);
+        m.canvas.backdrop = CanvasBackdrop::rounded_shadow_frame();
+        assert!(m.validate().is_ok());
+        assert_eq!(
+            m.canvas.backdrop.frame_size(m.canvas.size),
+            Size::new(600 + 96, 300 + 96)
+        );
+        let back = Manifest::from_json(&m.to_json().unwrap_or_default()).ok();
+        assert_eq!(
+            back.map(|b| b.canvas.backdrop),
+            Some(m.canvas.backdrop.clone())
+        );
+        if let CanvasBackdrop::RoundedShadowFrame { margin_px, .. } = &mut m.canvas.backdrop {
+            *margin_px = -1.0;
+        }
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn radial_fills_need_stops() {
+        let mut m = sample();
+        let Some(Annotation::Callout(c)) = m.annotations[0].annotation_mut() else {
+            panic!("sample changed")
+        };
+        c.fill = Fill::Radial {
+            center: Point::new(0.0, 0.0),
+            radius: 40.0,
+            stops: vec![GradientStop {
+                offset: 0.0,
+                color: Color::WHITE,
+            }],
+        };
+        assert!(m.validate().is_err());
     }
 }

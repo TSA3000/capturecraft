@@ -22,7 +22,7 @@ use crate::effects::cutout::CutParams;
 use crate::effects::{Kernel, Mask, Px};
 use crate::primitives::{self, P, Silhouette, TOLERANCE};
 use crate::scene::{
-    BackdropFilterKind, BackdropFilterSpec, Color, DropShadowStyle, LineCap, MagnifierSpec,
+    BackdropFilterKind, BackdropFilterSpec, Color, DropShadowStyle, LineCap, MagnifierSpec, Paint,
     RasterSpec, RenderNode, Resample, ShapeBounds, SpotlightSpec, StrokeSpec,
 };
 
@@ -555,20 +555,30 @@ fn spotlight_ops(s: &SpotlightSpec, size: (u32, u32)) -> Vec<Op> {
     })]
 }
 
+/// Gradients are not drawn yet: they fill with their first stop.
+fn solid_stand_in(p: &Paint) -> Color {
+    match p {
+        Paint::Solid(c) => *c,
+        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+            stops.first().map_or(Color::TRANSPARENT, |s| s.color)
+        }
+    }
+}
+
 /// Prepares one node for a canvas of `size` (the size at its z position).
 pub fn prepare(node: &RenderNode, size: (u32, u32)) -> Prepared {
     let ops = match node {
         RenderNode::Raster(r) => image_op(r, size).into_iter().collect(),
         RenderNode::Shape(s) => vector_ops(
             &primitives::shape_silhouette(s),
-            s.fill,
+            s.fill.as_ref().map(solid_stand_in),
             s.stroke.as_ref(),
             s.shadow.as_ref(),
             size,
         ),
         RenderNode::Callout(c) => vector_ops(
             &primitives::callout::silhouette(c),
-            c.fill,
+            c.fill.as_ref().map(solid_stand_in),
             c.stroke.as_ref(),
             c.shadow.as_ref(),
             size,
@@ -594,6 +604,7 @@ pub fn prepare(node: &RenderNode, size: (u32, u32)) -> Prepared {
             .map(Op::Cut)
             .into_iter()
             .collect(),
+        RenderNode::ShadowFrame(_) => Vec::new(),
     };
     Prepared { ops }
 }

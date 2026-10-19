@@ -161,7 +161,7 @@ fn fill(f: &Fill, alpha: f32) -> Option<SColor> {
     match f {
         Fill::None => None,
         Fill::Solid { color } => Some(rgba(*color, alpha)),
-        Fill::Linear { stops, .. } => {
+        Fill::Linear { stops, .. } | Fill::Radial { stops, .. } => {
             let n = stops.len() as f32;
             if n == 0.0 {
                 return None;
@@ -352,9 +352,10 @@ fn callout(c: &Callout, alpha: f32) -> RenderNode {
                 },
             })
             .collect(),
-        fill: fill(&c.fill, alpha),
+        fill: fill(&c.fill, alpha).map(Into::into),
         stroke: c.stroke.as_ref().map(|s| stroke(s, alpha)),
         shadow: c.shadow.as_ref().map(|s| shadow(s, alpha)),
+        text: None,
     })
 }
 
@@ -383,9 +384,10 @@ fn step_badge(b: &StepBadge, alpha: f32) -> RenderNode {
     };
     RenderNode::Shape(ShapeSpec {
         geometry,
-        fill: Some(rgba(b.fill, alpha)),
+        fill: Some(rgba(b.fill, alpha).into()),
         stroke: b.ring.as_ref().map(|s| stroke(s, alpha)),
         shadow: b.shadow.as_ref().map(|s| shadow(s, alpha)),
+        text: None,
     })
 }
 
@@ -492,6 +494,7 @@ fn blur_region(b: &BlurRegion) -> RenderNode {
                 BackdropFilterKind::Pixelate { block_size_px }
             }
         },
+        feather_px: 0.0,
     })
 }
 
@@ -547,9 +550,10 @@ fn spotlight(s: &Spotlight, alpha: f32) -> RenderNode {
 fn shape(s: &ShapeNode, alpha: f32) -> RenderNode {
     RenderNode::Shape(ShapeSpec {
         geometry: region(&s.shape),
-        fill: fill(&s.fill, alpha),
+        fill: fill(&s.fill, alpha).map(Into::into),
         stroke: s.stroke.as_ref().map(|k| stroke(k, alpha)),
         shadow: s.shadow.as_ref().map(|k| shadow(k, alpha)),
+        text: None,
     })
 }
 
@@ -605,7 +609,7 @@ mod tests {
         };
         assert_eq!(c.body.rect(), RectF32::new(20.0, 30.0, 160.0, 80.0));
         assert_eq!(c.tails[0].tail_tip, PointF32::new(100.0, 200.0));
-        assert_eq!(c.fill, Some(SColor::WHITE));
+        assert_eq!(c.fill, Some(SColor::WHITE.into()));
         let RenderNode::Shape(b) = &sc.nodes[2].node else {
             panic!("badge shape expected");
         };
@@ -751,7 +755,7 @@ mod tests {
         let RenderNode::Callout(spec) = &scene(&s).nodes[1].node else {
             panic!("callout expected");
         };
-        assert_eq!(spec.fill.map(|f| f.a), Some(0.5));
+        assert!(matches!(spec.fill, Some(capturecraft_compositor::Paint::Solid(c)) if c.a == 0.5));
         node(&mut s, c).visible = false;
         assert_eq!(rev(&s), None);
         assert_eq!(scene(&s).nodes.len(), 1);

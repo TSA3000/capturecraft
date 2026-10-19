@@ -311,9 +311,10 @@ mod tests {
                 radius: 12.0,
             },
             tails,
-            fill: Some(Color::WHITE),
+            fill: Some(Color::WHITE.into()),
             stroke: Some(StrokeSpec::solid(Color::BLACK, 3.0)),
             shadow: None,
+            text: None,
         }
     }
 

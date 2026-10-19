@@ -109,7 +109,7 @@ fn callout() -> CalloutSpec {
                 anchor: TailAnchor::Center,
             },
         ],
-        fill: Some(Color::new(1.0, 0.93, 0.45, 0.85)),
+        fill: Some(Color::new(1.0, 0.93, 0.45, 0.85).into()),
         stroke: Some(StrokeSpec {
             color: Color::new(0.75, 0.2, 0.1, 1.0),
             width: 3.0,
@@ -122,6 +122,7 @@ fn callout() -> CalloutSpec {
             blur_sigma: 5.0,
             spread: 1.0,
         }),
+        text: None,
     }
 }
 
@@ -167,6 +168,7 @@ fn composite_scene(surface: Arc<Surface>) -> RenderScene {
                         radius: 10.0,
                     },
                     filter: BackdropFilterKind::GaussianBlur { sigma: 4.5 },
+                    feather_px: 0.0,
                 }),
             ),
             SceneNode::new(3, 1, RenderNode::Callout(callout())),
@@ -291,6 +293,7 @@ fn lanczos_pixel_grid_pixelate_spotlight_and_vertical_cut_match() {
                 RenderNode::BackdropFilter(BackdropFilterSpec {
                     shape: ShapeGeometry::Ellipse(RectF32::new(260.0, 230.0, 150.0, 110.0)),
                     filter: BackdropFilterKind::Pixelate { block_size_px: 12 },
+                    feather_px: 0.0,
                 }),
             ),
             SceneNode::new(3, 1, RenderNode::Magnifier(m)),
@@ -304,7 +307,7 @@ fn lanczos_pixel_grid_pixelate_spotlight_and_vertical_cut_match() {
                         PointF32::new(200.0, 60.0),
                         PointF32::new(90.0, 160.0),
                     ]),
-                    fill: Some(Color::new(0.1, 0.6, 0.3, 0.5)),
+                    fill: Some(Color::new(0.1, 0.6, 0.3, 0.5).into()),
                     stroke: Some(StrokeSpec {
                         color: Color::BLACK,
                         width: 2.5,
@@ -315,6 +318,7 @@ fn lanczos_pixel_grid_pixelate_spotlight_and_vertical_cut_match() {
                         spread: 3.0,
                         ..Default::default()
                     }),
+                    text: None,
                 }),
             ),
             SceneNode::new(
