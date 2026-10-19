@@ -1144,6 +1144,21 @@ pub enum CanvasGesture {
         start: f32,
         delta: [f32; 2],
     },
+    /// The rounded shadow frame's corner-radius diamond.
+    FrameRadius {
+        radius: f32,
+    },
+    /// A callout tail's neck diamond (its base width).
+    CalloutNeck {
+        id: NodeId,
+        index: usize,
+        width: f32,
+    },
+    /// A magnifier's source ring, moved apart from the lens.
+    MagnifierSource {
+        id: NodeId,
+        to: Point,
+    },
 }
 
 impl Default for CanvasViewState {

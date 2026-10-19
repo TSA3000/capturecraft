@@ -132,6 +132,7 @@ pub const COMMANDS_USED: &[&str] = &[
     "node.resize",
     "node.rotate",
     "canvas.setBackdrop",
+    "annotation.setMagnifierSource",
 ];
 
 #[cfg(test)]

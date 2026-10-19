@@ -1,5 +1,7 @@
-//! The transform gizmo of the selected annotation and the margin handles of
-//! the rounded shadow frame: pure geometry, unit-tested without a display.
+//! The transform gizmo of the selected annotation, the yellow parameter
+//! diamonds (callout neck, magnifier source) and the margin and corner
+//! handles of the rounded shadow frame: pure geometry, unit-tested without
+//! a display.
 //!
 //! An annotation's geometry is stored unrotated; the document turns it by
 //! `rotation_rad` about [`Annotation::pivot`]. The gizmo works in that
@@ -10,8 +12,8 @@
 //! they are sent as `node.resize`).
 
 use capturecraft_format::{
-    Annotation, AnnotationNode, CalloutBody, CanvasBackdrop, MAX_BACKDROP_MARGIN_PX, NodeId, RectF,
-    RegionShape, normalize_angle, rotation_about,
+    Annotation, AnnotationNode, CalloutBody, CanvasBackdrop, MAX_BACKDROP_MARGIN_PX, MagnifierLens,
+    NodeId, RectF, RegionShape, normalize_angle, rotation_about,
 };
 use egui::CursorIcon;
 use photocraft_geom::{Affine, Point};
@@ -21,7 +23,7 @@ use crate::UiIntent;
 use crate::state::ResizeHandle;
 
 /// Length of the rotation stem above the top edge, points.
-pub const STEM_PT: f32 = 26.0;
+pub const STEM_PT: f32 = 24.0;
 /// Shift-drag rotation step, degrees.
 pub const ROTATE_SNAP_DEG: f32 = 15.0;
 /// The corner-radius diamond stays at least this far inside the corner,
@@ -385,6 +387,79 @@ pub fn radius_intent(id: NodeId, radius: f32) -> UiIntent {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Parameter diamonds
+
+/// Where the ray from `body`'s centre towards `tip` leaves the body, and
+/// the ray's unit direction; `None` when the tip is at the centre.
+fn tail_axis(body: RectF, tip: Point) -> Option<(Point, (f64, f64))> {
+    let c = body.center();
+    let (dx, dy) = (tip.x - c.x, tip.y - c.y);
+    let len = dx.hypot(dy);
+    if !len.is_finite() || len < 1e-6 {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    // Distance along the ray to the nearer of the box's edges.
+    let reach = |half: f64, u: f64| {
+        if u.abs() < 1e-12 {
+            f64::INFINITY
+        } else {
+            half.abs() / u.abs()
+        }
+    };
+    let t = reach(body.w / 2.0, ux)
+        .min(reach(body.h / 2.0, uy))
+        .min(len);
+    Some((Point::new(c.x + ux * t, c.y + uy * t), (ux, uy)))
+}
+
+/// The neck diamond of a callout tail: where the tail meets the body,
+/// half the base width to the side of the tail's axis.
+pub fn tail_neck_point(body: RectF, tip: Point, base_width: f32) -> Option<Point> {
+    let (e, (ux, uy)) = tail_axis(body, tip)?;
+    let half = f64::from(finite(base_width).max(0.0)) / 2.0;
+    Some(Point::new(e.x - uy * half, e.y + ux * half))
+}
+
+/// The base width a neck diamond dragged to `p` sets: twice its distance
+/// from the tail's axis, whole pixels, at least 2.
+pub fn neck_width_from_drag(body: RectF, tip: Point, p: Point) -> Option<f32> {
+    let (e, (ux, uy)) = tail_axis(body, tip)?;
+    let side = ((p.x - e.x) * -uy + (p.y - e.y) * ux).abs();
+    let limit = 2.0 * body.w.abs().max(body.h.abs()).max(1.0);
+    Some((2.0 * side).clamp(2.0, limit).round() as f32)
+}
+
+/// `annotation.moveCalloutTail` changing only the neck.
+pub fn tail_neck_intent(id: NodeId, index: usize, tip: Point, base_width: f32) -> UiIntent {
+    UiIntent::command(
+        "annotation.moveCalloutTail",
+        json!({ "id": id.0, "index": index, "tip": { "x": tip.x, "y": tip.y },
+                "base_width": base_width }),
+    )
+}
+
+/// Radius of the area a magnifier enlarges: the lens over the zoom.
+pub fn magnifier_source_radius(m: &MagnifierLens) -> f32 {
+    let b = m.lens.bounds();
+    let r = (b.w.abs().min(b.h.abs()) / 2.0) as f32;
+    let zoom = if m.zoom.is_finite() && m.zoom > 0.0 {
+        m.zoom
+    } else {
+        1.0
+    };
+    finite(r / zoom)
+}
+
+/// `annotation.setMagnifierSource`.
+pub fn magnifier_source_intent(id: NodeId, source_center: Point) -> UiIntent {
+    UiIntent::command(
+        "annotation.setMagnifierSource",
+        json!({ "id": id.0, "source_center": { "x": source_center.x, "y": source_center.y } }),
+    )
+}
+
 /// Resize cursor for a handle of a node turned by `rotation`: the handle's
 /// direction from the centre, bucketed to the four resize cursors.
 pub fn handle_cursor(h: GizmoHandle, rotation: f32) -> CursorIcon {
@@ -449,6 +524,40 @@ pub fn with_margin(b: &CanvasBackdrop, margin: f32) -> CanvasBackdrop {
     let mut out = b.clone();
     if let CanvasBackdrop::RoundedShadowFrame { margin_px, .. } = &mut out {
         *margin_px = margin.clamp(0.0, MAX_BACKDROP_MARGIN_PX);
+    }
+    out
+}
+
+/// The frame's corner radius, `None` without a frame.
+pub fn frame_corner_radius(b: &CanvasBackdrop) -> Option<f32> {
+    match b {
+        CanvasBackdrop::None => None,
+        CanvasBackdrop::RoundedShadowFrame {
+            corner_radius_px, ..
+        } => Some(*corner_radius_px),
+    }
+}
+
+/// The frame's corner radius after dragging its diamond to `local`
+/// (canvas pixels): along the top-left diagonal, at most half the shorter
+/// side of `canvas`.
+pub fn frame_radius_from_drag(canvas: [u32; 2], local: Point) -> f32 {
+    radius_from_drag(canvas_rect(canvas), local)
+}
+
+/// The canvas as a rectangle at the origin.
+pub fn canvas_rect(canvas: [u32; 2]) -> RectF {
+    RectF::new(0.0, 0.0, f64::from(canvas[0]), f64::from(canvas[1]))
+}
+
+/// `b` with its corner radius set (unchanged without a frame).
+pub fn with_corner_radius(b: &CanvasBackdrop, radius: f32) -> CanvasBackdrop {
+    let mut out = b.clone();
+    if let CanvasBackdrop::RoundedShadowFrame {
+        corner_radius_px, ..
+    } = &mut out
+    {
+        *corner_radius_px = finite(radius).max(0.0).round();
     }
     out
 }
@@ -711,6 +820,83 @@ mod tests {
         assert_eq!(params["backdrop"]["margin_px"], 10.0);
         let back: CanvasBackdrop = serde_json::from_value(params["backdrop"].clone()).unwrap();
         assert_eq!(frame_margin(&back), Some(10.0));
+    }
+
+    #[test]
+    fn neck_diamond_sits_on_the_body_edge_beside_the_axis() {
+        let body = RectF::new(0.0, 0.0, 100.0, 50.0);
+        // Tip straight below: the tail leaves the bottom edge at x = 50.
+        let tip = Point::new(50.0, 150.0);
+        let n = tail_neck_point(body, tip, 24.0).unwrap();
+        assert!(near(n, Point::new(38.0, 50.0)), "{n:?}");
+        // Dragging the diamond 20 px off the axis makes the neck 40 wide.
+        assert_eq!(
+            neck_width_from_drag(body, tip, Point::new(70.0, 60.0)),
+            Some(40.0)
+        );
+        // Never thinner than 2 px, never wider than twice the body.
+        assert_eq!(neck_width_from_drag(body, tip, n), Some(24.0));
+        assert_eq!(
+            neck_width_from_drag(body, tip, Point::new(50.0, 80.0)),
+            Some(2.0)
+        );
+        assert_eq!(
+            neck_width_from_drag(body, tip, Point::new(1e6, 50.0)),
+            Some(200.0)
+        );
+        // A tip at the centre has no axis.
+        assert_eq!(tail_neck_point(body, body.center(), 24.0), None);
+        let UiIntent::Command { id, params } = tail_neck_intent(NodeId(3), 1, tip, 40.0) else {
+            panic!()
+        };
+        assert_eq!(id, "annotation.moveCalloutTail");
+        assert_eq!(params["base_width"], 40.0);
+        assert_eq!(params["tip"]["y"], 150.0);
+    }
+
+    #[test]
+    fn magnifier_source_ring_is_the_lens_over_the_zoom() {
+        let m = MagnifierLens::default();
+        assert_eq!(magnifier_source_radius(&m), 40.0);
+        let broken = MagnifierLens {
+            zoom: 0.0,
+            ..MagnifierLens::default()
+        };
+        assert_eq!(magnifier_source_radius(&broken), 80.0);
+        let UiIntent::Command { id, params } =
+            magnifier_source_intent(NodeId(7), Point::new(12.0, 34.0))
+        else {
+            panic!()
+        };
+        assert_eq!(id, "annotation.setMagnifierSource");
+        assert_eq!(params["source_center"], json!({ "x": 12.0, "y": 34.0 }));
+    }
+
+    #[test]
+    fn frame_corner_diamond_sets_the_radius() {
+        let f = CanvasBackdrop::rounded_shadow_frame();
+        assert_eq!(frame_corner_radius(&f), Some(12.0));
+        assert_eq!(frame_corner_radius(&CanvasBackdrop::None), None);
+        assert_eq!(
+            frame_radius_from_drag([200, 100], Point::new(30.0, 30.0)),
+            30.0
+        );
+        // Clamped to half the shorter side, and never negative.
+        assert_eq!(
+            frame_radius_from_drag([200, 100], Point::new(400.0, 400.0)),
+            50.0
+        );
+        assert_eq!(
+            frame_radius_from_drag([200, 100], Point::new(-9.0, -9.0)),
+            0.0
+        );
+        let r = with_corner_radius(&f, 20.4);
+        assert_eq!(frame_corner_radius(&r), Some(20.0));
+        assert_eq!(frame_margin(&r), frame_margin(&f));
+        assert_eq!(
+            with_corner_radius(&CanvasBackdrop::None, 5.0),
+            CanvasBackdrop::None
+        );
     }
 
     #[test]

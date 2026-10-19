@@ -115,7 +115,7 @@ Tail = { tip: {x, y}, base_width?: f32, curve_bias?: -1..1, anchor?: {kind: "nea
         label: "Move Callout Tail",
         menu_path: &[],
         shortcut: None,
-        params: r##"{ id: u64, index: usize, tip: {x, y} }"##,
+        params: r##"{ id: u64, index: usize, tip: {x, y}, base_width?: f32 (the neck where it meets the body) }"##,
         enabled: has_doc,
         run: move_callout_tail,
         journal: true,
@@ -452,6 +452,8 @@ pub struct MoveCalloutTailParams {
     pub id: u64,
     pub index: usize,
     pub tip: Point,
+    #[serde(default)]
+    pub base_width: Option<f32>,
 }
 
 fn move_callout_tail(s: &mut Session, p: &Value) -> Result<Value> {
@@ -464,6 +466,9 @@ fn move_callout_tail(s: &mut Session, p: &Value) -> Result<Value> {
         .get_mut(p.index)
         .ok_or_else(|| bad(CMD, format!("callout {} has no tail {}", p.id, p.index)))?;
     tail.tip = p.tip;
+    if let Some(w) = p.base_width {
+        tail.base_width = w;
+    }
     node.touch();
     Ok(json!({}))
 }
@@ -832,6 +837,27 @@ mod tests {
         assert_eq!(tails(&s), [100.0, 320.0]);
         s.run("edit.redo", &Value::Null).unwrap();
         assert_eq!(tails(&s), [320.0]);
+        // The neck handle sends the width along with the unchanged tip.
+        s.run(
+            "annotation.moveCalloutTail",
+            &json!({ "id": id, "index": 0, "tip": { "x": 320, "y": 70 }, "base_width": 40 }),
+        )
+        .unwrap();
+        let Some(Annotation::Callout(c)) = manifest(&s)
+            .node(NodeId(id))
+            .and_then(AnnotationNode::annotation)
+        else {
+            panic!("callout expected")
+        };
+        assert_eq!(c.tails[0].base_width, 40.0);
+        assert!(
+            s.run(
+                "annotation.moveCalloutTail",
+                &json!({ "id": id, "index": 0, "tip": { "x": 320, "y": 70 }, "base_width": -1 }),
+            )
+            .is_err(),
+            "a negative neck is rejected"
+        );
     }
 
     #[test]

@@ -16,11 +16,14 @@
 //!   centre; `node.resize`), the rotation stem (Shift snaps to 15°;
 //!   `node.rotate`) and the yellow corner-radius diamond
 //!   (`annotation.setStyle`);
-//! - yellow diamond callout tail handles (drag to move, drag the `+` out of
-//!   a callout to add a tail), and the arrow bend handle (drag to curve,
-//!   double-click to straighten), all in the node's rotated frame;
-//! - with a rounded shadow frame, the frame margin around the canvas and
-//!   four margin handles on its edges (`canvas.setBackdrop`);
+//! - yellow diamond parameter handles, all in the node's rotated frame:
+//!   callout tail tips (drag to move, drag the `+` out of a callout to add
+//!   a tail) and necks (drag sideways for the base width), the arrow bend
+//!   handle (drag to curve, double-click to straighten) and the magnifier's
+//!   source ring (moves the magnified area, the lens stays);
+//! - with a rounded shadow frame, the frame margin around the canvas, four
+//!   pill margin handles on its edges and a corner-radius diamond inside
+//!   the top-left corner (`canvas.setBackdrop`);
 //! - the Cut Out guide: a full-width or full-height band with seam lines
 //!   showing the strip the drag would remove.
 //!
@@ -588,6 +591,19 @@ impl CanvasViewport<'_> {
             stroke(1.0, t.canvas_edge),
             StrokeKind::Outside,
         );
+        if let Some(radius) = gizmo::frame_corner_radius(&m.canvas.backdrop) {
+            frame_radius_handle(
+                ui,
+                &painter,
+                &xf,
+                canvas,
+                &m.canvas.backdrop,
+                radius,
+                editor,
+                intents,
+                t,
+            );
+        }
         if let Some(margin) = gizmo::frame_margin(&m.canvas.backdrop) {
             frame_margin_handles(
                 ui,
@@ -771,6 +787,48 @@ impl CanvasViewport<'_> {
                                 editor.canvas.gesture = None;
                             }
                         }
+                        let width = match &editor.canvas.gesture {
+                            Some(CanvasGesture::CalloutNeck {
+                                id: g,
+                                index: gi,
+                                width,
+                            }) if *g == id && *gi == index => *width,
+                            _ => tail.base_width,
+                        };
+                        let (Some(rest), Some(shown)) = (
+                            gizmo::tail_neck_point(c.bounds, tail.tip, tail.base_width),
+                            gizmo::tail_neck_point(c.bounds, tail.tip, width),
+                        ) else {
+                            continue;
+                        };
+                        let h = ui.interact(
+                            ERect::from_center_size(to_scr(rest), Vec2::splat(14.0)),
+                            Id::new(("canvas.neck", id.0, index)),
+                            Sense::drag(),
+                        );
+                        diamond(
+                            &painter,
+                            to_scr(shown),
+                            if h.hovered() { 6.5 } else { 5.0 },
+                            t.tail_handle,
+                            t,
+                        );
+                        if let Some(p) = h.interact_pointer_pos() {
+                            let w = gizmo::neck_width_from_drag(c.bounds, tail.tip, to_local(p));
+                            if h.dragged()
+                                && let Some(width) = w
+                            {
+                                editor.canvas.gesture =
+                                    Some(CanvasGesture::CalloutNeck { id, index, width });
+                            }
+                            if h.drag_stopped() {
+                                if let Some(w) = w.filter(|w| *w != tail.base_width) {
+                                    intents.push(gizmo::tail_neck_intent(id, index, tail.tip, w));
+                                }
+                                editor.canvas.gesture = None;
+                            }
+                        }
+                        h.on_hover_text("Drag to change the tail's width");
                     }
                     // "+" below the body: drag out a new tail.
                     let below = f64::from(18.0 / xf.scale.max(f32::EPSILON));
@@ -847,11 +905,12 @@ impl CanvasViewport<'_> {
                         Id::new(("canvas.bend", id.0)),
                         Sense::click_and_drag(),
                     );
-                    painter.circle(
+                    diamond(
+                        &painter,
                         at,
-                        if h.hovered() { 7.0 } else { 5.5 },
-                        t.bend_handle,
-                        stroke(1.5, t.gizmo_outline),
+                        if h.hovered() { 8.0 } else { 6.5 },
+                        t.tail_handle,
+                        t,
                     );
                     h.clone()
                         .on_hover_text("Drag to bend · double-click to straighten");
@@ -876,6 +935,51 @@ impl CanvasViewport<'_> {
                             editor.canvas.gesture = None;
                         }
                     }
+                }
+                Annotation::MagnifierLens(lens) => {
+                    let preview = match &editor.canvas.gesture {
+                        Some(CanvasGesture::MagnifierSource { id: g, to }) if *g == id => Some(*to),
+                        _ => None,
+                    };
+                    let src = to_scr(preview.unwrap_or(lens.source_center));
+                    let lens_center = to_scr(lens.lens.bounds().center());
+                    let ring = gizmo::magnifier_source_radius(lens) * xf.scale;
+                    painter.extend(Shape::dashed_line(
+                        &[lens_center, src],
+                        stroke(1.0, t.tail_handle),
+                        5.0,
+                        4.0,
+                    ));
+                    painter.circle_stroke(src, ring, stroke(3.0, t.gizmo_outline));
+                    painter.circle_stroke(src, ring, stroke(1.5, t.tail_handle));
+                    let h = ui.interact(
+                        ERect::from_center_size(to_scr(lens.source_center), Vec2::splat(16.0)),
+                        Id::new(("canvas.magnifier_source", id.0)),
+                        Sense::drag(),
+                    );
+                    diamond(
+                        &painter,
+                        src,
+                        if h.hovered() { 8.0 } else { 6.5 },
+                        t.tail_handle,
+                        t,
+                    );
+                    if let Some(p) = h.interact_pointer_pos() {
+                        if h.dragged() {
+                            editor.canvas.gesture = Some(CanvasGesture::MagnifierSource {
+                                id,
+                                to: to_local(p),
+                            });
+                        }
+                        if h.drag_stopped() {
+                            let to = to_local(p);
+                            if to != lens.source_center {
+                                intents.push(gizmo::magnifier_source_intent(id, to));
+                            }
+                            editor.canvas.gesture = None;
+                        }
+                    }
+                    h.on_hover_text("Drag to move the magnified area");
                 }
                 _ => {}
             }
@@ -1237,6 +1341,63 @@ fn frame_margin_handles(
             t,
         );
     }
+}
+
+/// The yellow diamond inside the canvas's top-left corner that sets the
+/// rounded shadow frame's corner radius.
+#[allow(clippy::too_many_arguments)]
+fn frame_radius_handle(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    xf: &ViewTransform,
+    canvas: Size,
+    backdrop: &capturecraft_format::CanvasBackdrop,
+    radius: f32,
+    editor: &mut EditorState,
+    intents: &mut Vec<UiIntent>,
+    t: &Tokens,
+) {
+    let size = [canvas.width, canvas.height];
+    let rect = gizmo::canvas_rect(size);
+    let inset = f64::from(RADIUS_INSET_PT / xf.scale.max(f32::EPSILON));
+    let shown = match &editor.canvas.gesture {
+        Some(CanvasGesture::FrameRadius { radius }) => *radius,
+        _ => radius,
+    };
+    let rest = xf.to_screen(corner_radius_point(rect, radius, inset));
+    let h = ui.interact(
+        ERect::from_center_size(rest, Vec2::splat(14.0)),
+        Id::new("canvas.frame_radius"),
+        Sense::drag(),
+    );
+    diamond(
+        painter,
+        xf.to_screen(corner_radius_point(rect, shown, inset)),
+        if h.hovered() || h.dragged() { 7.5 } else { 6.0 },
+        t.tail_handle,
+        t,
+    );
+    if let Some(p) = h.interact_pointer_pos() {
+        let r = gizmo::frame_radius_from_drag(size, xf.to_canvas(p));
+        if h.dragged() {
+            editor.canvas.gesture = Some(CanvasGesture::FrameRadius { radius: r });
+            badge(
+                painter,
+                xf.to_screen(corner_radius_point(rect, r, inset)) + vec2(0.0, t.space_lg + 8.0),
+                &format!("Corners {r:.0} px"),
+                t,
+            );
+        }
+        if h.drag_stopped() {
+            if r != radius {
+                intents.push(gizmo::backdrop_intent(&gizmo::with_corner_radius(
+                    backdrop, r,
+                )));
+            }
+            editor.canvas.gesture = None;
+        }
+    }
+    h.on_hover_text("Drag to round the frame's corners");
 }
 
 fn toggle(sel: &mut Vec<NodeId>, id: NodeId) {

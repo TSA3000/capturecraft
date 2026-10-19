@@ -67,6 +67,16 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "annotation.setMagnifierSource",
+        label: "Move Magnifier Source",
+        menu_path: &[],
+        shortcut: None,
+        params: r##"{ id: u64, source_center: {x, y} (centre of the magnified area; the lens stays) }"##,
+        enabled: has_doc,
+        run: set_magnifier_source,
+        journal: true,
+    },
+    CommandSpec {
         id: "annotation.setStyle",
         label: "Apply Style",
         menu_path: &[],
@@ -367,6 +377,28 @@ fn set_arrow_curve(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// Magnifier
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MagnifierSourceParams {
+    pub id: u64,
+    pub source_center: Point,
+}
+
+fn set_magnifier_source(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "annotation.setMagnifierSource";
+    let p: MagnifierSourceParams = parse(CMD, p)?;
+    let node = node_annotation(s.manifest_mut()?, p.id)?;
+    let Some(Annotation::MagnifierLens(m)) = node.annotation_mut() else {
+        return Err(bad(CMD, format!("annotation {} is not a magnifier", p.id)));
+    };
+    m.source_center = p.source_center;
+    node.touch();
+    Ok(json!({}))
+}
+
+// ---------------------------------------------------------------------------
 // Style
 
 #[derive(Deserialize, Default)]
@@ -540,6 +572,34 @@ mod tests {
         .unwrap()["id"]
             .as_u64()
             .unwrap()
+    }
+
+    #[test]
+    fn magnifier_source_moves_without_the_lens() {
+        let mut s = session(200, 200, [255; 4]);
+        let lens = capturecraft_format::MagnifierLens::default();
+        let id = crate::commands::push_node(
+            &mut s.active_mut().unwrap().manifest,
+            Annotation::MagnifierLens(lens.clone()),
+        );
+        s.run(
+            "annotation.setMagnifierSource",
+            &json!({ "id": id.0, "source_center": { "x": 30, "y": 40 } }),
+        )
+        .unwrap();
+        let Some(Annotation::MagnifierLens(m)) = manifest(&s).node(id).unwrap().annotation() else {
+            panic!()
+        };
+        assert_eq!(m.source_center, Point::new(30.0, 40.0));
+        assert_eq!(m.lens, lens.lens);
+        let arrow = add_arrow(&mut s);
+        assert!(
+            s.run(
+                "annotation.setMagnifierSource",
+                &json!({ "id": arrow, "source_center": { "x": 1, "y": 1 } }),
+            )
+            .is_err()
+        );
     }
 
     #[test]
