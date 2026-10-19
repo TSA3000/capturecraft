@@ -3,6 +3,7 @@
 
 pub mod canvas_tools;
 pub mod canvas_viewport;
+pub mod context_menu;
 pub mod editor_toolbar;
 pub mod gizmo;
 pub mod layers_panel;

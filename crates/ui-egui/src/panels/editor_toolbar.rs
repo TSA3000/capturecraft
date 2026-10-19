@@ -560,6 +560,7 @@ mod tests {
                 ToolId::Fill,
                 ToolId::Move,
                 ToolId::Selection,
+                ToolId::GrabText,
             ]
         );
         assert_eq!(

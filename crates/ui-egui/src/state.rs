@@ -824,10 +824,12 @@ pub enum ToolId {
     SmartMove,
     Simplify,
     Crop,
+    /// Drag over the capture to read its text (OCR).
+    GrabText,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 20] = [
+    pub const ALL: [ToolId; 21] = [
         ToolId::Arrow,
         ToolId::Text,
         ToolId::Callout,
@@ -848,10 +850,11 @@ impl ToolId {
         ToolId::SmartMove,
         ToolId::Simplify,
         ToolId::Crop,
+        ToolId::GrabText,
     ];
 
     /// Pinned to the toolbar by default.
-    pub const PINNED: [ToolId; 8] = [
+    pub const PINNED: [ToolId; 9] = [
         ToolId::Arrow,
         ToolId::Text,
         ToolId::Callout,
@@ -860,6 +863,7 @@ impl ToolId {
         ToolId::Fill,
         ToolId::Move,
         ToolId::Selection,
+        ToolId::GrabText,
     ];
 
     pub fn label(self) -> &'static str {
@@ -884,6 +888,7 @@ impl ToolId {
             ToolId::SmartMove => "Smart Move",
             ToolId::Simplify => "Simplify",
             ToolId::Crop => "Crop",
+            ToolId::GrabText => "Grab Text",
         }
     }
 
@@ -904,6 +909,7 @@ impl ToolId {
             ToolId::Magnify => Some("annotation.addMagnifier"),
             ToolId::Spotlight => Some("annotation.addSpotlight"),
             ToolId::Crop => Some("canvas.crop"),
+            ToolId::GrabText => Some("ocr.grabText"),
             ToolId::CutOut => Some("canvas.cutOut"),
             ToolId::Simplify => Some("smart.simplify"),
             _ => None,

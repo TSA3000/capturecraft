@@ -1167,6 +1167,46 @@ mod tests {
         );
         let size = h.session.active().unwrap().manifest.canvas.size;
         assert_eq!((size.width, size.height), (400, 300));
+
+        // Right-click selects what is under the pointer and opens the menu;
+        // Esc closes it.
+        h.state.editor.toolbar.active = ToolId::Move;
+        h.state.editor.canvas.selection.clear();
+        let id = h.session.active().unwrap().manifest.annotations[2].id;
+        let n = h
+            .session
+            .active()
+            .unwrap()
+            .manifest
+            .node(id)
+            .unwrap()
+            .clone();
+        let b = n.annotation().unwrap().bounds().unwrap();
+        // Find where the text box is on screen by scanning for a hit.
+        let mut opened = false;
+        'scan: for dy in (-300..300).step_by(10) {
+            for dx in (-500..500).step_by(10) {
+                let p = at(dx as f32, dy as f32);
+                let right = |pressed| egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                h.frame(vec![egui::Event::PointerMoved(p)]);
+                h.frame(vec![right(true)]);
+                h.frame(vec![right(false)]);
+                if h.state.editor.canvas.selection.contains(&id) {
+                    opened = crate::panels::context_menu::is_open(&h.ctx);
+                    break 'scan;
+                }
+                h.frame(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+            }
+        }
+        assert!(opened, "no right-click hit the text at {b:?}");
+        h.frame(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        h.frame(Vec::new());
+        assert!(!crate::panels::context_menu::is_open(&h.ctx));
     }
 
     /// The Layers and History tabs and the keyboard shortcuts drive the

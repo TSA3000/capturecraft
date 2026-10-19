@@ -46,6 +46,7 @@ pub fn tool_icon(t: ToolId) -> Icon {
         ToolId::SmartMove => Icon::SmartMove,
         ToolId::Simplify => Icon::Simplify,
         ToolId::Crop => Icon::Crop,
+        ToolId::GrabText => Icon::GrabText,
     }
 }
 

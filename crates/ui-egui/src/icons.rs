@@ -53,6 +53,7 @@ pub enum Icon {
     SmartMove,
     Simplify,
     Crop,
+    GrabText,
     // utility bar / misc chrome
     Help,
     Recent,
@@ -74,7 +75,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every variant, in declaration order.
-    pub const ALL: [Icon; 51] = [
+    pub const ALL: [Icon; 52] = [
         Icon::Library,
         Icon::Assets,
         Icon::Capture,
@@ -111,6 +112,7 @@ impl Icon {
         Icon::SmartMove,
         Icon::Simplify,
         Icon::Crop,
+        Icon::GrabText,
         Icon::Help,
         Icon::Recent,
         Icon::Tag,
@@ -167,6 +169,7 @@ impl Icon {
             Icon::SmartMove => "Smart Move",
             Icon::Simplify => "Simplify",
             Icon::Crop => "Crop",
+            Icon::GrabText => "Grab Text",
             Icon::Help => "Help",
             Icon::Recent => "Recent",
             Icon::Tag => "Tag",
@@ -723,6 +726,13 @@ fn draw(p: &mut GridPen, icon: Icon) {
             p.seg((5.5, 7.0), (14.5, 7.0));
             p.seg((5.5, 10.0), (12.0, 10.0));
             p.seg((5.5, 13.0), (9.5, 13.0));
+        }
+        Icon::GrabText => {
+            // A dashed frame around lines of text.
+            p.dashed(&[(2.5, 3.5), (17.5, 3.5), (17.5, 16.5), (2.5, 16.5)], true);
+            p.seg((6.0, 7.5), (14.0, 7.5));
+            p.seg((6.0, 10.0), (14.0, 10.0));
+            p.seg((6.0, 12.5), (11.0, 12.5));
         }
         Icon::Crop => {
             p.line(&[(5.5, 2.5), (5.5, 14.5), (17.5, 14.5)]);

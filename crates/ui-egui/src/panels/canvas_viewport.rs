@@ -50,11 +50,11 @@ use egui::{
 use photocraft_geom::{Point, Size};
 use serde_json::{Value, json};
 
-use super::canvas_tools;
 use super::gizmo::{
     self, GizmoHandle, NodeFrame, RADIUS_INSET_PT, RESIZE_HANDLES, STEM_PT, corner_radius_of,
     corner_radius_point, handle_point, rotate_handle_point,
 };
+use super::{canvas_tools, context_menu};
 use crate::UiIntent;
 use crate::state::{
     CanvasGesture, ColorTarget, CropHit, EditorState, ExpandBackdrop, ResizeDrag, ResizeHandle,
@@ -1181,8 +1181,15 @@ impl CanvasViewport<'_> {
             editor.canvas.polygon.clear();
         }
         // A click while typing only ends the typing (the text field's
-        // lost focus commits it below).
-        let typing_before = editor.canvas.text_edit.is_some();
+        // lost focus commits it below); one while the menu is open only
+        // closes the menu.
+        let typing_before = editor.canvas.text_edit.is_some() || context_menu::is_open(ui.ctx());
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            context_menu::select_for_menu(editor, doc, node_at(m, to_canvas(p), slop));
+            context_menu::open(ui.ctx(), p);
+        }
         if resp.double_clicked()
             && !typing_before
             && matches!(tool, ToolId::Move | ToolId::Text)
@@ -1250,6 +1257,7 @@ impl CanvasViewport<'_> {
             let c = to_canvas(o);
             let handle = (tool == ToolId::Move).then(|| gizmo_hit(o)).flatten();
             editor.canvas.gesture = match (tool, handle, gizmo_node) {
+                _ if typing_before => None,
                 (_, Some(h), Some((id, f, a))) => Some(match h {
                     GizmoHandle::Resize(handle) => CanvasGesture::Resize {
                         id,
@@ -1285,7 +1293,6 @@ impl CanvasViewport<'_> {
                     })
                 }
                 (ToolId::Shape, _, _) if editor.tools.shape.kind == ShapeKind::Polygon => None,
-                _ if typing_before => None,
                 (ToolId::CutOut, _, _) => Some(CanvasGesture::CutOut {
                     from: along(c),
                     to: along(c),
@@ -1513,6 +1520,7 @@ impl CanvasViewport<'_> {
             }
         }
         inline_text(ui, &xf, editor, intents, t);
+        intents.extend(context_menu::show(ui.ctx(), editor, Some(doc), t));
         if resp.hovered()
             && (editor.canvas.eyedropper.is_some()
                 || !matches!(tool, ToolId::Move | ToolId::Selection))
