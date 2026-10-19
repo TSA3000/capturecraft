@@ -152,6 +152,7 @@ static ALL: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
         .chain(smart_commands::REGISTRY)
         .chain(transform_commands::REGISTRY)
         .chain(crate::node_commands::REGISTRY)
+        .chain(crate::paint_commands::REGISTRY)
         .copied()
         .collect()
 });
@@ -543,7 +544,7 @@ fn cut_extent(m: &Manifest, axis: Axis) -> f64 {
     (f64::from(full) - removed).max(0.0)
 }
 
-fn cut_outs(m: &Manifest) -> impl Iterator<Item = &CutOutSeam> {
+pub(crate) fn cut_outs(m: &Manifest) -> impl Iterator<Item = &CutOutSeam> {
     m.annotations.iter().filter_map(|n| match n.annotation() {
         Some(Annotation::CutOutSeam(c)) => Some(c),
         _ => None,

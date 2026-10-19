@@ -39,6 +39,7 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         menu_path: &["Annotate", "Shape"],
         shortcut: None,
         params: r##"{ bounds: {x, y, w, h}, kind?: "rect"|"ellipse" = "rect", corner_radius?: f32 (rect only),
+  | points: [{x, y}] (a polygon, 3 or more corners, instead of bounds and kind),
   fill?: Fill, stroke?: Stroke|null, shadow?: DropShadow|null, blend?: "normal"|"multiply" (highlighter) }
 -> { id }"##,
         enabled: has_doc,
@@ -249,7 +250,12 @@ pub(crate) fn region_of(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddShapeParams {
-    pub bounds: RectF,
+    /// Rect and ellipse; ignored with `points`.
+    #[serde(default)]
+    pub bounds: Option<RectF>,
+    /// A polygon's corners (3 or more), instead of `bounds`.
+    #[serde(default)]
+    pub points: Option<Vec<Point>>,
     #[serde(default)]
     pub kind: RegionKind,
     #[serde(default)]
@@ -269,7 +275,12 @@ fn add_shape(s: &mut Session, p: &Value) -> Result<Value> {
     let p: AddShapeParams = parse(CMD, p)?;
     let d = ShapeNode::default();
     let shape = ShapeNode {
-        shape: region_of(CMD, p.bounds, p.kind, p.corner_radius)?,
+        shape: match (p.points, p.bounds) {
+            (Some(points), _) if points.len() >= 3 => RegionShape::Polygon { points },
+            (Some(_), _) => return Err(bad(CMD, "a polygon needs at least 3 points")),
+            (None, Some(b)) => region_of(CMD, b, p.kind, p.corner_radius)?,
+            (None, None) => return Err(bad(CMD, "give bounds or points")),
+        },
         fill: p.fill.unwrap_or(d.fill),
         stroke: p.stroke.unwrap_or(d.stroke),
         shadow: p.shadow.unwrap_or(d.shadow),
@@ -644,6 +655,12 @@ fn apply_style(a: &mut Annotation, p: &StyleParams) {
         Annotation::MagnifierLens(m) => {
             if let Some(s) = p.stroke {
                 m.border = s;
+            }
+        }
+        Annotation::Pen(pen) => {
+            // A pen stroke is its stroke: `null` cannot remove it.
+            if let Some(Some(s)) = p.stroke {
+                pen.stroke = s;
             }
         }
         Annotation::BlurRegion(_)

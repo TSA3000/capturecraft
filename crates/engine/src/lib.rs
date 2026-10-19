@@ -16,6 +16,7 @@
 pub mod commands;
 pub mod edit_commands;
 pub mod node_commands;
+pub mod paint_commands;
 pub mod render;
 pub mod smart_commands;
 pub mod transform_commands;

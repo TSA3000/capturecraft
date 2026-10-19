@@ -44,6 +44,7 @@ pub fn node_tool(n: &AnnotationNode) -> Option<ToolId> {
         Annotation::Shape(s) if s.blend == BlendMode::Multiply => ToolId::Highlighter,
         Annotation::Shape(_) => ToolId::Shape,
         Annotation::SmartObject(_) => ToolId::SmartMove,
+        Annotation::Pen(_) => ToolId::Pen,
     })
 }
 

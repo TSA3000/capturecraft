@@ -938,6 +938,7 @@ version = "0.1.0"
 dependencies = [
  "capturecraft-compositor",
  "capturecraft-format",
+ "photocraft-algo",
  "photocraft-color",
  "photocraft-geom",
  "photocraft-raster",

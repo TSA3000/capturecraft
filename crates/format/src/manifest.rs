@@ -743,6 +743,7 @@ pub enum Annotation {
     CutOutSeam(CutOutSeam),
     Shape(ShapeNode),
     SmartObject(SmartObject),
+    Pen(PenStroke),
 }
 
 impl Annotation {
@@ -757,6 +758,7 @@ impl Annotation {
         "cut_out_seam",
         "shape",
         "smart_object",
+        "pen",
     ];
 
     pub fn type_name(&self) -> &'static str {
@@ -770,6 +772,7 @@ impl Annotation {
             Annotation::CutOutSeam(_) => "cut_out_seam",
             Annotation::Shape(_) => "shape",
             Annotation::SmartObject(_) => "smart_object",
+            Annotation::Pen(_) => "pen",
         }
     }
 
@@ -812,6 +815,7 @@ impl Annotation {
             Annotation::CutOutSeam(_) => {}
             Annotation::Shape(s) => s.shape.translate(dx, dy),
             Annotation::SmartObject(o) => o.rect.translate(dx, dy),
+            Annotation::Pen(p) => p.points.iter_mut().for_each(mv),
         }
     }
 
@@ -848,6 +852,11 @@ impl Annotation {
             Annotation::CutOutSeam(_) => None,
             Annotation::Shape(s) => Some(s.shape.bounds()),
             Annotation::SmartObject(o) => Some(o.rect),
+            Annotation::Pen(p) => p
+                .points
+                .iter()
+                .map(|q| RectF::point(*q))
+                .reduce(RectF::union),
         }
     }
 
@@ -939,6 +948,7 @@ impl Annotation {
                 s.fill.map(f);
             }
             Annotation::SmartObject(o) => o.rect = o.rect.map(f),
+            Annotation::Pen(p) => p.points.iter_mut().for_each(|q| *q = f(*q)),
         }
     }
 
@@ -953,6 +963,7 @@ impl Annotation {
             Annotation::CutOutSeam(c) => c.validate(v),
             Annotation::Shape(s) => s.validate(v),
             Annotation::SmartObject(o) => o.validate(v),
+            Annotation::Pen(p) => p.validate(v),
         }
     }
 }
@@ -1708,6 +1719,48 @@ impl ShapeNode {
     }
 }
 
+// --- Pen ------------------------------------------------------------------------
+
+/// A freehand stroke (the Pen tool): the pointer trace, drawn as the
+/// smooth Bézier curve PhotoCraft's Freeform Pen fits through it
+/// (`photocraft_vector::trace::fit_trace`, within `smoothing` px).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PenStroke {
+    pub points: Vec<Point>,
+    pub stroke: Stroke,
+    /// Curve-fit tolerance, canvas px (0.1..=100); larger is smoother.
+    pub smoothing: f32,
+}
+
+impl Default for PenStroke {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            stroke: Stroke {
+                width: 4.0,
+                join: LineJoin::Round,
+                cap: LineCap::Round,
+                ..Stroke::default()
+            },
+            smoothing: 2.0,
+        }
+    }
+}
+
+impl PenStroke {
+    fn validate(&self, v: &mut V) {
+        if !(2..=MAX_POLYGON_POINTS).contains(&self.points.len()) {
+            v.err("points", format!("needs 2..={MAX_POLYGON_POINTS} points"));
+        }
+        for p in &self.points {
+            check_point(v, "points", *p);
+        }
+        self.stroke.validate(v, "stroke");
+        check_range(v, "smoothing", self.smoothing, 0.1, 100.0);
+    }
+}
+
 // --- Smart object ----------------------------------------------------------
 
 /// A piece of the screenshot lifted out by Smart Move: its own straight-alpha
@@ -2383,6 +2436,7 @@ mod tests {
             Annotation::CutOutSeam(CutOutSeam::default()),
             Annotation::Shape(ShapeNode::default()),
             Annotation::SmartObject(SmartObject::default()),
+            Annotation::Pen(PenStroke::default()),
         ];
         let names: Vec<_> = all.iter().map(Annotation::type_name).collect();
         assert_eq!(names, Annotation::TYPES);

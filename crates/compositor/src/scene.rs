@@ -268,6 +268,13 @@ pub enum ShapeGeometry {
     Ellipse(RectF32),
     /// Closed polygon (non-zero fill).
     Polygon(Vec<PointF32>),
+    /// Open freehand trace, drawn as the cubic Béziers PhotoCraft's
+    /// Freeform Pen fits through it within `tolerance` px; stroke only,
+    /// with round caps.
+    Trace {
+        points: Vec<PointF32>,
+        tolerance: f32,
+    },
 }
 
 /// A filled and/or stroked plain shape (the Shape tool, step badges).

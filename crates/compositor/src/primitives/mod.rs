@@ -154,6 +154,15 @@ pub fn geometry_path(g: &ShapeGeometry) -> Option<Path> {
             let pts: Vec<P> = pts.iter().map(|p| p.f64()).collect();
             Path::new(vec![photocraft_doc::Subpath::polygon(&pts)])
         }
+        ShapeGeometry::Trace { points, tolerance }
+            if points.len() >= 2
+                && points.len() <= 100_000
+                && points.iter().all(|p| point_ok(*p)) =>
+        {
+            let pts: Vec<[f64; 2]> = points.iter().map(|p| [p.x.into(), p.y.into()]).collect();
+            let sub = photocraft_vector::trace::fit_trace(&pts, f64::from(*tolerance), false)?;
+            Path::new(vec![sub])
+        }
         _ => return None,
     })
 }
@@ -209,7 +218,9 @@ pub fn stroke(lines: &[Polyline], s: &StrokeSpec, cap: LineCap) -> Vec<Vec<P>> {
 /// Silhouette of a Shape-tool annotation.
 pub fn shape_silhouette(spec: &ShapeSpec) -> Silhouette {
     let outline = geometry_outline(&spec.geometry);
-    let fill = if spec.fill.is_some() {
+    // A trace is an open line: never filled, its ends rounded.
+    let open = matches!(spec.geometry, ShapeGeometry::Trace { .. });
+    let fill = if spec.fill.is_some() && !open {
         outline.iter().map(|l| l.pts.clone()).collect()
     } else {
         Vec::new()
@@ -217,7 +228,13 @@ pub fn shape_silhouette(spec: &ShapeSpec) -> Silhouette {
     let stroke = spec
         .stroke
         .as_ref()
-        .map(|s| stroke(&outline, s, LineCap::Butt))
+        .map(|s| {
+            stroke(
+                &outline,
+                s,
+                if open { LineCap::Round } else { LineCap::Butt },
+            )
+        })
         .unwrap_or_default();
     Silhouette {
         fill,

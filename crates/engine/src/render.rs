@@ -36,8 +36,8 @@ use capturecraft_format::{
     Annotation, AnnotationNode, ArrowCurve, ArrowHead, Axis, BackdropEffect, Background,
     BadgeShape, BlurRegion, Callout, CalloutBody, CanvasBackdrop, Color, CurvedArrow, CutOutSeam,
     DashStyle, DropShadow, Fill, GradientStop, HeadStyle, LensShape, LineJoin, MagnifierLens,
-    Manifest, NodeKind, RectF, RegionShape, Sampling, SeamEdge, ShapeNode, SmartObject, Spotlight,
-    StepBadge, Stroke, TailAnchor, TextAlign, TextBlock, VAlign,
+    Manifest, NodeKind, PenStroke, RectF, RegionShape, Sampling, SeamEdge, ShapeNode, SmartObject,
+    Spotlight, StepBadge, Stroke, TailAnchor, TextAlign, TextBlock, VAlign,
 };
 use photocraft_geom::Point;
 
@@ -147,6 +147,7 @@ pub fn render_scene(doc: &DocState) -> RenderScene {
             Annotation::MagnifierLens(l) => (Some(magnifier(l, alpha)), None),
             Annotation::Spotlight(s) => (Some(spotlight(s, alpha)), None),
             Annotation::Shape(s) => (Some(shape(s, alpha)), None),
+            Annotation::Pen(p) => (Some(pen(p, alpha)), None),
             Annotation::SmartObject(_) => match doc.object_pixels(n.id) {
                 Some(p) => (Some(raster(p, [0, 0], alpha)), Some(p.revision())),
                 None => (None, None),
@@ -727,6 +728,20 @@ fn spotlight(s: &Spotlight, alpha: f32) -> RenderNode {
         dim_color: rgba(s.dim_color, 1.0),
         feather_px: s.feather_px,
         blur_sigma: s.blur_sigma.unwrap_or(0.0),
+    })
+}
+
+/// A Pen stroke: the fitted trace, stroked with round ends.
+fn pen(p: &PenStroke, alpha: f32) -> RenderNode {
+    RenderNode::Shape(ShapeSpec {
+        geometry: ShapeGeometry::Trace {
+            points: p.points.iter().map(|q| pt(*q)).collect(),
+            tolerance: p.smoothing,
+        },
+        fill: None,
+        stroke: Some(stroke(&p.stroke, alpha)),
+        shadow: None,
+        text: None,
     })
 }
 

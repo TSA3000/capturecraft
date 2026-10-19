@@ -15,6 +15,8 @@ capturecraft-compositor = { workspace = true }
 photocraft-geom = { workspace = true }
 photocraft-color = { workspace = true }
 photocraft-raster = { workspace = true }
+# The Pen tool thins its trace with PhotoCraft's RDP simplify.
+photocraft-algo = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
