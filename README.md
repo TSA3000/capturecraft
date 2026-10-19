@@ -117,18 +117,23 @@ Layout, top to bottom:
   and Clipboard) on the right. More holds Step, Blur, Pixelate, Highlight,
   Pen, Eraser, Magnify, Spotlight, Cut Out, Smart Move, Simplify and Crop;
   the pin next to each puts it on the toolbar (right-click to unpin).
-- **Tool Properties** drawer: Quick Style tiles and the property controls of
+- **Drawer**: two stacked panel groups as in PhotoCraft, `Properties | Effects`
+  above and `Layers | History` below, each with its own scroll bar. Drag the
+  gap between them to resize; double-click a tab (or use the ≡ menu) to fold
+  a group to its tab strip. View › Panels hides the drawer.
+- **Properties**: with a callout or text selected, its text, size, colour and
+  alignment on top. Below, Quick Style tiles and the property controls of
   the active tool (colour, outline, width, arrowheads, shadow direction,
   corner radius, tail, numbering). Right-click a Quick Style to add it to
   Favorites. The Selection tool shows Rectangle / Ellipse / Polygon / Lasso
   tiles and **Background Fill**: Transparent, or Auto Fill (inpainted by
   `capturecraft-ocr`) when the selection is moved or deleted.
-- **Effects** drawer: Border, Drop Shadow and Rounded Drop-Shadow Frame for
+- **Effects**: Border, Drop Shadow and Rounded Drop-Shadow Frame for
   the whole canvas, with the frame's settings.
 - **Canvas**: the capture on a dark surround, with eight resize squares on
   its border to add padding.
-- **Utility bar**: Hide/Show Recent, Tag, zoom (Fit, 25–400 %), canvas size
-  (Resize / Trim Canvas) and the Effects / Properties tabs.
+- **Utility bar**: Hide/Show Recent, Tag, zoom (Fit, 25–400 %) and canvas size
+  (Resize / Trim Canvas).
 - **Recent Captures**: 130 × 85 thumbnails of the open captures; click to
   switch, × to close, right-click for Duplicate, Combine Images, Save As,
   Copy and Delete.
@@ -138,7 +143,7 @@ Layout, top to bottom:
 | Tool or feature | How it works |
 |-----------------|--------------|
 | Arrow | Drag from tail to tip; drag the green handle to bend it |
-| Callout | Click for a default bubble or drag its size; the yellow diamond aims the tail, the `+` adds another |
+| Callout | Click for a default bubble or drag its size; the yellow diamond aims the tail, the `+` adds another; double-click it (or use Properties) to type its text |
 | Step | Click to drop the next number (1, 2, 3 / A, B, C / I, II, III) |
 | Text | Click to type (or drag a box); Enter finishes, Shift+Enter breaks the line; double-click a text to edit it |
 | Shape | Drag a rectangle or ellipse, or click the corners of a polygon (double-click or Enter closes it), in the selected Quick Style |
@@ -161,7 +166,7 @@ Layout, top to bottom:
 | Captures | Recent Captures strip (switch, close, Duplicate, Copy, Delete), Tag, New Blank Image, zoom, Undo / Redo |
 | Files | File › Open, Save, Save As: `.capturecraft` documents keep every annotation, the edited pixels and the whole undo history; Save As also writes PNG, JPEG or WebP |
 | Library | The open captures plus every image and `.capturecraft` document in the captures folders (Pictures/CaptureCraft, the tray's output folder, Share › File folders); double-click opens one |
-| Layers / History | Drawer tabs: hide, lock, rename and restack annotations; click any past step to go back to it |
+| Layers / History | The drawer's lower group: hide, lock, rename (double-click; Enter saves, Esc cancels) and restack annotations; click any past step to go back to it |
 | Right-click | Cut, Copy, Paste, Duplicate, Bring to Front / Forward, Send Backward / to Back, Group, Ungroup, Delete, Grab Text, Copy All, the selection's Quick Styles and a tool strip |
 | Shortcuts | Ctrl+Z undo; Ctrl+Y or Ctrl+Shift+Z redo; Ctrl+C copies the selected annotations, or the whole image ("Copied to clipboard!") with nothing selected; Ctrl+X, Ctrl+V, Ctrl+D, Delete, Ctrl+G / Ctrl+Shift+G, Ctrl+A, Ctrl+O, Ctrl+S, Ctrl+Shift+S |
 | Pointer | The canvas pointer carries the active tool's icon |

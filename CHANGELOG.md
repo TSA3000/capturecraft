@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.23.0 (2026-10-19)
+
+- Drawer split into two PhotoCraft-style panel groups: Properties / Effects above, Layers /
+  History below, each scrolling on its own; resizable and foldable. The utility bar's drawer
+  tabs are gone (View › Panels shows or hides the drawer).
+- Callout text: typed in Properties (text, size, colour, alignment) or on the canvas by
+  double-clicking the callout.
+- Fix: renaming a layer ends on Enter (saves), Esc (cancels) or a click away (saves).
+- Engine: `annotation.setText` takes `align` (and `text` is optional); a callout made or
+  styled without text keeps its font and colour for the text typed later.
+
 ## v0.22.0 (2026-10-19)
 
 - Text, Polygon, Pen, Eraser, Magnify, Spotlight and Crop tools draw.

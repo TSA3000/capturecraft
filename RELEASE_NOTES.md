@@ -1,3 +1,23 @@
+# v0.23.0
+
+## Changes
+
+- **Drawer in two groups**, like PhotoCraft's panels: `Properties | Effects` on top and
+  `Layers | History` underneath, each with its own tabs and scroll bar. Drag the gap between
+  them to give one more room; double-click a tab, or use the ≡ menu, to fold a group to its
+  tab strip. The Effects / Properties / Layers / History tabs left the utility bar; View ›
+  Panels shows or hides the drawer.
+- **Text in callouts**: select a callout and type its text in Properties, with size, colour
+  and left / centre / right alignment. Or double-click the callout on the canvas and type
+  straight into the bubble (Enter finishes, Shift+Enter breaks the line). The text is drawn
+  inside the bubble, wrapped to it.
+- **Fix: renaming a layer** no longer gets stuck in the text box. Enter or a click elsewhere
+  saves the name, Esc cancels.
+
+## Upgrading
+
+- Install over v0.22.0; nothing else to do. The drawer opens on Properties and Layers.
+
 # v0.22.0
 
 ## Changes
