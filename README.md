@@ -114,7 +114,7 @@ Layout, top to bottom:
   left; Favorites, Arrow, Text, Callout, Shape, Stamp, Fill, Move, Selection,
   More ▾ │ Undo, Redo centred; Copy All and the blue **Share / Save** split
   button (PNG to the captures folder; the chevron offers JPG, WebP, SVG, PDF
-  and Clipboard) on the right. More holds Step, Blur, Pixelate, Highlight,
+  and Clipboard) on the right. More holds Step, Blur, Highlight,
   Pen, Eraser, Magnify, Spotlight, Cut Out, Smart Move, Simplify and Crop;
   the pin next to each puts it on the toolbar (right-click to unpin).
 - **Drawer**: two stacked panel groups as in PhotoCraft, `Properties | Effects`
@@ -148,7 +148,7 @@ Layout, top to bottom:
 | Text | Click to type (or drag a box); Enter finishes, Shift+Enter breaks the line; double-click a text to edit it |
 | Shape | Drag a rectangle or ellipse, or click the corners of a polygon (double-click or Enter closes it), in the selected Quick Style |
 | Highlight | Drag over text for a translucent marker band (yellow, green, pink or blue) |
-| Blur / Pixelate | Drag over private details; pick Light / Medium / Strong blur or Fine / Medium / Coarse blocks |
+| Blur | Drag over private details to blur or pixelate them, non-destructively: pick one of four blur or four pixelate Quick Styles, or set Type and Intensity (1–100); both also change the selected blurs |
 | Pen | Drag a freehand line, smoothed into curves the way PhotoCraft's Freeform Pen fits them |
 | Eraser | Drag over the capture to erase it to transparency (size and hardness); annotations stay |
 | Magnify | Click to drop a 1.5×–4× lens (or drag its size); move the source ring afterwards |

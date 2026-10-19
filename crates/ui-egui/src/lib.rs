@@ -150,6 +150,7 @@ pub const COMMANDS_USED: &[&str] = &[
     "annotation.addArrow",
     "annotation.addShape",
     "annotation.addBlur",
+    "annotation.setBackdropFilter",
     "annotation.addStep",
     "annotation.renumberSteps",
     "annotation.addCallout",

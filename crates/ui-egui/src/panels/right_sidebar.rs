@@ -35,8 +35,8 @@
 use capturecraft_engine::DocState;
 use capturecraft_engine::node_commands::is_text_box;
 use capturecraft_format::{
-    Annotation, Axis, Callout, CanvasBackdrop, Color, DropShadow, Fill, GradientStop, HeadStyle,
-    NodeId, Numbering, Stroke, TextAlign,
+    Annotation, Axis, BackdropEffect, Callout, CanvasBackdrop, Color, DropShadow, Fill, FilterMode,
+    GradientStop, HeadStyle, INTENSITY_RANGE, NodeId, Numbering, Stroke, TextAlign,
 };
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Pos2, Rect as ERect, Sense, Shape, Slider, StrokeKind,
@@ -46,11 +46,11 @@ use photocraft_geom::{Point, Size};
 use serde_json::{Value, json};
 
 use crate::UiIntent;
-use crate::icons::{self, Icon};
+use crate::icons::{self, Icon, IconStyle};
 use crate::panels::layers_panel::LayersPanel;
 use crate::state::{
     BlurOptions, ColorTarget, DockTab, EditorState, ExpandBackdrop, InspectorMode, MagnifyOptions,
-    PixelateOptions, QuickStyle, SelectionFill, SelectionMode, ShapeKind, StylePreset, ToolId,
+    QuickStyle, SelectionFill, SelectionMode, ShapeKind, StylePreset, ToolId,
 };
 use crate::theme::{Tokens, stroke};
 use crate::widgets::{self, icon_style, tile};
@@ -267,11 +267,7 @@ impl RightSidebar<'_> {
                     if self.tool_options(ui, editor, intents) {
                         return;
                     }
-                    let heading = match tool {
-                        ToolId::Blur | ToolId::Pixelate => "Strength",
-                        _ => "Quick Styles",
-                    };
-                    ui.label(egui::RichText::new(heading).strong());
+                    ui.label(egui::RichText::new("Quick Styles").strong());
                     ui.add_space(t.space_sm);
                     let changed = self.quick_styles(ui, editor, intents);
                     ui.add_space(t.space_md);
@@ -438,6 +434,10 @@ impl RightSidebar<'_> {
                 ui.add(Slider::new(&mut o.dim_opacity, 0.1..=0.95).text("Dim"));
                 true
             }
+            ToolId::Blur => {
+                self.blur_panel(ui, editor, intents);
+                true
+            }
             ToolId::Crop => {
                 let doc = self.doc;
                 let frame = editor.canvas.crop;
@@ -464,6 +464,111 @@ impl RightSidebar<'_> {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// The Blur tool's panel: Quick Styles (four
+    /// blurs, four pixelations, light to heavy), then Tool Properties (Type
+    /// and Intensity). Changes also go to the selected blurs
+    /// (`annotation.setBackdropFilter`) once the pointer is released, so a
+    /// slider drag is one undo step. Selecting blurs loads the first one's
+    /// settings.
+    fn blur_panel(&self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
+        let t = self.tokens;
+        let selected = self.selected_blurs(editor);
+        let synced_id = Id::new("sidebar.blur_synced");
+        let pending_id = Id::new("sidebar.blur_pending");
+        let synced = ui.ctx().data(|d| d.get_temp::<Vec<u64>>(synced_id));
+        if synced.as_ref() != Some(&selected) {
+            if let Some(e) = selected.first().and_then(|id| self.blur_effect(*id)) {
+                editor.tools.blur = BlurOptions::of(&e);
+            }
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(synced_id, selected.clone()));
+        }
+        let before = editor.tools.blur;
+
+        ui.label(egui::RichText::new("Quick Styles").strong());
+        ui.add_space(t.space_sm);
+        let gap = t.space_sm;
+        let side = ((ui.available_width() - 3.0 * gap) / 4.0).clamp(28.0, CARD_H);
+        let active = editor.tools.blur.preset();
+        egui::Grid::new("sidebar.blur_presets")
+            .spacing(Vec2::splat(gap))
+            .show(ui, |ui| {
+                for (i, preset) in BlurOptions::PRESETS.iter().enumerate() {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+                    if blur_tile(ui, rect, i, preset, active == Some(i), t).clicked() {
+                        editor.tools.blur = *preset;
+                    }
+                    if i % 4 == 3 {
+                        ui.end_row();
+                    }
+                }
+            });
+        ui.add_space(t.space_md);
+        ui.separator();
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new("Tool Properties").strong());
+            ui.add_space(t.space_sm);
+            ui.label("Type");
+            if let Some(mode) = type_picker(ui, editor.tools.blur.mode, t) {
+                editor.tools.blur.mode = mode;
+            }
+        });
+        ui.add_space(t.space_md);
+        let o = &mut editor.tools.blur;
+        ui.horizontal(|ui| {
+            ui.label("Intensity");
+            ui.add(
+                Slider::new(&mut o.intensity, INTENSITY_RANGE)
+                    .step_by(1.0)
+                    .show_value(false),
+            )
+            .on_hover_text(effect_text(&o.effect()));
+            ui.add(
+                egui::DragValue::new(&mut o.intensity)
+                    .range(INTENSITY_RANGE)
+                    .speed(0.5)
+                    .max_decimals(0)
+                    .update_while_editing(false),
+            );
+        });
+        o.intensity = o.intensity.round();
+
+        let pending = editor.tools.blur != before
+            || ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(pending_id))
+                .unwrap_or(false);
+        let released = !ui.input(|i| i.pointer.any_down());
+        let commit = pending && released;
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(pending_id, pending && !commit));
+        if commit && !selected.is_empty() {
+            let o = editor.tools.blur;
+            intents.push(UiIntent::command(
+                "annotation.setBackdropFilter",
+                json!({ "ids": selected, "mode": o.mode, "intensity": o.intensity }),
+            ));
+        }
+    }
+
+    /// The selected annotations that are blurs, in selection order.
+    fn selected_blurs(&self, editor: &EditorState) -> Vec<u64> {
+        editor
+            .canvas
+            .selection
+            .iter()
+            .filter(|id| self.blur_effect(id.0).is_some())
+            .map(|id| id.0)
+            .collect()
+    }
+
+    fn blur_effect(&self, id: u64) -> Option<BackdropEffect> {
+        match self.doc?.manifest.node(NodeId(id))?.annotation()? {
+            Annotation::BlurRegion(b) => Some(b.effect),
+            _ => None,
         }
     }
 
@@ -516,42 +621,6 @@ impl RightSidebar<'_> {
                         "Straight seam"
                     })
                     .clicked()
-                });
-            }
-            ToolId::Blur => {
-                let current = editor.tools.blur.sigma;
-                grid(ui, BlurOptions::PRESETS.len(), &mut |ui, i, rect| {
-                    let Some((label, sigma)) = BlurOptions::PRESETS.get(i).copied() else {
-                        return false;
-                    };
-                    let r = card_frame(ui, rect, current == sigma, t, ("blur", i));
-                    paint_strength(ui.painter(), r.rect.shrink(t.space_md), None, i, label, t);
-                    if r.clicked() {
-                        editor.tools.blur.sigma = sigma;
-                    }
-                    r.on_hover_text(format!("Gaussian blur, radius {sigma} px"))
-                        .clicked()
-                });
-            }
-            ToolId::Pixelate => {
-                let current = editor.tools.pixelate.block_size_px;
-                grid(ui, PixelateOptions::PRESETS.len(), &mut |ui, i, rect| {
-                    let Some((label, block)) = PixelateOptions::PRESETS.get(i).copied() else {
-                        return false;
-                    };
-                    let r = card_frame(ui, rect, current == block, t, ("pixelate", i));
-                    paint_strength(
-                        ui.painter(),
-                        r.rect.shrink(t.space_md),
-                        Some(block),
-                        i,
-                        label,
-                        t,
-                    );
-                    if r.clicked() {
-                        editor.tools.pixelate.block_size_px = block;
-                    }
-                    r.on_hover_text(format!("{block} px blocks")).clicked()
                 });
             }
             ToolId::Simplify => {
@@ -1705,9 +1774,8 @@ pub fn tool_help(tool: ToolId) -> &'static str {
         ToolId::Simplify => "Replace text and detail with clean shapes in the chosen palette.",
         ToolId::Shape => "Drag a rectangle or ellipse, or click the corners of a polygon.",
         ToolId::Highlighter => "Drag over text to mark it with a translucent highlighter band.",
-        ToolId::Blur => "Drag over private details to blur them; pick the strength below.",
-        ToolId::Pixelate => {
-            "Drag over private details to pixelate them; pick the block size below."
+        ToolId::Blur => {
+            "Drag over private details to blur or pixelate them. Pick a Quick Style or set the Type and Intensity; they also change the selected blurs."
         }
         ToolId::Text => {
             "Click to type, or drag a box; Enter finishes (Shift+Enter for a new line). Double-click a text to edit it."
@@ -2063,60 +2131,157 @@ pub fn paint_thumbnail(
     }
 }
 
-/// Blur / Pixelate strength card: a mosaic of `block` (Pixelate) or a
-/// stack of fading rings (Blur, `level` 0..=2), with the preset's name.
-fn paint_strength(
-    p: &egui::Painter,
-    r: ERect,
-    block: Option<u32>,
-    level: usize,
-    label: &str,
+/// A Blur Quick Style tile: the drop, softer for stronger blurs, or a
+/// mosaic with bigger blocks for stronger pixelations. The active one is
+/// filled with the accent and starred.
+fn blur_tile(
+    ui: &mut Ui,
+    rect: ERect,
+    index: usize,
+    preset: &BlurOptions,
+    active: bool,
     t: &Tokens,
-) {
-    let art = ERect::from_min_max(r.min, pos2(r.max.x, r.max.y - 14.0));
-    match block {
-        Some(b) => {
-            let cell = (b as f32 / 2.0).clamp(3.0, art.height() / 2.0);
-            let (cols, rows) = (
-                (art.width() / cell).floor() as i32,
-                (art.height() / cell).floor() as i32,
-            );
-            for i in 0..cols {
-                for j in 0..rows {
-                    let shade = if (i * 7 + j * 3) % 3 == 0 {
-                        t.field_border
-                    } else if (i + j) % 2 == 0 {
-                        t.card_hover
+) -> egui::Response {
+    let resp = ui.interact(
+        rect,
+        Id::new(("sidebar.blur_preset", index)),
+        Sense::click(),
+    );
+    let p = ui.painter();
+    let corner = Tokens::corner(t.radius);
+    let fill = if active {
+        t.accent
+    } else if resp.hovered() {
+        t.card_hover
+    } else {
+        t.card
+    };
+    p.rect_filled(rect, corner, fill);
+    let fg = if active { Color32::WHITE } else { t.text };
+    let art = rect.shrink(rect.width() * 0.2);
+    let level = index % 4;
+    match preset.mode {
+        FilterMode::GaussianBlur => {
+            // Stacked, growing, faint copies read as a blur.
+            let copies = 1 + 3 * level;
+            for k in 0..copies {
+                let style = IconStyle {
+                    fg: fg.gamma_multiply(if copies == 1 {
+                        1.0
                     } else {
-                        t.text_faint
+                        2.0 / copies as f32
+                    }),
+                    accent: fg,
+                };
+                let grow = k as f32 * 0.8 * level as f32 / copies as f32 * 3.0;
+                icons::paint(p, art.expand(grow), Icon::Blur, style);
+            }
+        }
+        FilterMode::Pixelate => {
+            let n = [7, 5, 4, 3][level];
+            let cell = art.width() / n as f32;
+            for i in 0..n {
+                for j in 0..n {
+                    let a = match (i * 5 + j * 3 + level) % 4 {
+                        0 => 1.0,
+                        1 => 0.25,
+                        2 => 0.6,
+                        _ => 0.0,
                     };
                     let c = ERect::from_min_size(
                         art.min + vec2(i as f32 * cell, j as f32 * cell),
                         Vec2::splat(cell),
                     );
-                    p.rect_filled(c, 0.0, shade);
+                    p.rect_filled(c, 0.0, fg.gamma_multiply(a));
                 }
             }
         }
-        None => {
-            let rad = art.height() * 0.3;
-            for k in 0..=(level + 1) * 2 {
-                let a = 0.5 / (k as f32 + 1.0);
-                p.circle_filled(
-                    art.center(),
-                    rad + k as f32 * 2.0,
-                    t.text_dim.gamma_multiply(a),
+    }
+    if active {
+        let star =
+            ERect::from_min_size(pos2(rect.max.x - 14.0, rect.min.y + 2.0), Vec2::splat(12.0));
+        let white = IconStyle {
+            fg: Color32::WHITE,
+            accent: Color32::WHITE,
+        };
+        icons::paint(p, star, Icon::Favorites, white);
+    }
+    resp.on_hover_text(effect_text(&preset.effect()))
+}
+
+/// The Type picker: a square button with the mode's icon and a chevron,
+/// opening a menu of both modes. Returns the newly picked mode.
+fn type_picker(ui: &mut Ui, mode: FilterMode, t: &Tokens) -> Option<FilterMode> {
+    const MODES: [(FilterMode, Icon, &str); 2] = [
+        (FilterMode::GaussianBlur, Icon::Blur, "Blur"),
+        (FilterMode::Pixelate, Icon::Pixelate, "Pixelate"),
+    ];
+    let (_, icon, label) = MODES
+        .iter()
+        .find(|m| m.0 == mode)
+        .copied()
+        .unwrap_or(MODES[0]);
+    let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 44.0), Sense::click());
+    let p = ui.painter();
+    let corner = Tokens::corner(t.radius);
+    p.rect_filled(
+        rect,
+        corner,
+        if resp.hovered() { t.card_hover } else { t.card },
+    );
+    p.rect_stroke(rect, corner, stroke(1.0, t.card_border), StrokeKind::Inside);
+    let style = widgets::icon_style(t, true, true);
+    icons::paint(
+        p,
+        ERect::from_center_size(rect.center() - vec2(0.0, 5.0), Vec2::splat(22.0)),
+        icon,
+        style,
+    );
+    icons::paint(
+        p,
+        ERect::from_center_size(pos2(rect.center().x, rect.max.y - 7.0), Vec2::splat(10.0)),
+        Icon::ChevronDown,
+        style,
+    );
+    let resp = resp.on_hover_text(format!("Type: {label}"));
+    let mut picked = None;
+    egui::Popup::menu(&resp).show(|ui| {
+        for (m, icon, label) in MODES {
+            let row = ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                icons::paint(
+                    ui.painter(),
+                    r,
+                    icon,
+                    widgets::icon_style(t, m == mode, true),
                 );
+                ui.selectable_label(m == mode, label)
+            });
+            if row.inner.clicked() {
+                picked = Some(m);
+                ui.close();
             }
         }
+    });
+    picked.filter(|m| *m != mode)
+}
+
+/// Tooltip of a blur effect.
+fn effect_text(e: &BackdropEffect) -> String {
+    match *e {
+        BackdropEffect::Gaussian { sigma } => {
+            format!(
+                "Blur, intensity {:.0} (radius {sigma:.1} px)",
+                e.intensity()
+            )
+        }
+        BackdropEffect::Pixelate { block_size_px } => {
+            format!(
+                "Pixelate, intensity {:.0} ({block_size_px} px blocks)",
+                e.intensity()
+            )
+        }
     }
-    p.text(
-        pos2(r.center().x, r.max.y),
-        Align2::CENTER_BOTTOM,
-        label,
-        FontId::proportional(11.0),
-        t.text_dim,
-    );
 }
 
 /// Cut Out card: two image halves joined straight or along a torn edge.

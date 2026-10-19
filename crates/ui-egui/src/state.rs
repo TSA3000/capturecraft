@@ -14,8 +14,8 @@
 //! its [`StylePreset`]) and `RecentTrayItem` is [`TrayItem`].
 
 use capturecraft_format::{
-    Axis, Color, DropShadow, Fill, FontSpec, HeadStyle, NodeId, Numbering, Offset, RectF, Stroke,
-    TextAlign,
+    Axis, BackdropEffect, Color, DropShadow, Fill, FilterMode, FontSpec, HeadStyle, NodeId,
+    Numbering, Offset, RectF, Stroke, TextAlign,
 };
 use photocraft_geom::{Point, Rect, Size};
 use serde::{Deserialize, Serialize};
@@ -495,7 +495,6 @@ pub struct ToolOptions {
     pub simplify: SimplifyOptions,
     pub shape: ShapeOptions,
     pub blur: BlurOptions,
-    pub pixelate: PixelateOptions,
     pub eraser: EraserOptions,
     pub magnify: MagnifyOptions,
     pub spotlight: SpotlightOptions,
@@ -586,41 +585,52 @@ impl Default for SpotlightOptions {
     }
 }
 
-/// The Blur tool's strength.
+/// The Blur tool's Type and Intensity (`BackdropEffect::from_intensity`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlurOptions {
-    /// Gaussian sigma, canvas pixels.
-    pub sigma: f32,
+    pub mode: FilterMode,
+    /// `1..=100` ([`capturecraft_format::INTENSITY_RANGE`]).
+    pub intensity: f32,
 }
 
 impl BlurOptions {
-    /// The Light / Medium / Strong cards.
-    pub const PRESETS: [(&'static str, f32); 3] =
-        [("Light", 4.0), ("Medium", 8.0), ("Strong", 16.0)];
+    /// The Quick Styles: four blurs, then four pixelations, light to heavy.
+    pub const PRESETS: [BlurOptions; 8] = [
+        BlurOptions::new(FilterMode::GaussianBlur, 10.0),
+        BlurOptions::new(FilterMode::GaussianBlur, 25.0),
+        BlurOptions::new(FilterMode::GaussianBlur, 50.0),
+        BlurOptions::new(FilterMode::GaussianBlur, 80.0),
+        BlurOptions::new(FilterMode::Pixelate, 10.0),
+        BlurOptions::new(FilterMode::Pixelate, 25.0),
+        BlurOptions::new(FilterMode::Pixelate, 50.0),
+        BlurOptions::new(FilterMode::Pixelate, 80.0),
+    ];
+
+    pub const fn new(mode: FilterMode, intensity: f32) -> Self {
+        Self { mode, intensity }
+    }
+
+    /// The options that draw `effect` (its intensity rounded for the slider).
+    pub fn of(effect: &BackdropEffect) -> Self {
+        Self::new(effect.mode(), effect.intensity().round())
+    }
+
+    pub fn effect(&self) -> BackdropEffect {
+        BackdropEffect::from_intensity(self.mode, self.intensity)
+    }
+
+    /// The preset that draws the same effect, if any (whole-pixel blocks
+    /// make neighbouring intensities equal).
+    pub fn preset(&self) -> Option<usize> {
+        let e = self.effect();
+        Self::PRESETS.iter().position(|p| p.effect() == e)
+    }
 }
 
 impl Default for BlurOptions {
     fn default() -> Self {
-        Self { sigma: 8.0 }
-    }
-}
-
-/// The Pixelate tool's block size.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PixelateOptions {
-    pub block_size_px: u32,
-}
-
-impl PixelateOptions {
-    /// The Fine / Medium / Coarse cards.
-    pub const PRESETS: [(&'static str, u32); 3] = [("Fine", 6), ("Medium", 12), ("Coarse", 24)];
-}
-
-impl Default for PixelateOptions {
-    fn default() -> Self {
-        Self { block_size_px: 12 }
+        Self::PRESETS[1]
     }
 }
 
@@ -817,8 +827,9 @@ pub enum ToolId {
     /// Marquee a region of the capture to move or delete it.
     Selection,
     Step,
+    /// Blur or pixelate a region; saved layouts' `pixelate` is this tool.
+    #[serde(alias = "pixelate")]
     Blur,
-    Pixelate,
     Highlighter,
     Pen,
     Eraser,
@@ -833,7 +844,7 @@ pub enum ToolId {
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 21] = [
+    pub const ALL: [ToolId; 20] = [
         ToolId::Arrow,
         ToolId::Text,
         ToolId::Callout,
@@ -844,7 +855,6 @@ impl ToolId {
         ToolId::Selection,
         ToolId::Step,
         ToolId::Blur,
-        ToolId::Pixelate,
         ToolId::Highlighter,
         ToolId::Pen,
         ToolId::Eraser,
@@ -883,7 +893,6 @@ impl ToolId {
             ToolId::Fill => "Fill",
             ToolId::CutOut => "Cut Out",
             ToolId::Pen => "Pen",
-            ToolId::Pixelate => "Pixelate",
             ToolId::Eraser => "Eraser",
             ToolId::Highlighter => "Highlight",
             ToolId::Blur => "Blur",
@@ -906,7 +915,7 @@ impl ToolId {
             ToolId::Step => Some("annotation.addStep"),
             ToolId::Callout => Some("annotation.addCallout"),
             ToolId::Shape | ToolId::Highlighter => Some("annotation.addShape"),
-            ToolId::Blur | ToolId::Pixelate => Some("annotation.addBlur"),
+            ToolId::Blur => Some("annotation.addBlur"),
             ToolId::Text => Some("annotation.addText"),
             ToolId::Pen => Some("annotation.addPen"),
             ToolId::Eraser => Some("canvas.erase"),
@@ -920,8 +929,8 @@ impl ToolId {
         }
     }
 
-    /// Tools whose Quick Styles grid the sidebar shows (Blur and
-    /// Pixelate show strength cards instead).
+    /// Tools whose Quick Styles grid the sidebar shows (Blur shows its
+    /// own presets instead).
     pub fn has_quick_styles(self) -> bool {
         matches!(
             self,
@@ -1977,6 +1986,34 @@ pub enum LibraryView {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blur_presets_round_trip_through_the_effect() {
+        for (i, p) in BlurOptions::PRESETS.iter().enumerate() {
+            assert_eq!(BlurOptions::of(&p.effect()).preset(), Some(i), "{p:?}");
+        }
+        let modes: Vec<_> = BlurOptions::PRESETS.iter().map(|p| p.mode).collect();
+        assert_eq!(modes[..4], [FilterMode::GaussianBlur; 4]);
+        assert_eq!(modes[4..], [FilterMode::Pixelate; 4]);
+        assert_eq!(BlurOptions::new(FilterMode::Pixelate, 33.0).preset(), None);
+    }
+
+    #[test]
+    fn saved_pixelate_tool_is_the_blur_tool() {
+        let mut bar: ToolbarState = serde_json::from_str(
+            r#"{"active":"pixelate","pinned":["arrow","blur","pixelate"],"overflow":["pixelate"]}"#,
+        )
+        .unwrap();
+        bar.normalize();
+        assert_eq!(bar.active, ToolId::Blur);
+        assert_eq!(bar.pinned, [ToolId::Arrow, ToolId::Blur]);
+        assert!(!bar.overflow.contains(&ToolId::Blur));
+        // Old strength settings fall back to the default.
+        let o: ToolOptions =
+            serde_json::from_str(r#"{"blur":{"sigma":8.0},"pixelate":{"block_size_px":12}}"#)
+                .unwrap();
+        assert_eq!(o.blur, BlurOptions::default());
+    }
 
     #[test]
     fn drawer_tabs_from_older_states_still_load() {

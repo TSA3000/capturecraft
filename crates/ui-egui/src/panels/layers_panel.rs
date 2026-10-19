@@ -14,7 +14,7 @@
 
 use capturecraft_engine::DocState;
 use capturecraft_engine::node_commands::{expand_groups, is_text_box};
-use capturecraft_format::{Annotation, AnnotationNode, BlendMode, NodeId};
+use capturecraft_format::{Annotation, AnnotationNode, BlendMode, FilterMode, NodeId};
 use egui::{Align2, FontId, Id, Rect as ERect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 
@@ -27,6 +27,16 @@ use crate::widgets::tool_icon;
 const ROW_H: f32 = 30.0;
 const CELL: f32 = 26.0;
 
+/// The row icon of `n`, made by `tool`: a pixelated blur shows the mosaic.
+fn node_icon(n: &AnnotationNode, tool: ToolId) -> Icon {
+    match n.annotation() {
+        Some(Annotation::BlurRegion(b)) if b.effect.mode() == FilterMode::Pixelate => {
+            Icon::Pixelate
+        }
+        _ => tool_icon(tool),
+    }
+}
+
 /// The tool that makes annotations like `n` (its row icon).
 pub fn node_tool(n: &AnnotationNode) -> Option<ToolId> {
     Some(match n.annotation()? {
@@ -34,10 +44,7 @@ pub fn node_tool(n: &AnnotationNode) -> Option<ToolId> {
         Annotation::Callout(_) => ToolId::Callout,
         Annotation::StepBadge(_) => ToolId::Step,
         Annotation::CurvedArrow(_) => ToolId::Arrow,
-        Annotation::BlurRegion(b) => match b.effect {
-            capturecraft_format::BackdropEffect::Gaussian { .. } => ToolId::Blur,
-            capturecraft_format::BackdropEffect::Pixelate { .. } => ToolId::Pixelate,
-        },
+        Annotation::BlurRegion(_) => ToolId::Blur,
         Annotation::MagnifierLens(_) => ToolId::Magnify,
         Annotation::Spotlight(_) => ToolId::Spotlight,
         Annotation::CutOutSeam(_) => ToolId::CutOut,
@@ -67,6 +74,9 @@ pub fn node_label(n: &AnnotationNode) -> String {
         Some(Annotation::StepBadge(b)) => format!("Step {}", b.label()),
         Some(Annotation::SmartObject(o)) if !o.element.is_empty() => {
             format!("Object: {}", o.element)
+        }
+        Some(Annotation::BlurRegion(b)) if b.effect.mode() == FilterMode::Pixelate => {
+            "Pixelate".into()
         }
         _ => node_tool(n).map_or_else(|| "Unknown".into(), |t| t.label().into()),
     }
@@ -237,7 +247,7 @@ impl LayersPanel<'_> {
                 icons::paint(
                     ui.painter(),
                     icon,
-                    tool_icon(tool),
+                    node_icon(node, tool),
                     IconStyle {
                         fg: if node.visible {
                             t.text_dim

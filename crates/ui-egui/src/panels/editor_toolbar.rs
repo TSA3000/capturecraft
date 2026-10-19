@@ -568,7 +568,6 @@ mod tests {
             [
                 ToolId::Step,
                 ToolId::Blur,
-                ToolId::Pixelate,
                 ToolId::Highlighter,
                 ToolId::Pen,
                 ToolId::Eraser,

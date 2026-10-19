@@ -36,7 +36,6 @@ pub fn tool_icon(t: ToolId) -> Icon {
         ToolId::Selection => Icon::Selection,
         ToolId::Step => Icon::Step,
         ToolId::Blur => Icon::Blur,
-        ToolId::Pixelate => Icon::Pixelate,
         ToolId::Highlighter => Icon::Highlight,
         ToolId::Pen => Icon::Pen,
         ToolId::Eraser => Icon::Eraser,

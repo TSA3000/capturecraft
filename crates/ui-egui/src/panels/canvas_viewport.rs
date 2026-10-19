@@ -567,7 +567,7 @@ pub fn draw_intent(editor: &EditorState, from: Point, to: Point) -> Option<UiInt
             ))
         }
         ToolId::Shape if editor.tools.shape.kind == ShapeKind::Polygon => None,
-        ToolId::Shape | ToolId::Highlighter | ToolId::Blur | ToolId::Pixelate => {
+        ToolId::Shape | ToolId::Highlighter | ToolId::Blur => {
             let b = normalized(from, to);
             if b.w < MIN_REGION || b.h < MIN_REGION {
                 return None;
@@ -582,18 +582,8 @@ pub fn draw_intent(editor: &EditorState, from: Point, to: Point) -> Option<UiInt
                     "annotation.addShape"
                 }
                 ToolId::Highlighter => "annotation.addShape",
-                ToolId::Blur => {
-                    p.insert(
-                        "effect".into(),
-                        json!({ "kind": "gaussian", "sigma": editor.tools.blur.sigma }),
-                    );
-                    "annotation.addBlur"
-                }
                 _ => {
-                    p.insert(
-                        "effect".into(),
-                        json!({ "kind": "pixelate", "block_size_px": editor.tools.pixelate.block_size_px }),
-                    );
+                    p.insert("effect".into(), json!(editor.tools.blur.effect()));
                     "annotation.addBlur"
                 }
             };
@@ -2131,7 +2121,6 @@ fn draw_preview(
         ToolId::Callout
         | ToolId::Shape
         | ToolId::Blur
-        | ToolId::Pixelate
         | ToolId::Magnify
         | ToolId::Spotlight
         | ToolId::Highlighter => dashed_rect(painter, r, t.gizmo_stroke),
@@ -2143,7 +2132,8 @@ fn draw_preview(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use capturecraft_format::Offset;
+    use crate::state::BlurOptions;
+    use capturecraft_format::{FilterMode, Offset};
 
     fn view() -> ERect {
         ERect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))
@@ -2273,12 +2263,7 @@ mod tests {
         assert_eq!(params["end_head"], "triangle");
         assert!(params.get("stroke").is_some());
         assert!(draw_intent(&e, Point::new(0.0, 0.0), Point::new(1.0, 1.0)).is_none());
-        for tool in [
-            ToolId::Shape,
-            ToolId::Highlighter,
-            ToolId::Blur,
-            ToolId::Pixelate,
-        ] {
+        for tool in [ToolId::Shape, ToolId::Highlighter, ToolId::Blur] {
             e.toolbar.active = tool;
             let click = Point::new(5.0, 5.0);
             assert!(draw_intent(&e, click, click).is_none(), "{tool:?}");
@@ -2299,8 +2284,8 @@ mod tests {
             (&json!("multiply"), &Value::Null)
         );
         assert_eq!(params["fill"]["color"], "#ffe60066");
-        e.toolbar.active = ToolId::Pixelate;
-        e.tools.pixelate.block_size_px = 24;
+        e.toolbar.active = ToolId::Blur;
+        e.tools.blur = BlurOptions::new(FilterMode::Pixelate, 100.0);
         let UiIntent::Command { id, params } =
             draw_intent(&e, Point::new(0.0, 0.0), Point::new(50.0, 20.0)).unwrap()
         else {
@@ -2309,7 +2294,7 @@ mod tests {
         assert_eq!(id, "annotation.addBlur");
         assert_eq!(
             params["effect"],
-            json!({ "kind": "pixelate", "block_size_px": 24 })
+            json!({ "kind": "pixelate", "block_size_px": 48 })
         );
 
         e.toolbar.active = ToolId::Step;
@@ -2403,7 +2388,6 @@ mod tests {
             ToolId::Shape,
             ToolId::Highlighter,
             ToolId::Blur,
-            ToolId::Pixelate,
         ] {
             e.toolbar.active = tool;
             // Every built-in Quick Style of the tool draws.

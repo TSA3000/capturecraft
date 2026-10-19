@@ -621,6 +621,7 @@ fn apply_cut(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::scene::{

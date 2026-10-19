@@ -610,9 +610,11 @@ fn draw(p: &mut GridPen, icon: Icon) {
             p.seg((8.0, 14.5), (13.0, 14.5));
         }
         Icon::Blur => {
-            p.ring_with((10.0, 10.0), 7.5, p.stroke_k(1.0, fg.gamma_multiply(0.3)));
-            p.ring_with((10.0, 10.0), 5.0, p.stroke_k(1.0, fg.gamma_multiply(0.65)));
-            p.disc((10.0, 10.0), 2.6, fg);
+            // A water drop: the tip, then the round body between the two
+            // tangent points (56.6° either side of straight up).
+            let mut pts = vec![(10.0, 2.0)];
+            pts.extend(arc((10.0, 12.5), 5.8, -33.4, 213.4, 16));
+            p.fill(&pts, fg);
         }
         Icon::Pixelate => {
             const ALPHA: [[f32; 3]; 3] = [[1.0, 0.35, 0.7], [0.35, 0.7, 0.2], [0.7, 0.2, 0.5]];
