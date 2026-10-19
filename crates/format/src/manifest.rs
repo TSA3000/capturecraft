@@ -46,6 +46,11 @@ pub fn tile_path(layer: &str, coord: TileCoord) -> String {
     format!("tiles/{layer}/{}_{}.png", coord.tx, coord.ty)
 }
 
+/// Archive path of a [`SmartObject`]'s pixels.
+pub fn object_path(id: NodeId) -> String {
+    format!("objects/{}.png", id.0)
+}
+
 // ---------------------------------------------------------------------------
 // Document
 
@@ -590,6 +595,7 @@ pub enum Annotation {
     Spotlight(Spotlight),
     CutOutSeam(CutOutSeam),
     Shape(ShapeNode),
+    SmartObject(SmartObject),
 }
 
 impl Annotation {
@@ -603,6 +609,7 @@ impl Annotation {
         "spotlight",
         "cut_out_seam",
         "shape",
+        "smart_object",
     ];
 
     pub fn type_name(&self) -> &'static str {
@@ -615,6 +622,7 @@ impl Annotation {
             Annotation::Spotlight(_) => "spotlight",
             Annotation::CutOutSeam(_) => "cut_out_seam",
             Annotation::Shape(_) => "shape",
+            Annotation::SmartObject(_) => "smart_object",
         }
     }
 
@@ -656,6 +664,7 @@ impl Annotation {
             }
             Annotation::CutOutSeam(_) => {}
             Annotation::Shape(s) => s.shape.translate(dx, dy),
+            Annotation::SmartObject(o) => o.rect.translate(dx, dy),
         }
     }
 
@@ -691,6 +700,7 @@ impl Annotation {
                 .reduce(RectF::union),
             Annotation::CutOutSeam(_) => None,
             Annotation::Shape(s) => Some(s.shape.bounds()),
+            Annotation::SmartObject(o) => Some(o.rect),
         }
     }
 
@@ -704,6 +714,7 @@ impl Annotation {
             Annotation::Spotlight(s) => s.validate(v),
             Annotation::CutOutSeam(c) => c.validate(v),
             Annotation::Shape(s) => s.validate(v),
+            Annotation::SmartObject(o) => o.validate(v),
         }
     }
 }
@@ -1459,6 +1470,54 @@ impl ShapeNode {
     }
 }
 
+// --- Smart object ----------------------------------------------------------
+
+/// A piece of the screenshot lifted out by Smart Move: its own straight-alpha
+/// RGBA8 pixels ([`object_path`], soft-matted against the background it sat
+/// on), drawn scaled into `rect`. The hole it left is healed in the base
+/// layer, so the object can be moved, scaled or deleted later.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartObject {
+    /// Canvas-space placement; the pixels are scaled to fill it.
+    pub rect: RectF,
+    pub image_path: String,
+    pub image_size: Size,
+    /// Base-space rectangle the pixels were lifted from.
+    pub source: Rect,
+    /// What the UI analyzer took it for (`button`, `icon`, ...).
+    pub element: String,
+}
+
+impl Default for SmartObject {
+    fn default() -> Self {
+        Self {
+            rect: RectF::new(0.0, 0.0, 1.0, 1.0),
+            image_path: object_path(NodeId(0)),
+            image_size: Size::new(1, 1),
+            source: Rect::new(0, 0, 1, 1),
+            element: String::new(),
+        }
+    }
+}
+
+impl SmartObject {
+    fn validate(&self, v: &mut V) {
+        self.rect.validate(v, "rect");
+        check_archive_path(v, "image_path", &self.image_path);
+        check_size(v, "image_size", self.image_size);
+        if self.image_size.is_empty() {
+            v.err("image_size", "must not be empty");
+        }
+        if self.source.is_empty() {
+            v.err("source", "must not be empty");
+        }
+        if self.element.len() > 64 {
+            v.err("element", "longer than 64 bytes");
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {
@@ -2024,6 +2083,7 @@ mod tests {
             Annotation::Spotlight(Spotlight::default()),
             Annotation::CutOutSeam(CutOutSeam::default()),
             Annotation::Shape(ShapeNode::default()),
+            Annotation::SmartObject(SmartObject::default()),
         ];
         let names: Vec<_> = all.iter().map(Annotation::type_name).collect();
         assert_eq!(names, Annotation::TYPES);
