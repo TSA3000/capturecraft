@@ -277,6 +277,7 @@ fn text_block(t: &TextBlock, frame: RectF32, alpha: f32) -> Option<TextSpec> {
             TextAlign::Left => STextAlign::Left,
             TextAlign::Center => STextAlign::Center,
             TextAlign::Right => STextAlign::Right,
+            TextAlign::Justify => STextAlign::Justify,
         },
         valign: match t.valign {
             VAlign::Top => TextVAlign::Top,

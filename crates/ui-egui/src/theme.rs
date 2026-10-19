@@ -93,6 +93,10 @@ pub struct Tokens {
     pub handle_stroke: Color32,
     /// Callout tail diamonds.
     pub tail_handle: Color32,
+    /// The rotation knob of a text gizmo.
+    pub rotate_handle: Color32,
+    /// Outline of a text gizmo's round handles.
+    pub text_handle_stroke: Color32,
     /// Arrow bend handle.
     pub bend_handle: Color32,
     /// The eight canvas resize squares on the image border.
@@ -239,6 +243,8 @@ impl Tokens {
             handle_fill: rgb(0xFFFFFF),
             handle_stroke: rgb(0x3D8BFF),
             tail_handle: rgb(0xFFD21F),
+            rotate_handle: rgb(0x00FF00),
+            text_handle_stroke: rgb(0x000000),
             bend_handle: rgb(0x2ED1A2),
             canvas_handle_fill: if dark { rgb(0x4B5059) } else { rgb(0x6B7280) },
             canvas_handle_stroke: if dark { rgb(0x111317) } else { rgb(0xFFFFFF) },

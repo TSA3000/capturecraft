@@ -2350,6 +2350,8 @@ pub enum TextAlign {
     #[default]
     Center,
     Right,
+    /// Justified; the last line of each paragraph is left-aligned.
+    Justify,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,9 +3,14 @@
 //! History`, each with its own scroll area, divided by a bar that drags
 //! to share the height (`SidebarState::split`).
 //!
-//! Properties: with one callout or text box selected, a Text section on
-//! top edits its text (`annotation.setText` when the field loses focus),
-//! size, colour (`annotation.setStyle`) and alignment. The Selection tool shows its mode tiles, Snap to
+//! Properties: with one callout or text box selected, the drawer shows the
+//! Text (or Callout) tool's Quick Styles and inspector loaded with the
+//! node's own style (Fill, Outline, Text colour, Shadow), then an Advanced
+//! section with its text (`annotation.setText` when the field loses focus),
+//! font, size, line width, Bold / Italic / Underline, horizontal and
+//! vertical alignment, opacity and padding. Advanced and the canvas's
+//! floating text toolbar share their controls ([`super::text_format`]) and
+//! both read the node every frame, so they always agree. The Selection tool shows its mode tiles, Snap to
 //! Object and the Background Fill toggle (Transparent clears the hole a
 //! moved or deleted selection leaves, Auto Fill inpaints it with the UI
 //! analyzer). Every other tool shows Quick Styles above, the Property
@@ -35,8 +40,8 @@
 use capturecraft_engine::DocState;
 use capturecraft_engine::node_commands::is_text_box;
 use capturecraft_format::{
-    Annotation, Axis, BackdropEffect, Callout, CanvasBackdrop, Color, DropShadow, Fill, FilterMode,
-    GradientStop, HeadStyle, INTENSITY_RANGE, NodeId, Numbering, Stroke, TextAlign,
+    Annotation, Axis, BackdropEffect, Callout, CalloutBody, CanvasBackdrop, Color, DropShadow,
+    Fill, FilterMode, GradientStop, HeadStyle, INTENSITY_RANGE, NodeId, Numbering, Stroke,
 };
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Pos2, Rect as ERect, Sense, Shape, Slider, StrokeKind,
@@ -48,9 +53,11 @@ use serde_json::{Value, json};
 use crate::UiIntent;
 use crate::icons::{self, Icon, IconStyle};
 use crate::panels::layers_panel::LayersPanel;
+use crate::panels::text_format::{self, TextEdit, TextFormat};
 use crate::state::{
-    BlurOptions, ColorTarget, DockTab, EditorState, ExpandBackdrop, InspectorMode, MagnifyOptions,
-    QuickStyle, SelectionFill, SelectionMode, ShapeKind, StylePreset, ToolId,
+    BlurOptions, ColorTarget, DockTab, EditorState, ExpandBackdrop, Eyedropper, InspectorMode,
+    MagnifyOptions, QuickStyle, SelectionFill, SelectionMode, ShapeKind, StyleDraft, StylePreset,
+    ToolId,
 };
 use crate::theme::{Tokens, stroke};
 use crate::widgets::{self, icon_style, tile};
@@ -137,7 +144,10 @@ impl Fields {
                 shadow: true,
                 ..f()
             },
+            // The outline's width is in the Advanced section.
             ToolId::Text => Fields {
+                fill: true,
+                stroke: true,
                 text: true,
                 shadow: true,
                 ..f()
@@ -203,8 +213,9 @@ pub struct RightSidebar<'a> {
 impl RightSidebar<'_> {
     pub fn show(self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
         let t = self.tokens;
-        let tool = editor.toolbar.active;
-        let pending_id = Id::new("sidebar.style_pending");
+        seed_draft_from_selection(ui.ctx(), editor, self.doc);
+        let tool = style_tool(editor, self.doc);
+        let pending_id = Id::new(PENDING);
         let mode = editor.sidebar.mode;
         // Size sliders and combos to the drawer: PhotoCraft's defaults
         // (150 / 120 px) make a labelled row wider than it, and egui then
@@ -248,7 +259,7 @@ impl RightSidebar<'_> {
                     canvas_section(ui, editor);
                 }
                 InspectorMode::Properties => {
-                    self.selection_text(ui, editor, intents);
+                    self.text_content(ui, editor, intents);
                     if tool == ToolId::Selection {
                         self.selection(ui, editor, intents);
                         return;
@@ -276,6 +287,7 @@ impl RightSidebar<'_> {
                     if edited || changed {
                         ui.ctx().data_mut(|d| d.insert_temp(pending_id, edited));
                     }
+                    self.text_advanced(ui, editor, intents);
                 }
             },
         );
@@ -580,7 +592,7 @@ impl RightSidebar<'_> {
         intents: &mut Vec<UiIntent>,
     ) -> bool {
         let t = self.tokens;
-        let tool = editor.toolbar.active;
+        let tool = style_tool(editor, self.doc);
         let width = ui.available_width();
         let cols = if width >= 3.0 * CARD_MIN_W + 2.0 * t.space_md {
             3
@@ -780,7 +792,7 @@ impl RightSidebar<'_> {
         intents: &mut Vec<UiIntent>,
     ) -> bool {
         let t = self.tokens;
-        let tool = editor.toolbar.active;
+        let tool = style_tool(editor, self.doc);
         let fields = Fields::of(tool);
         let mut style = editor.sidebar.effective_style(tool).unwrap_or_default();
         let before = style.clone();
@@ -922,7 +934,7 @@ impl RightSidebar<'_> {
         }
 
         if let Some(target) = eyedropper {
-            editor.canvas.eyedropper = Some(target);
+            editor.canvas.eyedropper = Some(Eyedropper { target, node: None });
         }
         let edited = style != before;
         if edited {
@@ -931,19 +943,17 @@ impl RightSidebar<'_> {
         edited
     }
 
-    /// With one callout or text box selected: its text, size, colour and
-    /// alignment. The text is committed when the field loses focus (one
-    /// `annotation.setText`), size and colour as `annotation.setStyle`
-    /// once the pointer is released.
-    fn selection_text(&self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
+    /// With one callout or text box selected, its text on top of the
+    /// drawer: committed when the field loses focus (one
+    /// `annotation.setText`).
+    fn text_content(&self, ui: &mut Ui, editor: &EditorState, intents: &mut Vec<UiIntent>) {
         let t = self.tokens;
         let Some((id, c)) = self
             .doc
-            .and_then(|d| selected_callout(d, &editor.canvas.selection))
+            .and_then(|d| text_format::selected_text(&d.manifest, &editor.canvas.selection))
         else {
             return;
         };
-        let run = c.text.runs.first().cloned().unwrap_or_default();
         let current = c.text.text();
         let title = if is_text_box(c) {
             "Text"
@@ -964,9 +974,9 @@ impl RightSidebar<'_> {
             let resp = ui.add(
                 egui::TextEdit::multiline(&mut text)
                     .id(edit_id)
-                    .desired_rows(3)
+                    .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Type the callout text"),
+                    .hint_text("Type the text"),
             );
             if resp.lost_focus() {
                 ui.data_mut(|d| d.remove::<String>(edit_id));
@@ -978,72 +988,148 @@ impl RightSidebar<'_> {
             }
             ui.label(
                 egui::RichText::new(
-                    "Click away to apply; double-click the callout to type on the canvas.",
+                    "Click away to apply; double-click the text to type on the canvas.",
                 )
                 .small()
                 .color(t.text_faint),
             );
             ui.add_space(t.space_sm);
+        });
+        ui.add_space(t.space_sm);
+    }
 
-            // Size and colour: a draft held while the slider is dragged.
-            let draft_id = Id::new(("sidebar.callout_font", id.0));
-            let (mut size, mut color) = ui
-                .data(|d| d.get_temp::<(f32, Color32)>(draft_id))
-                .unwrap_or((run.font.size, c32(run.color)));
-            let mut changed = ui
-                .add(
-                    Slider::new(&mut size, 6.0..=200.0)
-                        .text("Size")
-                        .suffix(" px"),
-                )
-                .changed();
-            ui.horizontal(|ui| {
-                ui.label("Colour");
-                changed |= egui::color_picker::color_edit_button_srgba(
-                    ui,
-                    &mut color,
-                    egui::color_picker::Alpha::OnlyBlend,
-                )
-                .changed();
-            });
-            if changed {
-                ui.data_mut(|d| d.insert_temp(draft_id, (size, color)));
-            }
-            let held = ui.data(|d| d.get_temp::<(f32, Color32)>(draft_id));
-            if let Some((size, color)) = held
-                && !ui.input(|i| i.pointer.any_down())
-            {
-                ui.data_mut(|d| d.remove::<(f32, Color32)>(draft_id));
-                let font = capturecraft_format::FontSpec {
-                    size,
-                    ..run.font.clone()
-                };
-                if font != run.font || from_c32(color) != run.color {
-                    intents.push(UiIntent::command(
-                        "annotation.setStyle",
-                        json!({ "ids": [id.0], "font": font, "text_color": from_c32(color) }),
-                    ));
-                }
-            }
-
-            ui.horizontal(|ui| {
-                ui.label("Align");
-                for (align, label) in [
-                    (TextAlign::Left, "Left"),
-                    (TextAlign::Center, "Centre"),
-                    (TextAlign::Right, "Right"),
-                ] {
-                    if ui.selectable_label(c.text.align == align, label).clicked()
-                        && c.text.align != align
+    /// With one callout or text box selected, its Advanced section: font,
+    /// size, colour, line width, style, alignment, opacity and padding,
+    /// each change one command (drags once the pointer is released).
+    fn text_advanced(&self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
+        let t = self.tokens;
+        let Some(doc) = self.doc else {
+            return;
+        };
+        let Some((id, c)) = text_format::selected_text(&doc.manifest, &editor.canvas.selection)
+        else {
+            return;
+        };
+        let opacity = doc.manifest.node(id).map_or(1.0, |n| n.opacity);
+        let f = TextFormat::of(c);
+        let salt = "sidebar";
+        let mut edit = None;
+        section(ui, "Advanced", |ui| {
+            let combo = (ui.available_width() - 90.0).clamp(80.0, 160.0);
+            egui::Grid::new(("sidebar.text_advanced", id.0))
+                .num_columns(2)
+                .spacing(vec2(t.space_md, t.space_sm))
+                .show(ui, |ui| {
+                    ui.label("Font");
+                    if let Some(fam) = text_format::family_combo(ui, salt, &f.family, combo) {
+                        edit = Some(TextEdit::Family(fam));
+                    }
+                    ui.end_row();
+                    ui.label("Font Size");
+                    ui.horizontal(|ui| {
+                        if let Some(size) = text_format::size_control(ui, salt, f.size) {
+                            edit = Some(TextEdit::Size(size));
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Text Colour");
+                    ui.horizontal(|ui| {
+                        let swatch = Id::new(("text_format.color", salt));
+                        if let Some(col) =
+                            text_format::color_swatch(ui, swatch, f.color, "Text colour")
+                        {
+                            edit = Some(TextEdit::Color(col));
+                        }
+                        let eye = Eyedropper {
+                            target: ColorTarget::Text,
+                            node: Some(id),
+                        };
+                        let picking = editor.canvas.eyedropper == Some(eye);
+                        if text_format::eyedropper_button(
+                            ui,
+                            Id::new(("text_format.eyedropper", salt)),
+                            picking,
+                            t,
+                        ) {
+                            editor.canvas.eyedropper = (!picking).then_some(eye);
+                        }
+                    });
+                    ui.end_row();
+                    // A callout's outline width is in the Line section.
+                    if !Fields::of(style_tool(editor, self.doc)).width {
+                        ui.label("Line Width");
+                        let held_id = Id::new(("sidebar.text_line_width", id.0));
+                        let now = c.stroke.as_ref().map_or(0.0, |s| s.width);
+                        let mut w = text_format::shown(ui, held_id, now);
+                        let changed = ui
+                            .add(Slider::new(&mut w, 0.0..=32.0).suffix(" px"))
+                            .on_hover_text("Outline width; 0 removes the outline")
+                            .changed();
+                        if let Some(w) = text_format::held(ui, held_id, changed.then_some(w))
+                            .filter(|w| (w - now).abs() > f32::EPSILON)
+                        {
+                            intents.push(line_width_intent(id, c, w));
+                        }
+                        ui.end_row();
+                    }
+                    ui.label("Style");
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if let Some(e) = text_format::style_toggles(ui, salt, &f, t) {
+                            edit = Some(e);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Alignment");
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if let Some(a) = text_format::align_toggles(ui, salt, f.align, t) {
+                                edit = Some(TextEdit::Align(a));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if let Some(v) = text_format::valign_toggles(ui, salt, f.valign, t) {
+                                edit = Some(TextEdit::VAlign(v));
+                            }
+                        });
+                    });
+                    ui.end_row();
+                    ui.label("Opacity");
+                    let held_id = Id::new(("sidebar.text_opacity", id.0));
+                    let now = (opacity * 100.0).round();
+                    let mut o = text_format::shown(ui, held_id, now);
+                    let changed = ui
+                        .add(Slider::new(&mut o, 0.0..=100.0).suffix(" %").integer())
+                        .changed();
+                    if let Some(o) = text_format::held(ui, held_id, changed.then_some(o))
+                        .filter(|o| (o - now).abs() > f32::EPSILON)
                     {
                         intents.push(UiIntent::command(
-                            "annotation.setText",
-                            json!({ "id": id.0, "align": align }),
+                            "annotation.setStyle",
+                            json!({ "ids": [id.0], "opacity": o / 100.0 }),
                         ));
                     }
-                }
-            });
+                    ui.end_row();
+                    ui.label("Padding");
+                    let held_id = Id::new(("sidebar.text_padding", id.0));
+                    let mut pad = text_format::shown(ui, held_id, f.padding);
+                    let changed = ui
+                        .add(Slider::new(&mut pad, 0.0..=64.0).suffix(" px").integer())
+                        .on_hover_text("Space between the box and its text")
+                        .changed();
+                    if let Some(pad) = text_format::held(ui, held_id, changed.then_some(pad))
+                        .filter(|p| (p - f.padding).abs() > f32::EPSILON)
+                    {
+                        edit = Some(TextEdit::Padding(pad));
+                    }
+                    ui.end_row();
+                });
         });
+        if let Some(e) = edit {
+            intents.push(text_format::format_intent(id, &e));
+        }
         ui.add_space(t.space_sm);
     }
 
@@ -1402,6 +1488,101 @@ fn direction_name(dx: i8, dy: i8) -> &'static str {
 }
 
 /// The callout (or text box) when the selection is exactly one.
+/// Temp-data key of "an inspector edit waits for the pointer's release".
+const PENDING: &str = "sidebar.style_pending";
+
+/// Applies the style draft to the selection once the pointer is released
+/// (the eyedropper's draft picks).
+pub fn mark_style_pending(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(Id::new(PENDING), true));
+}
+
+/// The tool whose Quick Styles and inspector the drawer shows: the active
+/// one, or with the Move tool and one text selected, the tool that makes
+/// it (Text or Callout).
+pub fn style_tool(editor: &EditorState, doc: Option<&DocState>) -> ToolId {
+    let tool = editor.toolbar.active;
+    if tool != ToolId::Move {
+        return tool;
+    }
+    doc.and_then(|d| text_format::selected_text(&d.manifest, &editor.canvas.selection))
+        .map_or(tool, |(_, c)| text_tool(c))
+}
+
+fn text_tool(c: &Callout) -> ToolId {
+    if is_text_box(c) {
+        ToolId::Text
+    } else {
+        ToolId::Callout
+    }
+}
+
+/// A text node's style as its tool's inspector shows it.
+pub fn text_style_of(c: &Callout, opacity: f32) -> StylePreset {
+    let run = c.text.runs.first().cloned().unwrap_or_default();
+    StylePreset {
+        stroke: c.stroke,
+        fill: c.fill.clone(),
+        shadow: c.shadow,
+        opacity,
+        font: Some(run.font),
+        text_color: Some(run.color),
+        corner_radius: match (text_tool(c), c.body) {
+            (ToolId::Callout, CalloutBody::RoundedRect { radius }) => Some(radius),
+            (ToolId::Callout, CalloutBody::Rect) => Some(0.0),
+            _ => None,
+        },
+        ..StylePreset::default()
+    }
+}
+
+/// With one text selected, loads its style into the inspector's draft
+/// whenever the node's style changes (selecting it, the toolbar, undo), so
+/// the inspector shows the text's own values; edits then go back to it
+/// like any inspector edit.
+pub fn seed_draft_from_selection(
+    ctx: &egui::Context,
+    editor: &mut EditorState,
+    doc: Option<&DocState>,
+) {
+    let Some(doc) = doc else {
+        return;
+    };
+    let Some((id, c)) = text_format::selected_text(&doc.manifest, &editor.canvas.selection) else {
+        return;
+    };
+    let opacity = doc.manifest.node(id).map_or(1.0, |n| n.opacity);
+    let seen = (id, text_style_of(c, opacity));
+    let key = Id::new("sidebar.seeded_style");
+    if ctx
+        .data(|d| d.get_temp::<(NodeId, StylePreset)>(key))
+        .as_ref()
+        == Some(&seen)
+    {
+        return;
+    }
+    editor.sidebar.draft = Some(StyleDraft {
+        tool: text_tool(c),
+        preset: seen.1.clone(),
+    });
+    ctx.data_mut(|d| d.insert_temp(key, seen));
+}
+
+/// `annotation.setStyle` giving a text's outline width `w` (0 removes it).
+pub fn line_width_intent(id: NodeId, c: &Callout, w: f32) -> UiIntent {
+    let stroke = (w > 0.0).then(|| Stroke {
+        width: w,
+        ..c.stroke.unwrap_or(Stroke {
+            color: Color::BLACK,
+            ..Stroke::default()
+        })
+    });
+    UiIntent::command(
+        "annotation.setStyle",
+        json!({ "ids": [id.0], "stroke": stroke }),
+    )
+}
+
 pub fn selected_callout<'a>(
     doc: &'a DocState,
     selection: &[NodeId],

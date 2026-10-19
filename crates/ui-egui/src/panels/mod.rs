@@ -9,3 +9,4 @@ pub mod gizmo;
 pub mod layers_panel;
 pub mod recent_tray;
 pub mod right_sidebar;
+pub mod text_format;

@@ -1397,4 +1397,81 @@ mod tests {
         };
         assert_eq!(text, "Look here");
     }
+
+    /// The floating text toolbar and the drawer's Advanced section edit the
+    /// selected text through the engine, and the eyedropper takes its
+    /// colour from the composited canvas.
+    #[test]
+    fn text_toolbar_sidebar_and_eyedropper_edit_the_selected_text() {
+        use crate::state::{ColorTarget, Eyedropper};
+        use capturecraft_format::{Callout, Color, TextAlign, VAlign};
+        let mut h = Harness::new();
+        // Tall enough that the drawer's Advanced section is on screen.
+        h.screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1400.0, 2400.0));
+        h.session
+            .run(
+                "annotation.addShape",
+                &json!({ "bounds": { "x": 0, "y": 0, "w": 898, "h": 670 },
+                         "fill": { "kind": "solid", "color": "#2040ff" } }),
+            )
+            .unwrap();
+        let out = h
+            .session
+            .run(
+                "annotation.addText",
+                &json!({ "bounds": { "x": 20, "y": 20, "w": 200, "h": 40 }, "text": "Hello" }),
+            )
+            .unwrap();
+        let id = capturecraft_format::NodeId(out["id"].as_u64().unwrap());
+        h.state.editor.canvas.selection = vec![id];
+        h.state.editor.toolbar.active = ToolId::Move;
+        h.frame(Vec::new());
+        let text = |h: &Harness| -> Callout {
+            match h
+                .session
+                .active()
+                .unwrap()
+                .manifest
+                .node(id)
+                .unwrap()
+                .annotation()
+            {
+                Some(Annotation::Callout(c)) => c.clone(),
+                _ => unreachable!(),
+            }
+        };
+        let tool = |name: &str, salt: &str| Id::new((name, salt));
+
+        h.click(tool("text_format.bold", "toolbar"));
+        assert_eq!(text(&h).text.runs[0].font.weight, 700);
+        h.click(Id::new(("text_format.align", "toolbar", "Justify")));
+        assert_eq!(text(&h).text.align, TextAlign::Justify);
+        // The drawer edits the same node.
+        h.click(tool("text_format.underline", "sidebar"));
+        assert!(text(&h).text.runs[0].underline);
+        h.click(Id::new(("text_format.valign", "sidebar", "Bottom")));
+        assert_eq!(text(&h).text.valign, VAlign::Bottom);
+        // ... and a second Bold click from the drawer turns it off again.
+        h.click(tool("text_format.bold", "sidebar"));
+        assert_eq!(text(&h).text.runs[0].font.weight, 400);
+
+        h.click(tool("text_format.eyedropper", "toolbar"));
+        assert_eq!(
+            h.state.editor.canvas.eyedropper,
+            Some(Eyedropper {
+                target: ColorTarget::Text,
+                node: Some(id),
+            })
+        );
+        // Back to the usual window; click the middle of the canvas: the
+        // blue shape under the text.
+        h.screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1400.0, 860.0));
+        h.frame(Vec::new());
+        h.click_at(egui::pos2(560.0, 420.0));
+        assert_eq!(h.state.editor.canvas.eyedropper, None);
+        assert_eq!(text(&h).text.runs[0].color, Color::rgb(0x20, 0x40, 0xff));
+        // Every change was one undo step.
+        let (undo, _) = h.session.active().unwrap().history_labels();
+        assert_eq!(undo.iter().filter(|l| **l == "Format Text").count(), 6);
+    }
 }

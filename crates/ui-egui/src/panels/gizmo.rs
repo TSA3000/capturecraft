@@ -1,7 +1,7 @@
 //! The transform gizmo of the selected annotation, the yellow parameter
-//! diamonds (callout neck, magnifier source) and the margin and corner
-//! handles of the rounded shadow frame: pure geometry, unit-tested without
-//! a display.
+//! diamonds (corner radius, text box padding, callout neck, magnifier
+//! source) and the margin and corner handles of the rounded shadow frame:
+//! pure geometry, unit-tested without a display.
 //!
 //! An annotation's geometry is stored unrotated; the document turns it by
 //! `rotation_rad` about [`Annotation::pivot`]. The gizmo works in that
@@ -11,6 +11,7 @@
 //! with the bounds, so the new bounds are shifted to compensate before
 //! they are sent as `node.resize`).
 
+use capturecraft_engine::node_commands::is_text_box;
 use capturecraft_format::{
     Annotation, AnnotationNode, CalloutBody, CanvasBackdrop, MAX_BACKDROP_MARGIN_PX, MagnifierLens,
     NodeId, RectF, RegionShape, normalize_angle, rotation_about,
@@ -37,6 +38,8 @@ pub enum GizmoHandle {
     Rotate,
     /// Yellow diamond setting a rounded body's corner radius.
     CornerRadius,
+    /// Yellow diamond setting a text box's padding.
+    Padding,
 }
 
 pub const RESIZE_HANDLES: [ResizeHandle; 8] = [
@@ -147,9 +150,11 @@ pub fn rotate_handle_point(b: RectF, stem: f64) -> Point {
 }
 
 /// The rounded body a corner-radius diamond edits and its radius:
-/// rectangular and rounded callout bodies and rectangle shapes.
+/// rectangular and rounded callout bodies and rectangle shapes. Text boxes
+/// have the padding diamond instead.
 pub fn corner_radius_of(a: &Annotation) -> Option<(RectF, f32)> {
     match a {
+        Annotation::Callout(c) if is_text_box(c) => None,
         Annotation::Callout(c) => match c.body {
             CalloutBody::RoundedRect { radius } => Some((c.bounds, radius)),
             CalloutBody::Rect => Some((c.bounds, 0.0)),
@@ -185,6 +190,36 @@ pub fn radius_from_drag(rect: RectF, local: Point) -> f32 {
     (d.max(0.0) as f32).min(max_radius(rect)).round()
 }
 
+/// Text (callouts and text boxes) gets the text gizmo: dashed border,
+/// round handles and the green rotation knob.
+pub fn is_text_node(a: &Annotation) -> bool {
+    matches!(a, Annotation::Callout(_))
+}
+
+/// The box and padding a padding diamond edits: text boxes only.
+pub fn padding_of(a: &Annotation) -> Option<(RectF, f32)> {
+    match a {
+        Annotation::Callout(c) if is_text_box(c) => Some((c.bounds, finite(c.text.padding))),
+        _ => None,
+    }
+}
+
+/// The padding diamond's local position: on the top-right corner's
+/// diagonal at `padding`, at least `inset` canvas pixels in.
+pub fn padding_point(rect: RectF, padding: f32, inset: f64) -> Point {
+    let d = f64::from(padding.clamp(0.0, max_radius(rect)))
+        .max(inset)
+        .min(rect.w.abs().min(rect.h.abs()) / 2.0);
+    Point::new(rect.x + rect.w - d, rect.y + d)
+}
+
+/// The padding a diamond dragged to `local` sets: its distance in along
+/// the top-right diagonal, whole pixels, at most half the shorter side.
+pub fn padding_from_drag(rect: RectF, local: Point) -> f32 {
+    let d = ((rect.x + rect.w - local.x) + (local.y - rect.y)) / 2.0;
+    (d.max(0.0) as f32).min(max_radius(rect)).round()
+}
+
 /// The handle at canvas point `p`, if any. `scale` is points per canvas
 /// pixel; distances are compared in the local frame (rotation keeps them).
 pub fn hit_handle(
@@ -213,6 +248,12 @@ pub fn hit_handle(
         consider(
             corner_radius_point(rect, r, f64::from(RADIUS_INSET_PT) / s),
             GizmoHandle::CornerRadius,
+        );
+    }
+    if let Some((rect, pad)) = padding_of(a) {
+        consider(
+            padding_point(rect, pad, f64::from(RADIUS_INSET_PT) / s),
+            GizmoHandle::Padding,
         );
     }
     for h in RESIZE_HANDLES {
@@ -387,6 +428,14 @@ pub fn radius_intent(id: NodeId, radius: f32) -> UiIntent {
     )
 }
 
+/// A text box's padding, through `annotation.setTextFormat`.
+pub fn padding_intent(id: NodeId, padding: f32) -> UiIntent {
+    UiIntent::command(
+        "annotation.setTextFormat",
+        json!({ "ids": [id.0], "padding": padding }),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Parameter diamonds
 
@@ -470,7 +519,7 @@ pub fn handle_cursor(h: GizmoHandle, rotation: f32) -> CursorIcon {
         GizmoHandle::Resize(S | N) => 90.0,
         GizmoHandle::Resize(SW | NE) => 135.0,
         GizmoHandle::Rotate => return CursorIcon::Grab,
-        GizmoHandle::CornerRadius => return CursorIcon::PointingHand,
+        GizmoHandle::CornerRadius | GizmoHandle::Padding => return CursorIcon::PointingHand,
     };
     let deg = base + finite(rotation).to_degrees();
     match ((deg / 45.0).round() as i64).rem_euclid(4) {
@@ -755,6 +804,42 @@ mod tests {
             Point::new(15.0, 15.0)
         ));
         assert!(corner_radius_of(&shape(rect)).is_some());
+    }
+
+    #[test]
+    fn text_boxes_get_a_padding_diamond_instead_of_the_radius() {
+        use capturecraft_engine::node_commands::text_box;
+        use capturecraft_format::{Color, FontSpec};
+        let rect = RectF::new(100.0, 100.0, 200.0, 80.0);
+        let mut c = text_box(rect, "Hi", FontSpec::default(), Color::BLACK);
+        c.text.padding = 20.0;
+        let a = Annotation::Callout(c);
+        assert!(is_text_node(&a));
+        assert_eq!(corner_radius_of(&a), None);
+        assert_eq!(padding_of(&a), Some((rect, 20.0)));
+        // Top right, 20 px in along the diagonal.
+        let at = padding_point(rect, 20.0, 12.0);
+        assert!(near(at, Point::new(280.0, 120.0)), "{at:?}");
+        assert_eq!(padding_from_drag(rect, at), 20.0);
+        // Never below the inset, never past half the shorter side.
+        assert!(near(
+            padding_point(rect, 0.0, 12.0),
+            Point::new(288.0, 112.0)
+        ));
+        assert_eq!(padding_from_drag(rect, Point::new(310.0, 90.0)), 0.0);
+        assert_eq!(padding_from_drag(rect, Point::new(0.0, 400.0)), 40.0);
+        let n = AnnotationNode::new(NodeId(1), a.clone());
+        let f = NodeFrame::of(&n).unwrap();
+        assert_eq!(hit_handle(&f, &a, at, 1.0, 8.0), Some(GizmoHandle::Padding));
+        // A callout keeps its corner-radius diamond.
+        let callout = Annotation::Callout(capturecraft_format::Callout::default());
+        assert!(is_text_node(&callout) && padding_of(&callout).is_none());
+        assert!(corner_radius_of(&callout).is_some());
+        let UiIntent::Command { id, params } = padding_intent(NodeId(3), 8.0) else {
+            panic!()
+        };
+        assert_eq!(id, "annotation.setTextFormat");
+        assert_eq!(params, json!({ "ids": [3], "padding": 8.0 }));
     }
 
     #[test]

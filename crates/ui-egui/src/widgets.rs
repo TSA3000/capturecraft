@@ -63,7 +63,7 @@ pub fn icon_style(t: &Tokens, active: bool, enabled: bool) -> IconStyle {
 }
 
 /// Background and border of a control: active > hovered > at rest.
-fn paint_state(ui: &Ui, rect: Rect, resp: &Response, active: bool, t: &Tokens) {
+pub(crate) fn paint_state(ui: &Ui, rect: Rect, resp: &Response, active: bool, t: &Tokens) {
     let p = ui.painter();
     let r = Tokens::corner(t.radius);
     if active {

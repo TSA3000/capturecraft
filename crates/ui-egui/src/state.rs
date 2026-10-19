@@ -1454,9 +1454,10 @@ pub struct CanvasViewState {
     /// Pointer gesture in progress; never persisted.
     #[serde(skip)]
     pub gesture: Option<CanvasGesture>,
-    /// The next canvas click samples a colour into the inspector.
+    /// The eyedropper is active: the canvas previews the colour under the
+    /// pointer and the next click samples it.
     #[serde(skip)]
-    pub eyedropper: Option<ColorTarget>,
+    pub eyedropper: Option<Eyedropper>,
     /// Copied annotations (`manifest.json` nodes) for Paste.
     #[serde(skip)]
     pub clipboard: Vec<serde_json::Value>,
@@ -1536,12 +1537,21 @@ impl ExpandBackdrop {
     }
 }
 
-/// Which inspector colour the eyedropper fills.
+/// Which colour the eyedropper fills.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorTarget {
     Fill,
     Stroke,
     Text,
+}
+
+/// An active eyedropper: what the sampled colour becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Eyedropper {
+    pub target: ColorTarget,
+    /// `None`: the tool's style draft (applied to the selection like any
+    /// inspector edit); `Some`: this text node, by one command.
+    pub node: Option<NodeId>,
 }
 
 /// A drag on the canvas, in canvas pixels. The document changes once, by
@@ -1615,6 +1625,11 @@ pub enum CanvasGesture {
     CornerRadius {
         id: NodeId,
         radius: f32,
+    },
+    /// A text box's yellow padding diamond.
+    Padding {
+        id: NodeId,
+        padding: f32,
     },
     /// A rounded shadow frame's margin handle on `side`; `delta` in canvas
     /// pixels since the drag began at margin `start`.

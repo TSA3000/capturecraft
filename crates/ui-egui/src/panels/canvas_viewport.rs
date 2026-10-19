@@ -21,6 +21,13 @@
 //!   centre; `node.resize`), the rotation stem (Shift snaps to 15°;
 //!   `node.rotate`) and the yellow corner-radius diamond
 //!   (`annotation.setStyle`);
+//! - a selected text box or callout (also with the Text and Callout tools)
+//!   gets the text gizmo: a dashed border, round handles, a green rotation
+//!   knob and, on a text box, a yellow padding diamond in the top-right
+//!   corner (`annotation.setTextFormat`), plus the floating text toolbar
+//!   ([`super::text_format`]);
+//! - the eyedropper: the colour under the pointer (sampled from the
+//!   composited document) in a tooltip; a click takes it, Esc cancels;
 //! - yellow diamond parameter handles, all in the node's rotated frame:
 //!   callout tail tips (drag to move, drag the `+` out of a callout to add
 //!   a tail) and necks (drag sideways for the base width), the arrow bend
@@ -52,13 +59,13 @@ use serde_json::{Value, json};
 
 use super::gizmo::{
     self, GizmoHandle, NodeFrame, RADIUS_INSET_PT, RESIZE_HANDLES, STEM_PT, corner_radius_of,
-    corner_radius_point, handle_point, rotate_handle_point,
+    corner_radius_point, handle_point, padding_of, padding_point, rotate_handle_point,
 };
-use super::{canvas_tools, context_menu};
+use super::{canvas_tools, context_menu, right_sidebar, text_format};
 use crate::UiIntent;
 use crate::state::{
-    CanvasGesture, ColorTarget, CropHit, EditorState, ExpandBackdrop, ResizeDrag, ResizeHandle,
-    ShapeKind, StylePreset, ToolId, Zoom,
+    CanvasGesture, ColorTarget, CropHit, EditorState, ExpandBackdrop, Eyedropper, ResizeDrag,
+    ResizeHandle, ShapeKind, StylePreset, ToolId, Zoom,
 };
 use crate::theme::{Tokens, stroke};
 
@@ -813,7 +820,11 @@ impl CanvasViewport<'_> {
         {
             frame_outline(&painter, &xf, &f, stroke(1.0, t.gizmo_stroke));
         }
-        let single = (selection.len() == 1 && tool == ToolId::Move)
+        // The Text and Callout tools also transform a selected text.
+        let gizmo_tool = tool == ToolId::Move
+            || (matches!(tool, ToolId::Text | ToolId::Callout)
+                && text_format::selected_text(m, &selection).is_some());
+        let single = (selection.len() == 1 && gizmo_tool)
             .then(|| selection.first().copied())
             .flatten();
         for &id in &selection {
@@ -826,6 +837,7 @@ impl CanvasViewport<'_> {
             let base = NodeFrame::of(node);
             if let Some(mut f) = base {
                 let mut radius = None;
+                let mut padding = None;
                 match editor.canvas.gesture {
                     Some(CanvasGesture::Resize {
                         id: g,
@@ -845,18 +857,30 @@ impl CanvasViewport<'_> {
                     Some(CanvasGesture::CornerRadius { id: g, radius: r }) if g == id => {
                         radius = Some(r);
                     }
+                    Some(CanvasGesture::Padding { id: g, padding: p }) if g == id => {
+                        padding = Some(p);
+                    }
                     _ => {}
                 }
                 f.bounds.translate(moving.0, moving.1);
                 f.pivot = Point::new(f.pivot.x + moving.0, f.pivot.y + moving.1);
-                frame_outline(&painter, &xf, &f, stroke(3.0, t.gizmo_outline));
-                frame_outline(&painter, &xf, &f, stroke(1.5, t.gizmo_stroke));
+                if gizmo::is_text_node(a) {
+                    dashed_frame(&painter, &xf, &f, t);
+                } else {
+                    frame_outline(&painter, &xf, &f, stroke(3.0, t.gizmo_outline));
+                    frame_outline(&painter, &xf, &f, stroke(1.5, t.gizmo_stroke));
+                }
                 if single == Some(id) {
                     let resizing = matches!(
                         editor.canvas.gesture,
                         Some(CanvasGesture::Resize { .. } | CanvasGesture::MoveSelection { .. })
                     );
-                    draw_gizmo(&painter, &xf, &f, (!resizing).then_some(a), radius, t);
+                    let previews = Previews {
+                        diamonds: !resizing,
+                        radius,
+                        padding,
+                    };
+                    draw_gizmo(&painter, &xf, &f, a, previews, t);
                 }
             }
             // Handles below live in the node's (unrotated) geometry space.
@@ -1145,7 +1169,9 @@ impl CanvasViewport<'_> {
             })
         };
         let mut over_handle = false;
-        if tool == ToolId::Move
+        let picking = editor.canvas.eyedropper.is_some();
+        if gizmo_tool
+            && !picking
             && let Some(p) = resp.hover_pos()
         {
             match (gizmo_hit(p), &gizmo_node) {
@@ -1155,7 +1181,10 @@ impl CanvasViewport<'_> {
                     ui.ctx()
                         .set_cursor_icon(gizmo::handle_cursor(h, f.rotation));
                 }
-                _ => editor.canvas.hovered = node_at(m, to_canvas(p), slop),
+                _ if tool == ToolId::Move => {
+                    editor.canvas.hovered = node_at(m, to_canvas(p), slop);
+                }
+                _ => editor.canvas.hovered = None,
             }
         } else {
             editor.canvas.hovered = None;
@@ -1195,14 +1224,16 @@ impl CanvasViewport<'_> {
             && let Some(p) = resp.interact_pointer_pos()
         {
             let c = to_canvas(p);
-            if let Some(target) = editor.canvas.eyedropper.take() {
-                pick_color(doc, c, target, editor);
+            if let Some(eye) = editor.canvas.eyedropper.take() {
+                pick_color(ui.ctx(), doc, c, eye, editor, intents);
             } else if tool == ToolId::Text {
-                editor.canvas.text_edit = Some(
-                    canvas_tools::text_box_at(m, c)
-                        .and_then(|id| canvas_tools::begin_edit_text(m, id))
-                        .unwrap_or_else(|| canvas_tools::begin_new_text(editor, c, None)),
-                );
+                let e = canvas_tools::text_box_at(m, c)
+                    .and_then(|id| canvas_tools::begin_edit_text(m, id))
+                    .unwrap_or_else(|| canvas_tools::begin_new_text(editor, c, None));
+                // The text being typed is the selection (none for a new one
+                // until it is added).
+                editor.canvas.selection = e.node.into_iter().collect();
+                editor.canvas.text_edit = Some(e);
             } else if tool == ToolId::Shape && editor.tools.shape.kind == ShapeKind::Polygon {
                 if resp.double_clicked() {
                     let corners = std::mem::take(&mut editor.canvas.polygon);
@@ -1248,9 +1279,9 @@ impl CanvasViewport<'_> {
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
             let c = to_canvas(o);
-            let handle = (tool == ToolId::Move).then(|| gizmo_hit(o)).flatten();
+            let handle = gizmo_tool.then(|| gizmo_hit(o)).flatten();
             editor.canvas.gesture = match (tool, handle, gizmo_node) {
-                _ if typing_before => None,
+                _ if typing_before || picking => None,
                 (_, Some(h), Some((id, f, a))) => Some(match h {
                     GizmoHandle::Resize(handle) => CanvasGesture::Resize {
                         id,
@@ -1261,6 +1292,10 @@ impl CanvasViewport<'_> {
                     GizmoHandle::CornerRadius => CanvasGesture::CornerRadius {
                         id,
                         radius: corner_radius_of(a).map_or(0.0, |(_, r)| r),
+                    },
+                    GizmoHandle::Padding => CanvasGesture::Padding {
+                        id,
+                        padding: padding_of(a).map_or(0.0, |(_, p)| p),
                     },
                 }),
                 (ToolId::Move, _, _) => {
@@ -1322,6 +1357,13 @@ impl CanvasViewport<'_> {
                         && let Some((rect, _)) = corner_radius_of(a)
                     {
                         *radius = gizmo::radius_from_drag(rect, f.to_local(c));
+                    }
+                }
+                Some(CanvasGesture::Padding { padding, .. }) => {
+                    if let Some((_, f, a)) = &gizmo_node
+                        && let Some((rect, _)) = padding_of(a)
+                    {
+                        *padding = gizmo::padding_from_drag(rect, f.to_local(c));
                     }
                 }
                 _ => {}
@@ -1425,6 +1467,7 @@ impl CanvasViewport<'_> {
                     intents.push(grab_text_intent(m, Some(normalized(from, to))));
                 }
                 Some(CanvasGesture::Draw { from, to }) if tool == ToolId::Text => {
+                    editor.canvas.selection.clear();
                     editor.canvas.text_edit = Some(canvas_tools::begin_new_text(
                         editor,
                         from,
@@ -1480,7 +1523,8 @@ impl CanvasViewport<'_> {
                 Some(
                     g @ (CanvasGesture::Resize { .. }
                     | CanvasGesture::Rotate { .. }
-                    | CanvasGesture::CornerRadius { .. }),
+                    | CanvasGesture::CornerRadius { .. }
+                    | CanvasGesture::Padding { .. }),
                 ) => {
                     if let Some(i) = gizmo_node
                         .and_then(|(_, f, a)| finish_gizmo(&g, &f, a, mods.shift, mods.alt))
@@ -1516,7 +1560,38 @@ impl CanvasViewport<'_> {
             }
         }
         inline_text(ui, &xf, editor, intents, t);
+        // The floating text toolbar of a single selected text.
+        if gizmo_tool
+            && editor.canvas.text_edit.is_none()
+            && editor.canvas.gesture.is_none()
+            && let Some((id, c)) = text_format::selected_text(m, &editor.canvas.selection)
+            && let Some(node) = m.node(id).filter(|n| !n.locked)
+            && let Some(f) = NodeFrame::of(node)
+        {
+            let s = f64::from(xf.scale.max(f32::EPSILON));
+            let knob = f.to_canvas(rotate_handle_point(f.bounds, f64::from(STEM_PT) / s));
+            let anchor = f
+                .corners()
+                .into_iter()
+                .chain([knob])
+                .map(|p| ERect::from_center_size(xf.to_screen(p), Vec2::splat(t.handle_size)))
+                .reduce(|a, b| a.union(b))
+                .unwrap_or(ERect::NOTHING);
+            text_format::toolbar(ui.ctx(), id, c, anchor, view, editor, intents, t);
+        }
         intents.extend(context_menu::show(ui.ctx(), editor, Some(doc), t));
+        if editor.canvas.eyedropper.is_some() {
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                editor.canvas.eyedropper = None;
+            } else if let Some(p) = resp.hover_pos()
+                && let Some(px) = text_format::sample_doc(ui.ctx(), doc, to_canvas(p))
+            {
+                text_format::eyedropper_tooltip(&painter, p, view, px, t);
+            }
+        }
+        if editor.canvas.eyedropper.is_none() {
+            text_format::drop_composite(ui.ctx());
+        }
         if resp.hovered()
             && (editor.canvas.eyedropper.is_some()
                 || !matches!(tool, ToolId::Move | ToolId::Selection))
@@ -1668,7 +1743,7 @@ fn inline_text(
         .frame(egui::Frame::NONE)
         .desired_width(r.width())
         .horizontal_align(match align {
-            TextAlign::Left => egui::Align::LEFT,
+            TextAlign::Left | TextAlign::Justify => egui::Align::LEFT,
             TextAlign::Center => egui::Align::Center,
             TextAlign::Right => egui::Align::RIGHT,
         })
@@ -1752,6 +1827,10 @@ pub fn finish_gizmo(
             let before = corner_radius_of(a).map(|(_, r)| r);
             (before != Some(radius)).then(|| gizmo::radius_intent(id, radius))
         }
+        CanvasGesture::Padding { id, padding } => {
+            let before = padding_of(a).map(|(_, p)| p);
+            (before != Some(padding)).then(|| gizmo::padding_intent(id, padding))
+        }
         _ => None,
     }
 }
@@ -1762,14 +1841,43 @@ fn frame_outline(painter: &egui::Painter, xf: &ViewTransform, f: &NodeFrame, s: 
     painter.add(Shape::closed_line(pts, s));
 }
 
-/// Resize squares, the rotation stem and (with `radius_of`) the
-/// corner-radius diamond of a single selection.
+/// A text's selection border: dashed, dark over a light underlay so it
+/// shows on any background.
+fn dashed_frame(painter: &egui::Painter, xf: &ViewTransform, f: &NodeFrame, t: &Tokens) {
+    let mut pts: Vec<Pos2> = f.corners().into_iter().map(|p| xf.to_screen(p)).collect();
+    if let Some(&first) = pts.first() {
+        pts.push(first);
+    }
+    painter.add(Shape::line(
+        pts.clone(),
+        stroke(1.0, t.handle_fill.gamma_multiply(0.8)),
+    ));
+    painter.extend(Shape::dashed_line(
+        &pts,
+        stroke(1.0, t.text_handle_stroke),
+        4.0,
+        3.0,
+    ));
+}
+
+/// What a gizmo drag shows instead of the document's values.
+#[derive(Clone, Copy, Debug, Default)]
+struct Previews {
+    /// Draw the parameter diamonds (hidden while resizing or moving).
+    diamonds: bool,
+    radius: Option<f32>,
+    padding: Option<f32>,
+}
+
+/// The gizmo of a single selection: resize handles, the rotation stem and
+/// the corner-radius or padding diamond. Text gets round handles and a
+/// green knob (Snagit's text gizmo); everything else square handles.
 fn draw_gizmo(
     painter: &egui::Painter,
     xf: &ViewTransform,
     f: &NodeFrame,
-    radius_of: Option<&Annotation>,
-    radius_preview: Option<f32>,
+    a: &Annotation,
+    previews: Previews,
     t: &Tokens,
 ) {
     let s = f64::from(xf.scale.max(f32::EPSILON));
@@ -1777,26 +1885,66 @@ fn draw_gizmo(
     let b = f.bounds;
     let top = scr(handle_point(b, ResizeHandle::N));
     let knob = scr(rotate_handle_point(b, f64::from(STEM_PT) / s));
-    painter.line_segment([top, knob], stroke(3.0, t.gizmo_outline));
-    painter.line_segment([top, knob], stroke(1.5, t.gizmo_stroke));
-    painter.circle(knob, 5.5, t.handle_fill, stroke(1.5, t.handle_stroke));
-    let (sin, cos) = f.rotation.sin_cos();
     let half = t.handle_size / 2.0;
-    for h in RESIZE_HANDLES {
-        let c = scr(handle_point(b, h));
-        let pts = [(-half, -half), (half, -half), (half, half), (-half, half)]
-            .map(|(x, y)| c + vec2(x * cos - y * sin, x * sin + y * cos))
-            .to_vec();
-        painter.add(Shape::convex_polygon(
-            pts,
-            t.handle_fill,
-            stroke(1.0, t.handle_stroke),
-        ));
+    if gizmo::is_text_node(a) {
+        painter.line_segment([top, knob], stroke(1.0, t.text_handle_stroke));
+        painter.circle(
+            knob,
+            5.0,
+            t.rotate_handle,
+            stroke(1.0, t.text_handle_stroke),
+        );
+        for h in RESIZE_HANDLES {
+            painter.circle(
+                scr(handle_point(b, h)),
+                half + 0.5,
+                t.handle_fill,
+                stroke(1.0, t.text_handle_stroke),
+            );
+        }
+    } else {
+        painter.line_segment([top, knob], stroke(3.0, t.gizmo_outline));
+        painter.line_segment([top, knob], stroke(1.5, t.gizmo_stroke));
+        painter.circle(knob, 5.5, t.handle_fill, stroke(1.5, t.handle_stroke));
+        let (sin, cos) = f.rotation.sin_cos();
+        for h in RESIZE_HANDLES {
+            let c = scr(handle_point(b, h));
+            let pts = [(-half, -half), (half, -half), (half, half), (-half, half)]
+                .map(|(x, y)| c + vec2(x * cos - y * sin, x * sin + y * cos))
+                .to_vec();
+            painter.add(Shape::convex_polygon(
+                pts,
+                t.handle_fill,
+                stroke(1.0, t.handle_stroke),
+            ));
+        }
     }
-    if let Some((rect, r)) = radius_of.and_then(corner_radius_of) {
-        let r = radius_preview.unwrap_or(r);
-        let at = scr(corner_radius_point(rect, r, f64::from(RADIUS_INSET_PT) / s));
-        diamond(painter, at, 6.0, t.tail_handle, t);
+    if !previews.diamonds {
+        return;
+    }
+    let inset = f64::from(RADIUS_INSET_PT) / s;
+    if let Some((rect, r)) = corner_radius_of(a) {
+        let r = previews.radius.unwrap_or(r);
+        diamond(
+            painter,
+            scr(corner_radius_point(rect, r, inset)),
+            6.0,
+            t.tail_handle,
+            t,
+        );
+    }
+    if let Some((rect, p)) = padding_of(a) {
+        let p = previews.padding.unwrap_or(p);
+        let at = scr(padding_point(rect, p, inset));
+        diamond(painter, at, 5.5, t.tail_handle, t);
+        if previews.padding.is_some() {
+            badge(
+                painter,
+                at + vec2(0.0, t.space_lg + 8.0),
+                &format!("Padding {p:.0} px"),
+                t,
+            );
+        }
     }
 }
 
@@ -1969,32 +2117,37 @@ fn toggle(sel: &mut Vec<NodeId>, id: NodeId) {
     }
 }
 
-/// Eyedropper: the displayed capture pixel under `c` into the draft.
-/// Canvas → base by the base origin (pixels under a Cut Out seam sample the
-/// uncut capture at that offset).
-fn pick_color(doc: &DocState, c: Point, target: ColorTarget, editor: &mut EditorState) {
-    let Some(px) = doc.display_pixels() else {
+/// Eyedropper: the composited colour under `c` into its target: a text
+/// node by one command, else the style draft, which the sidebar then
+/// applies to the selection like any inspector edit. A click off the
+/// canvas (or on a transparent pixel) leaves the eyedropper on.
+fn pick_color(
+    ctx: &egui::Context,
+    doc: &DocState,
+    c: Point,
+    eye: Eyedropper,
+    editor: &mut EditorState,
+    intents: &mut Vec<UiIntent>,
+) {
+    let Some([r, g, b, _]) = text_format::sample_doc(ctx, doc, c) else {
+        // Off the canvas: keep picking.
+        editor.canvas.eyedropper = Some(eye);
         return;
     };
-    let o = doc.manifest.canvas.base_origin;
-    let (x, y) = (
-        (c.x.floor() as i64) - i64::from(o.x),
-        (c.y.floor() as i64) - i64::from(o.y),
-    );
-    let s = px.size();
-    if x < 0 || y < 0 || x >= i64::from(s.width) || y >= i64::from(s.height) {
+    let color = Color::rgb(r, g, b);
+    if eye.node.is_some() {
+        intents.extend(text_format::eyedropper_intent(&doc.manifest, eye, color));
         return;
     }
-    let [r, g, b, _] = px.pixel(x as i32, y as i32);
-    let color = Color::rgb(r, g, b);
-    let tool = editor.toolbar.active;
-    editor.sidebar.edit_draft(tool, |p| match target {
+    let tool = right_sidebar::style_tool(editor, Some(doc));
+    editor.sidebar.edit_draft(tool, |p| match eye.target {
         ColorTarget::Fill => p.fill = capturecraft_format::Fill::Solid { color },
         ColorTarget::Stroke => {
             p.stroke.get_or_insert_with(Default::default).color = color;
         }
         ColorTarget::Text => p.text_color = Some(color),
     });
+    right_sidebar::mark_style_pending(ctx);
 }
 
 fn resize_cursor(h: ResizeHandle) -> CursorIcon {
@@ -2315,6 +2468,36 @@ mod tests {
         assert_eq!(params["bounds"]["w"], 100.0);
         assert_eq!(params["tails"].as_array().unwrap().len(), 1);
         assert_eq!(params["body"]["kind"], "rounded_rect");
+    }
+
+    #[test]
+    fn padding_drags_commit_one_command() {
+        use capturecraft_engine::node_commands::text_box;
+        use capturecraft_format::{AnnotationNode, FontSpec};
+        let a = Annotation::Callout(text_box(
+            RectF::new(0.0, 0.0, 200.0, 80.0),
+            "Hi",
+            FontSpec::default(),
+            Color::BLACK,
+        ));
+        let n = AnnotationNode::new(NodeId(4), a.clone());
+        let f = NodeFrame::of(&n).unwrap();
+        let g = CanvasGesture::Padding {
+            id: NodeId(4),
+            padding: 16.0,
+        };
+        let UiIntent::Command { id, params } = finish_gizmo(&g, &f, &a, false, false).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "annotation.setTextFormat");
+        assert_eq!(params, json!({ "ids": [4], "padding": 16.0 }));
+        // The box's own padding (4 px): nothing to commit.
+        let same = CanvasGesture::Padding {
+            id: NodeId(4),
+            padding: 4.0,
+        };
+        assert!(finish_gizmo(&same, &f, &a, false, false).is_none());
     }
 
     #[test]

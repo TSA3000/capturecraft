@@ -109,7 +109,8 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         menu_path: &["Annotate", "Text"],
         shortcut: None,
         params: r##"{ bounds: {x, y, w, h}, text?: string = "Text", font?: FontSpec, color?: "#rrggbb[aa]",
-  align?: "left"|"center"|"right" = "left", shadow?: DropShadow|null } -> { id }"##,
+  align?: "left"|"center"|"right"|"justify" = "left", shadow?: DropShadow|null, fill?: Fill = none,
+  stroke?: Stroke|null = null } -> { id }"##,
         enabled: has_doc,
         run: add_text,
         journal: true,
@@ -119,10 +120,22 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         label: "Edit Text",
         menu_path: &[],
         shortcut: None,
-        params: r##"{ id: u64 (a text box or callout), text?: string, align?: "left"|"center"|"right" }
+        params: r##"{ id: u64 (a text box or callout), text?: string, align?: "left"|"center"|"right"|"justify" }
   (keeps the first run's font and colour) -> {}"##,
         enabled: has_doc,
         run: set_text,
+        journal: true,
+    },
+    CommandSpec {
+        id: "annotation.setTextFormat",
+        label: "Format Text",
+        menu_path: &[],
+        shortcut: None,
+        params: r##"{ ids: [u64] (text boxes or callouts), family?: string, size?: f32, bold?: bool, italic?: bool,
+  underline?: bool, color?: "#rrggbb[aa]", align?: "left"|"center"|"right"|"justify",
+  valign?: "top"|"middle"|"bottom", padding?: f32 } (font fields apply to every run) -> { formatted: [ids] }"##,
+        enabled: has_doc,
+        run: set_text_format,
         journal: true,
     },
     CommandSpec {
@@ -528,6 +541,7 @@ enum Align {
     Left,
     Center,
     Right,
+    Justify,
 }
 
 #[derive(Deserialize)]
@@ -544,6 +558,10 @@ struct AddTextParams {
     align: Option<Align>,
     #[serde(default, deserialize_with = "double_option")]
     shadow: Option<Option<capturecraft_format::DropShadow>>,
+    #[serde(default)]
+    fill: Option<capturecraft_format::Fill>,
+    #[serde(default, deserialize_with = "double_option")]
+    stroke: Option<Option<capturecraft_format::Stroke>>,
 }
 
 fn double_option<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
@@ -571,9 +589,13 @@ pub fn text_box(bounds: RectF, text: &str, font: FontSpec, color: Color) -> Call
     }
 }
 
-/// A callout drawn as a bare text box.
+/// A callout drawn as a text box: without tails, and either bare or with
+/// the square body a text box is created with (a filled or outlined text
+/// box stays a text box).
 pub fn is_text_box(c: &Callout) -> bool {
-    c.tails.is_empty() && c.stroke.is_none() && matches!(c.fill, capturecraft_format::Fill::None)
+    c.tails.is_empty()
+        && (matches!(c.body, CalloutBody::Rect)
+            || (c.stroke.is_none() && matches!(c.fill, capturecraft_format::Fill::None)))
 }
 
 fn add_text(s: &mut Session, p: &Value) -> Result<Value> {
@@ -592,8 +614,13 @@ fn add_text(s: &mut Session, p: &Value) -> Result<Value> {
         Align::Left => TextAlign::Left,
         Align::Center => TextAlign::Center,
         Align::Right => TextAlign::Right,
+        Align::Justify => TextAlign::Justify,
     };
     c.shadow = p.shadow.flatten();
+    if let Some(f) = p.fill {
+        c.fill = f;
+    }
+    c.stroke = p.stroke.flatten();
     let id = push_node(s.manifest_mut()?, Annotation::Callout(c));
     Ok(json!({ "id": id.0 }))
 }
@@ -629,6 +656,119 @@ fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     }
     node.touch();
     Ok(json!({}))
+}
+
+/// CSS weights of the toolbar's Bold toggle: on and off.
+pub const BOLD_WEIGHT: u16 = 700;
+pub const REGULAR_WEIGHT: u16 = 400;
+/// From this weight up a font counts as bold.
+pub const BOLD_FROM: u16 = 600;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextFormatParams {
+    ids: Vec<u64>,
+    #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
+    size: Option<f32>,
+    #[serde(default)]
+    bold: Option<bool>,
+    #[serde(default)]
+    italic: Option<bool>,
+    #[serde(default)]
+    underline: Option<bool>,
+    #[serde(default)]
+    color: Option<Color>,
+    #[serde(default)]
+    align: Option<TextAlign>,
+    #[serde(default)]
+    valign: Option<VAlign>,
+    #[serde(default)]
+    padding: Option<f32>,
+}
+
+impl TextFormatParams {
+    fn changes_runs(&self) -> bool {
+        self.family.is_some()
+            || self.size.is_some()
+            || self.bold.is_some()
+            || self.italic.is_some()
+            || self.underline.is_some()
+            || self.color.is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.changes_runs()
+            && self.align.is_none()
+            && self.valign.is_none()
+            && self.padding.is_none()
+    }
+}
+
+/// Changes single text attributes of text boxes and callouts, keeping the
+/// rest of each run's font (unlike `annotation.setStyle`, which replaces
+/// the whole font).
+fn set_text_format(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "annotation.setTextFormat";
+    let mut p: TextFormatParams = parse(CMD, p)?;
+    if p.is_empty() {
+        return Err(bad(CMD, "nothing to change"));
+    }
+    if p.family.as_ref().is_some_and(|f| f.trim().is_empty()) {
+        return Err(bad(CMD, "family must not be empty"));
+    }
+    if let Some(pad) = p.padding
+        && !(pad.is_finite() && pad >= 0.0)
+    {
+        return Err(bad(CMD, "padding must be a non-negative number"));
+    }
+    p.ids.sort_unstable();
+    p.ids.dedup();
+    let m = s.manifest_mut()?;
+    for &id in &p.ids {
+        let node = node_annotation(m, id)?;
+        let Some(Annotation::Callout(c)) = node.annotation_mut() else {
+            return Err(bad(CMD, format!("annotation {id} has no text")));
+        };
+        // An empty callout keeps the text style in an empty run.
+        if c.text.runs.is_empty() && p.changes_runs() {
+            c.text.runs.push(capturecraft_format::TextRun::default());
+        }
+        for run in &mut c.text.runs {
+            if let Some(f) = &p.family {
+                run.font.family = f.trim().to_string();
+            }
+            if let Some(size) = p.size {
+                run.font.size = size;
+            }
+            match p.bold {
+                Some(true) if run.font.weight < BOLD_FROM => run.font.weight = BOLD_WEIGHT,
+                Some(false) if run.font.weight >= BOLD_FROM => run.font.weight = REGULAR_WEIGHT,
+                _ => {}
+            }
+            if let Some(i) = p.italic {
+                run.font.italic = i;
+            }
+            if let Some(u) = p.underline {
+                run.underline = u;
+            }
+            if let Some(col) = p.color {
+                run.color = col;
+            }
+        }
+        if let Some(a) = p.align {
+            c.text.align = a;
+        }
+        if let Some(v) = p.valign {
+            c.text.valign = v;
+        }
+        if let Some(pad) = p.padding {
+            c.text.padding = pad;
+        }
+        node.touch();
+    }
+    Ok(json!({ "formatted": p.ids }))
 }
 
 // ---------------------------------------------------------------------------
@@ -940,6 +1080,114 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn text_format_changes_single_attributes() {
+        let mut s = session();
+        let t = s
+            .run(
+                "annotation.addText",
+                &json!({ "bounds": { "x": 10, "y": 10, "w": 120, "h": 40 }, "text": "Hi",
+                         "font": { "family": "Inter", "size": 20, "weight": 400, "italic": false } }),
+            )
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let text = |s: &Session| {
+            let m = &s.active().unwrap().manifest;
+            let Some(Annotation::Callout(c)) = m.node(NodeId(t)).unwrap().annotation() else {
+                panic!()
+            };
+            c.text.clone()
+        };
+        s.run(
+            "annotation.setTextFormat",
+            &json!({ "ids": [t], "bold": true, "underline": true, "align": "justify",
+                     "valign": "bottom", "padding": 12 }),
+        )
+        .unwrap();
+        let b = text(&s);
+        let run = &b.runs[0];
+        assert_eq!((run.font.weight, run.font.size), (BOLD_WEIGHT, 20.0));
+        assert!(run.underline && !run.font.italic);
+        assert_eq!(
+            (b.align, b.valign, b.padding),
+            (TextAlign::Justify, VAlign::Bottom, 12.0)
+        );
+        s.run(
+            "annotation.setTextFormat",
+            &json!({ "ids": [t], "family": "JetBrains Mono", "size": 30, "bold": false,
+                     "italic": true, "color": "#ff0000" }),
+        )
+        .unwrap();
+        let run = text(&s).runs[0].clone();
+        assert_eq!(run.font.family, "JetBrains Mono");
+        assert_eq!((run.font.size, run.font.weight), (30.0, REGULAR_WEIGHT));
+        assert!(run.font.italic && run.underline);
+        assert_eq!(run.color, Color::rgb(255, 0, 0));
+        // One undo step per command.
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(text(&s).runs[0].font.size, 20.0);
+        let arrow = s
+            .run(
+                "annotation.addArrow",
+                &json!({ "start": { "x": 0, "y": 0 }, "end": { "x": 9, "y": 9 } }),
+            )
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        for bad in [
+            json!({ "ids": [t] }),
+            json!({ "ids": [t], "size": 0 }),
+            json!({ "ids": [t], "padding": -1 }),
+            json!({ "ids": [t], "family": " " }),
+            json!({ "ids": [t], "align": "middle" }),
+            json!({ "ids": [arrow], "bold": true }),
+            json!({ "ids": [999], "bold": true }),
+        ] {
+            assert!(s.run("annotation.setTextFormat", &bad).is_err(), "{bad}");
+        }
+        assert_eq!(text(&s).runs[0].font.size, 20.0);
+    }
+
+    #[test]
+    fn filled_text_boxes_stay_text_boxes() {
+        let mut s = session();
+        let t = s
+            .run(
+                "annotation.addText",
+                &json!({ "bounds": { "x": 10, "y": 10, "w": 120, "h": 40 } }),
+            )
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        s.run(
+            "annotation.setStyle",
+            &json!({ "ids": [t], "fill": { "kind": "solid", "color": "#ffff00" },
+                     "stroke": { "color": "#000000", "width": 2 } }),
+        )
+        .unwrap();
+        let filled = s
+            .run(
+                "annotation.addText",
+                &json!({ "bounds": { "x": 10, "y": 60, "w": 120, "h": 40 },
+                         "fill": { "kind": "solid", "color": "#ffff00" },
+                         "stroke": { "color": "#000000", "width": 2 } }),
+            )
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let m = &s.active().unwrap().manifest;
+        let Some(Annotation::Callout(c)) = m.node(NodeId(t)).unwrap().annotation() else {
+            panic!()
+        };
+        assert!(is_text_box(c));
+        let Some(Annotation::Callout(f)) = m.node(NodeId(filled)).unwrap().annotation() else {
+            panic!()
+        };
+        assert!(is_text_box(f) && f.stroke.is_some_and(|s| s.width == 2.0));
+        assert!(!is_text_box(&Callout::default()));
     }
 
     #[test]

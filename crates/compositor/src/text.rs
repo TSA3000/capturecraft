@@ -46,6 +46,19 @@ fn engine() -> &'static Mutex<TextEngine> {
     photocraft_text::shared()
 }
 
+/// The font families text can use, sorted; `None` while the installed
+/// fonts are still being scanned (it never blocks, so a UI frame can ask).
+pub fn font_families() -> Option<Vec<String>> {
+    #[cfg(test)]
+    let engine = Some(engine());
+    #[cfg(not(test))]
+    let engine = photocraft_text::try_shared();
+    let mut e = engine?
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Some(e.fonts.families())
+}
+
 /// Polygons (filled non-zero, one component per glyph or decoration) of
 /// every run colour of `spec`, through `t`.
 pub fn text_components(spec: &TextSpec, t: &Affine) -> Vec<(Color, Vec<Vec<Vec<P>>>)> {
@@ -65,7 +78,7 @@ pub fn text_components(spec: &TextSpec, t: &Affine) -> Vec<(Color, Vec<Vec<Vec<P
         0.0
     } else {
         match spec.align {
-            TextAlign::Left => f.x,
+            TextAlign::Left | TextAlign::Justify => f.x,
             TextAlign::Center => f.x + f.w * 0.5,
             TextAlign::Right => f.x + f.w,
         }
@@ -140,6 +153,7 @@ fn layer(spec: &TextSpec) -> Option<(TextLayer, Vec<Color>)> {
         TextAlign::Left => DocAlign::Left,
         TextAlign::Center => DocAlign::Center,
         TextAlign::Right => DocAlign::Right,
+        TextAlign::Justify => DocAlign::JustifyLeft,
     };
     let len = text.len();
     let layer = TextLayer {
@@ -302,6 +316,27 @@ mod tests {
         let mut bad = spec("A", "Inter");
         bad.frame.w = f32::NAN;
         assert!(text_components(&bad, &Affine::IDENTITY).is_empty());
+    }
+
+    #[test]
+    fn justified_lines_fill_the_box_width() {
+        let mut s = spec("one two three four five six seven eight", "Inter");
+        s.wrap = true;
+        s.frame = RectF32::new(0.0, 0.0, 120.0, 200.0);
+        s.valign = TextVAlign::Top;
+        s.align = TextAlign::Left;
+        let left = bounds(&text_components(&s, &Affine::IDENTITY));
+        s.align = TextAlign::Justify;
+        let justified = bounds(&text_components(&s, &Affine::IDENTITY));
+        // Left-aligned lines end short of the edge; justified ones reach it.
+        assert!(justified[2] > left[2] + 1.0, "{left:?} vs {justified:?}");
+        assert!(justified[2] <= 122.0 && (justified[0] - left[0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bundled_families_are_listed() {
+        let f = font_families().unwrap_or_default();
+        assert!(f.iter().any(|n| n == "Inter"), "{f:?}");
     }
 
     #[test]

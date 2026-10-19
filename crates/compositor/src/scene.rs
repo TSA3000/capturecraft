@@ -157,6 +157,8 @@ pub enum TextAlign {
     #[default]
     Center,
     Right,
+    /// Justified, last line left (point text: left).
+    Justify,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

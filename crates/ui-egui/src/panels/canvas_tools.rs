@@ -295,6 +295,14 @@ pub fn text_commit_intent(editor: &EditorState, e: &TextEditState) -> Option<UiI
             if let Some(s) = style.shadow {
                 p["shadow"] = json!(s);
             }
+            // A filled or outlined text box (the Text tool's Fill and
+            // Outline).
+            if !matches!(style.fill, capturecraft_format::Fill::None) {
+                p["fill"] = json!(style.fill);
+            }
+            if let Some(s) = style.stroke {
+                p["stroke"] = json!(s);
+            }
             Some(UiIntent::command("annotation.addText", p))
         }
         Some(_) if text == e.original => None,

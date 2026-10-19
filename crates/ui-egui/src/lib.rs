@@ -185,6 +185,8 @@ pub const COMMANDS_USED: &[&str] = &[
     // Text, Pen, Eraser, Magnify, Spotlight and Crop.
     "annotation.addText",
     "annotation.setText",
+    // The floating text toolbar and the drawer's Advanced section.
+    "annotation.setTextFormat",
     "annotation.addPen",
     "canvas.erase",
     "annotation.addMagnifier",
