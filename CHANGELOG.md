@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.19.0 (2026-10-19)
+
+- Preview editor (`capturecraft-next`) usable end to end: HUD, crosshair overlay, five-zone
+  editor, Library, resize/rotate gizmo, rounded shadow frame with margin handles.
+- Engine commands `node.resize`, `node.rotate`, `node.transform`, `canvas.setBackdrop`.
+- Compositor draws text (photocraft-text), rotation, gradients, feathered edges and the
+  shadow frame on CPU and GPU; GPU colour readback test against photocraft-cms.
+- HiDPI: physical pixels vs logical points in the crosshair overlay.
+- Shipped programs unchanged.
+
 ## v0.18.0 (2026-10-19)
 
 - Layered workspace for the next-generation editor: format, engine, CPU + wgpu compositor

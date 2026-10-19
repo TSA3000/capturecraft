@@ -208,8 +208,8 @@ cargo run -p capturecraft-app --release   # binary: capturecraft-next
 
 | Crate | Layer | What it is |
 |-------|-------|------------|
-| `capturecraft-format` | L5 | `.capturecraft` document: annotations (callouts, step badges, arrows, blur, magnifier, spotlight, cut outs, shapes, smart objects); rotation, radial/linear gradients and a rounded shadow frame in the schema |
-| `capturecraft-engine` | L5 | Command registry and session: every edit is an undoable command (`annotation.addStep`, `annotation.addCallout`, `canvas.cutOut`, `smart.simplify`, …) |
+| `capturecraft-format` | L5 | `.capturecraft` document: annotations (callouts, step badges, arrows, blur, magnifier, spotlight, cut outs, shapes, smart objects); rotation, linear/radial gradients and a rounded drop-shadow frame |
+| `capturecraft-engine` | L5 | Command registry and session: every edit is an undoable command (`annotation.addStep`, `node.resize`, `node.rotate`, `canvas.setBackdrop`, `smart.simplify`, …) |
 | `capturecraft-compositor` | L4 | CPU reference compositor and wgpu compositor with pixel parity (≤ 2/255) |
 | `capturecraft-capture` | L6 | Capture backends, frozen-desktop hit testing, scrolling-capture stitcher |
 | `capturecraft-ocr` | L6 | UI segmentation, inpainting and text recognition for the smart tools |
@@ -222,9 +222,22 @@ Everything below the UI is built on the PhotoCraft crates (v0.9.0):
 eframe/egui 0.36 with wgpu 30 (Rust 1.95+). Layering is checked by
 `cargo xtask layers`.
 
-Not drawn yet (in progress): text in callouts and step badges, rotation,
-gradients, feathered edges and the shadow frame are in the document format
-but the compositor does not render them yet.
+What the preview does today:
+
+- Capture HUD (borderless, always on top) → the windows hide → crosshair
+  overlay over the frozen desktop (physical-pixel size badge, loupe) →
+  the capture opens in the editor.
+- Five-zone editor: toolbar, canvas, Quick Styles sidebar, Recent Tray and
+  the Library view.
+- Canvas gizmo: 8 resize handles, a rotation handle (Shift snaps to 15°),
+  yellow diamonds for callout tails and corner radius.
+- Rendered on CPU and GPU alike: callout text and step badge numbers
+  (photocraft-text), rotation, linear and radial gradients, feathered blur
+  and spotlight edges, and the rounded drop-shadow frame with margin
+  handles.
+
+Not yet: tray, global hotkey and autostart (use the programs above), copy,
+share, preferences, thumbnails, video and scrolling capture.
 
 Checks (same as CI):
 
