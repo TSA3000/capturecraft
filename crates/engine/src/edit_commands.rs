@@ -9,8 +9,9 @@
 use std::collections::HashMap;
 
 use capturecraft_format::{
-    Annotation, ArrowCurve, Background, CalloutBody, Color, CurvedArrow, DropShadow, Fill,
-    FontSpec, HeadStyle, MAX_SIDE, Manifest, NodeId, RegionShape, Stroke,
+    Annotation, ArrowCurve, BackdropEffect, Background, BlendMode, BlurRegion, CalloutBody, Color,
+    CurvedArrow, DropShadow, Fill, FontSpec, HeadStyle, MAX_SIDE, Manifest, NodeId, RectF,
+    RegionShape, ShapeNode, Stroke,
 };
 use photocraft_geom::{Point, Rect, Size};
 use serde::Deserialize;
@@ -30,6 +31,30 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
 -> { id }"##,
         enabled: has_doc,
         run: add_arrow,
+        journal: true,
+    },
+    CommandSpec {
+        id: "annotation.addShape",
+        label: "Add Shape",
+        menu_path: &["Annotate", "Shape"],
+        shortcut: None,
+        params: r##"{ bounds: {x, y, w, h}, kind?: "rect"|"ellipse" = "rect", corner_radius?: f32 (rect only),
+  fill?: Fill, stroke?: Stroke|null, shadow?: DropShadow|null, blend?: "normal"|"multiply" (highlighter) }
+-> { id }"##,
+        enabled: has_doc,
+        run: add_shape,
+        journal: true,
+    },
+    CommandSpec {
+        id: "annotation.addBlur",
+        label: "Add Blur",
+        menu_path: &["Annotate", "Blur"],
+        shortcut: None,
+        params: r##"{ bounds: {x, y, w, h}, kind?: "rect"|"ellipse" = "rect",
+  effect?: {kind: "gaussian", sigma} | {kind: "pixelate", block_size_px} = pixelate 12, feather_px?: f32 = 0 }
+-> { id }"##,
+        enabled: has_doc,
+        run: add_blur,
         journal: true,
     },
     CommandSpec {
@@ -186,6 +211,99 @@ fn add_arrow(s: &mut Session, p: &Value) -> Result<Value> {
         arrow.end_head.style = h;
     }
     let id = push_node(s.manifest_mut()?, Annotation::CurvedArrow(arrow));
+    Ok(json!({ "id": id.0 }))
+}
+
+// ---------------------------------------------------------------------------
+// Shape, Highlight, Blur and Pixelate tools
+
+/// The outline a region tool draws.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionKind {
+    #[default]
+    Rect,
+    Ellipse,
+}
+
+/// A region tool's area: positive size, `kind`'s outline.
+fn region_of(
+    cmd: &str,
+    bounds: RectF,
+    kind: RegionKind,
+    radius: Option<f32>,
+) -> Result<RegionShape> {
+    if !(bounds.w > 0.0 && bounds.h > 0.0) {
+        return Err(bad(cmd, "bounds need a positive width and height"));
+    }
+    Ok(match (kind, radius) {
+        (RegionKind::Ellipse, _) => RegionShape::Ellipse { rect: bounds },
+        (RegionKind::Rect, Some(r)) if r > 0.0 => RegionShape::RoundedRect {
+            rect: bounds,
+            radius: r,
+        },
+        (RegionKind::Rect, _) => RegionShape::Rect { rect: bounds },
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddShapeParams {
+    pub bounds: RectF,
+    #[serde(default)]
+    pub kind: RegionKind,
+    #[serde(default)]
+    pub corner_radius: Option<f32>,
+    #[serde(default)]
+    pub fill: Option<Fill>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub stroke: Option<Option<Stroke>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub shadow: Option<Option<DropShadow>>,
+    #[serde(default)]
+    pub blend: Option<BlendMode>,
+}
+
+fn add_shape(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "annotation.addShape";
+    let p: AddShapeParams = parse(CMD, p)?;
+    let d = ShapeNode::default();
+    let shape = ShapeNode {
+        shape: region_of(CMD, p.bounds, p.kind, p.corner_radius)?,
+        fill: p.fill.unwrap_or(d.fill),
+        stroke: p.stroke.unwrap_or(d.stroke),
+        shadow: p.shadow.unwrap_or(d.shadow),
+        blend: p.blend.unwrap_or(d.blend),
+    };
+    if matches!(shape.fill, Fill::None) && shape.stroke.is_none() {
+        return Err(bad(CMD, "a shape needs a fill or a stroke"));
+    }
+    let id = push_node(s.manifest_mut()?, Annotation::Shape(shape));
+    Ok(json!({ "id": id.0 }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddBlurParams {
+    pub bounds: RectF,
+    #[serde(default)]
+    pub kind: RegionKind,
+    #[serde(default)]
+    pub effect: Option<BackdropEffect>,
+    #[serde(default)]
+    pub feather_px: Option<f32>,
+}
+
+fn add_blur(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "annotation.addBlur";
+    let p: AddBlurParams = parse(CMD, p)?;
+    let d = BlurRegion::default();
+    let blur = BlurRegion {
+        shape: region_of(CMD, p.bounds, p.kind, None)?,
+        effect: p.effect.unwrap_or(d.effect),
+        feather_px: p.feather_px.unwrap_or(d.feather_px),
+    };
+    let id = push_node(s.manifest_mut()?, Annotation::BlurRegion(blur));
     Ok(json!({ "id": id.0 }))
 }
 
@@ -611,6 +729,146 @@ mod tests {
         .unwrap()["id"]
             .as_u64()
             .unwrap()
+    }
+
+    #[test]
+    fn region_tools_add_shapes_highlights_and_blurs() {
+        let mut s = session(80, 40, [255; 4]);
+        let bounds = json!({ "x": 10, "y": 5, "w": 40, "h": 20 });
+        let shape = s
+            .run(
+                "annotation.addShape",
+                &json!({ "bounds": bounds, "kind": "ellipse", "fill": { "kind": "solid", "color": "#ff0000" } }),
+            )
+            .unwrap();
+        let rounded = s
+            .run(
+                "annotation.addShape",
+                &json!({ "bounds": bounds, "corner_radius": 6 }),
+            )
+            .unwrap();
+        let mark = s
+            .run(
+                "annotation.addShape",
+                &json!({ "bounds": bounds, "stroke": null, "blend": "multiply",
+                         "fill": { "kind": "solid", "color": "#ffe60066" } }),
+            )
+            .unwrap();
+        let blur = s
+            .run(
+                "annotation.addBlur",
+                &json!({ "bounds": bounds, "effect": { "kind": "gaussian", "sigma": 6 } }),
+            )
+            .unwrap();
+        let pix = s
+            .run("annotation.addBlur", &json!({ "bounds": bounds }))
+            .unwrap();
+        let m = manifest(&s);
+        let node = |v: &Value| {
+            m.node(NodeId(v["id"].as_u64().unwrap()))
+                .unwrap()
+                .annotation()
+                .unwrap()
+        };
+        let Annotation::Shape(a) = node(&shape) else {
+            panic!()
+        };
+        assert!(matches!(a.shape, RegionShape::Ellipse { .. }));
+        assert!(a.stroke.is_some(), "the default stroke stays");
+        let Annotation::Shape(b) = node(&rounded) else {
+            panic!()
+        };
+        assert!(matches!(
+            b.shape,
+            RegionShape::RoundedRect { radius: 6.0, .. }
+        ));
+        let Annotation::Shape(c) = node(&mark) else {
+            panic!()
+        };
+        assert_eq!((c.blend, c.stroke.is_none()), (BlendMode::Multiply, true));
+        let Annotation::BlurRegion(d) = node(&blur) else {
+            panic!()
+        };
+        assert_eq!(d.effect, BackdropEffect::Gaussian { sigma: 6.0 });
+        let Annotation::BlurRegion(e) = node(&pix) else {
+            panic!()
+        };
+        assert_eq!(e.effect, BackdropEffect::Pixelate { block_size_px: 12 });
+        // Empty areas, invisible shapes and bad effects change nothing.
+        let n = m.annotations.len();
+        let flat = json!({ "x": 0, "y": 0, "w": 0, "h": 10 });
+        assert!(
+            s.run("annotation.addShape", &json!({ "bounds": flat }))
+                .is_err()
+        );
+        assert!(
+            s.run("annotation.addBlur", &json!({ "bounds": flat }))
+                .is_err()
+        );
+        assert!(
+            s.run(
+                "annotation.addShape",
+                &json!({ "bounds": bounds, "stroke": null })
+            )
+            .is_err()
+        );
+        assert!(
+            s.run(
+                "annotation.addBlur",
+                &json!({ "bounds": bounds, "effect": { "kind": "pixelate", "block_size_px": 1 } })
+            )
+            .is_err()
+        );
+        assert_eq!(manifest(&s).annotations.len(), n);
+    }
+
+    #[test]
+    fn pixelate_and_highlight_change_the_pixels_below() {
+        // Black left half, white right half.
+        let (w, h) = (40u32, 20u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if i % w < w / 2 {
+                    [0, 0, 0, 255]
+                } else {
+                    [255; 4]
+                }
+            })
+            .collect();
+        let mut s = Session::new();
+        let px = Pixels::new(Size::new(w, h), rgba);
+        s.open(Manifest::new(Size::new(w, h)), px).unwrap();
+        s.run(
+            "annotation.addBlur",
+            &json!({ "bounds": { "x": 0, "y": 0, "w": 40, "h": 20 },
+                     "effect": { "kind": "pixelate", "block_size_px": 40 } }),
+        )
+        .unwrap();
+        let flat = crate::render::flatten(s.active().unwrap()).unwrap();
+        let at = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [flat.rgba[i], flat.rgba[i + 1], flat.rgba[i + 2]]
+        };
+        assert_eq!(at(1, 1), at(38, 18), "one block, one colour");
+        assert!((100..=155).contains(&at(1, 1)[0]), "{:?}", at(1, 1));
+
+        let mut s = session(20, 20, [255; 4]);
+        s.run(
+            "annotation.addShape",
+            &json!({ "bounds": { "x": 0, "y": 0, "w": 10, "h": 20 }, "stroke": null, "blend": "multiply",
+                     "fill": { "kind": "solid", "color": "#ffe60066" } }),
+        )
+        .unwrap();
+        let flat = crate::render::flatten(s.active().unwrap()).unwrap();
+        let (marked, clear) = (
+            &flat.rgba[(5 * 20 + 5) * 4..][..4],
+            &flat.rgba[(5 * 20 + 15) * 4..][..4],
+        );
+        assert!(
+            marked[2] < 200 && marked[0] > 240,
+            "yellow tint: {marked:?}"
+        );
+        assert_eq!(clear, [255; 4]);
     }
 
     #[test]
