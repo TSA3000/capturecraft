@@ -16,7 +16,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
 # Geometry primitives from PhotoCraft (storytold/photocraft), the sibling
 # craft app; keeps the editor's coordinate model identical to theirs.
-photocraft-geom = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
+photocraft-geom = { workspace = true }
 # Same UI stack as storytold/photocraft (egui). 0.33 keeps MSRV at 1.89.
 eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 global-hotkey = "0.8"
@@ -39,6 +39,27 @@ tray-icon = "0.26.1"
 # KSNI (D-Bus StatusNotifierItem) on Linux: no GTK needed.
 [target.'cfg(target_os = "linux")'.dependencies]
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+
+# The app (this package) plus the layered crates of the CaptureCraft
+# architecture; the layer table lives in xtask/src/layers.rs
+# (`cargo xtask layers`).
+[workspace]
+resolver = "3"
+members = [".", "crates/*", "xtask"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TSA3000/capturecraft"
+
+[workspace.dependencies]
+capturecraft-format = { path = "crates/format" }
+capturecraft-engine = { path = "crates/engine" }
+photocraft-geom = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
 
 # Keep debug builds responsive (image scaling runs per resize)
 [profile.dev]

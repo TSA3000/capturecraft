@@ -20,7 +20,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo xtask layers
 
   build:
     name: build (${{ matrix.target }})
@@ -47,4 +48,4 @@ jobs:
           key: ${{ matrix.target }}
       - run: cargo build --target ${{ matrix.target }}
       - if: ${{ !matrix.cross }}
-        run: cargo test --target ${{ matrix.target }}
+        run: cargo test --workspace --target ${{ matrix.target }}
