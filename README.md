@@ -133,13 +133,52 @@ Layout, top to bottom:
   switch, × to close, right-click for Duplicate, Combine Images, Save As,
   Copy and Delete.
 
-Not available yet (the buttons say so): drawing with Text, Shape, Stamp,
-Fill, Blur, Pixelate, Highlight, Pen, Eraser, Magnify, Spotlight and Crop
-(the engine has no commands for them yet), the Ellipse, Polygon and Lasso
-selections, Snap to Object, Assets, Create from template, video, the Save
-As dialog, Combine Images, and Torn Edge, Perspective, Spotlight and Color
-Filter effects. Documents live in the session until `.capturecraft` saving
-exists; use Share to keep an image.
+#### What works
+
+| Tool or feature | How it works |
+|-----------------|--------------|
+| Arrow | Drag from tail to tip; drag the green handle to bend it |
+| Callout | Click for a default bubble or drag its size; the yellow diamond aims the tail, the `+` adds another |
+| Step | Click to drop the next number (1, 2, 3 / A, B, C / I, II, III) |
+| Move | Select, Shift+click to add, drag to move; handles resize (Shift keeps the aspect, Alt from the centre), rotate (Shift snaps to 15°) and round corners |
+| Selection | Rectangle: drag to select part of the capture, drag inside it to move it, Delete to remove it; the hole is Transparent or Auto Fill |
+| Cut Out | Drag across the capture to remove a strip and close the gap (straight or torn seam) |
+| Simplify | Replaces text and detail with clean shapes; pick a palette tile |
+| Quick Styles | Pick a style for the next annotation or apply it to the selection; edit colour, width, arrowheads, shadow, corner radius, tail and numbering; save your own; star favourites |
+| Effects | Border, Drop Shadow, Rounded Drop-Shadow Frame (margin, corners, solid/linear/radial backdrop, shadow, border) |
+| Canvas | Resize squares on the border add padding; Resize / Trim Canvas from the size button |
+| Share / Save | PNG to the captures folder; JPG, WebP, SVG, PDF (every open capture, one per page) and Clipboard from the arrow; Copy All |
+| Captures | Recent Captures strip (switch, close, Duplicate, Copy, Delete), Tag, New Blank Image, zoom, Undo / Redo |
+
+#### Not working yet
+
+The buttons are there and say "not available yet" when used:
+
+- **Tools**: Text, Shape, Stamp, Fill, Blur, Pixelate, Highlight, Pen,
+  Eraser, Magnify, Spotlight, Smart Move and Crop. They can be selected
+  and their Quick Styles edited, but they do not draw yet.
+- **Selection**: Ellipse, Polygon and Freehand Lasso modes, Snap to Object.
+- **Effects**: Torn Edge, Perspective / Shear, Spotlight and Color Filter.
+- **Files**: `.capturecraft` documents are not saved yet (captures live
+  while the editor is open; use Share to keep an image), and Save As has no
+  file dialog yet.
+- **Other**: Assets, Create › Image from Template / Video from Images, the
+  Video menu, Combine Images and Preferences.
+
+#### Coming next
+
+Roughly in this order:
+
+1. **Text, Shape, Blur, Pixelate, Highlight and Crop**: the document format
+   and both compositors already draw shapes, blur and pixelate regions; they
+   need engine commands and canvas gestures.
+2. **Pen, Eraser, Magnify, Spotlight, Stamp, Fill and the Smart Move tool.**
+3. **Saving and opening `.capturecraft` documents**, a Save As dialog, and
+   Combine Images.
+4. **Ellipse, Polygon and Lasso selections** and Snap to Object.
+5. **Torn Edge, Perspective, Spotlight and Color Filter effects.**
+6. **Video and scrolling capture**, Preferences, and moving the tray, global
+   hotkey and autostart into the new app.
 
 ### Menus and preferences
 

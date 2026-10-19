@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.20.1 (2026-10-19)
+
+- Fix: the editor's right drawer no longer overflows past the window edge.
+- Fix: the menu strip's document arrow is drawn (the UI font has no ▾).
+- README lists working, missing and upcoming editor tools.
+
 ## v0.20.0 (2026-10-19)
 
 - `capturecraft-editor` is the new studio editor (menu strip, icon-over-label toolbar,

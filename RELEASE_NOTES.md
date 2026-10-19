@@ -1,3 +1,18 @@
+# v0.20.1
+
+## Changes
+
+- Fix: the editor's right drawer (Tool Properties / Effects) no longer slides off the right
+  edge of the window. Its sliders and dropdowns now fit the drawer, and the canvas no longer
+  covers the drawer's left side.
+- Fix: the arrow after the document name in the menu strip is drawn instead of showing as a
+  box.
+- README: what works in the new editor, what doesn't yet, and what's coming next.
+
+## Upgrading
+
+- Install over v0.20.0; nothing else to do.
+
 # v0.20.0
 
 ## Changes
