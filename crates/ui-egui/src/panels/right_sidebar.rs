@@ -12,13 +12,20 @@
 //! roughness, Simplify palette). A change is applied to the selection once
 //! the pointer is released, so a slider drag is one undo step; `+ Add Quick
 //! Style` saves the draft as a new card.
+//!
+//! The Frame section edits the document's rounded shadow frame (margin,
+//! corners, a solid, linear or radial backdrop, shadow and border) and
+//! commits `canvas.setBackdrop` on release, the same way.
 
 use capturecraft_engine::DocState;
-use capturecraft_format::{Axis, Color, DropShadow, Fill, HeadStyle, Numbering, Stroke};
+use capturecraft_format::{
+    Axis, CanvasBackdrop, Color, DropShadow, Fill, GradientStop, HeadStyle, Numbering, Stroke,
+};
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Pos2, Rect as ERect, Sense, Shape, Slider, StrokeKind,
     Ui, Vec2, pos2, vec2,
 };
+use photocraft_geom::{Point, Size};
 use serde_json::{Value, json};
 
 use crate::UiIntent;
@@ -542,6 +549,7 @@ impl RightSidebar<'_> {
                 });
             ui.checkbox(&mut c.checkerboard, "Transparency checkerboard");
         });
+        self.frame_section(ui, intents);
 
         if let Some(target) = eyedropper {
             editor.canvas.eyedropper = Some(target);
@@ -551,6 +559,118 @@ impl RightSidebar<'_> {
             editor.sidebar.edit_draft(tool, |p| *p = style);
         }
         edited
+    }
+
+    /// The rounded shadow frame; commits on release.
+    fn frame_section(&self, ui: &mut Ui, intents: &mut Vec<UiIntent>) {
+        let Some(doc) = self.doc else {
+            return;
+        };
+        let current = &doc.manifest.canvas.backdrop;
+        let canvas = doc.manifest.canvas.size;
+        let id = Id::new("sidebar.frame_draft");
+        let mut draft = ui
+            .ctx()
+            .data(|d| d.get_temp::<CanvasBackdrop>(id))
+            .unwrap_or_else(|| current.clone());
+        let before = draft.clone();
+        section(ui, "Frame", |ui| {
+            let mut on = !matches!(draft, CanvasBackdrop::None);
+            if ui.checkbox(&mut on, "Rounded shadow frame").changed() {
+                draft = if on {
+                    CanvasBackdrop::rounded_shadow_frame()
+                } else {
+                    CanvasBackdrop::None
+                };
+            }
+            let size = draft.frame_size(canvas);
+            let CanvasBackdrop::RoundedShadowFrame {
+                margin_px,
+                corner_radius_px,
+                backdrop_fill,
+                shadow,
+                border,
+            } = &mut draft
+            else {
+                return;
+            };
+            ui.add(
+                Slider::new(margin_px, 0.0..=256.0)
+                    .text("Margin")
+                    .suffix(" px"),
+            );
+            ui.add(
+                Slider::new(corner_radius_px, 0.0..=64.0)
+                    .text("Corners")
+                    .suffix(" px"),
+            );
+            let (mut kind, mut a, mut b) = fill_parts(backdrop_fill);
+            let parts = (kind, a, b);
+            ui.horizontal(|ui| {
+                ui.label("Backdrop");
+                for k in BackdropKind::ALL {
+                    ui.selectable_value(&mut kind, k, k.label());
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Colours");
+                for (c, show) in [(&mut a, true), (&mut b, kind != BackdropKind::Solid)] {
+                    if show {
+                        let mut v = c32(*c);
+                        if egui::color_picker::color_edit_button_srgba(
+                            ui,
+                            &mut v,
+                            egui::color_picker::Alpha::OnlyBlend,
+                        )
+                        .changed()
+                        {
+                            *c = from_c32(v);
+                        }
+                    }
+                }
+            });
+            if (kind, a, b) != parts || kind != BackdropKind::Solid {
+                let fresh = backdrop_fill_of(kind, a, b, size);
+                // Gradients follow the frame size; keep points set elsewhere
+                // unless something here changed.
+                if (kind, a, b) != parts || margin_changed(&before, *margin_px) {
+                    *backdrop_fill = fresh;
+                }
+            }
+            let mut has_shadow = shadow.is_some();
+            if ui.checkbox(&mut has_shadow, "Shadow").changed() {
+                *shadow = if has_shadow {
+                    match CanvasBackdrop::rounded_shadow_frame() {
+                        CanvasBackdrop::RoundedShadowFrame { shadow, .. } => shadow,
+                        CanvasBackdrop::None => Some(DropShadow::default()),
+                    }
+                } else {
+                    None
+                };
+            }
+            let mut has_border = border.is_some();
+            if ui.checkbox(&mut has_border, "Border").changed() {
+                *border = has_border.then(|| Stroke {
+                    color: Color::rgba(0, 0, 0, 0x33),
+                    width: 1.0,
+                    ..Stroke::default()
+                });
+            }
+        });
+        let pending = draft != before
+            || ui
+                .ctx()
+                .data(|d| d.get_temp::<CanvasBackdrop>(id))
+                .is_some();
+        if draft != before {
+            ui.ctx().data_mut(|d| d.insert_temp(id, draft.clone()));
+        }
+        if pending && !ui.input(|i| i.pointer.any_down()) {
+            ui.ctx().data_mut(|d| d.remove::<CanvasBackdrop>(id));
+            if draft != *current {
+                intents.push(crate::panels::gizmo::backdrop_intent(&draft));
+            }
+        }
     }
 
     fn shadow_dial(&self, ui: &mut Ui, style: &mut StylePreset) {
@@ -658,6 +778,89 @@ pub fn apply_to_selection(editor: &EditorState, tool: ToolId) -> Option<UiIntent
     let ids: Vec<u64> = editor.canvas.selection.iter().map(|n| n.0).collect();
     p.insert("ids".into(), json!(ids));
     Some(UiIntent::command("annotation.setStyle", Value::Object(p)))
+}
+
+/// How the frame's backdrop is painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackdropKind {
+    Solid,
+    Linear,
+    Radial,
+}
+
+impl BackdropKind {
+    pub const ALL: [BackdropKind; 3] = [
+        BackdropKind::Solid,
+        BackdropKind::Linear,
+        BackdropKind::Radial,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BackdropKind::Solid => "Solid",
+            BackdropKind::Linear => "Linear",
+            BackdropKind::Radial => "Radial",
+        }
+    }
+}
+
+/// Kind and first/last colours of a backdrop fill.
+pub fn fill_parts(f: &Fill) -> (BackdropKind, Color, Color) {
+    let ends = |stops: &[GradientStop]| {
+        (
+            stops.first().map_or(Color::WHITE, |s| s.color),
+            stops.last().map_or(Color::WHITE, |s| s.color),
+        )
+    };
+    match f {
+        Fill::None => (BackdropKind::Solid, Color::WHITE, Color::WHITE),
+        Fill::Solid { color } => (BackdropKind::Solid, *color, *color),
+        Fill::Linear { stops, .. } => {
+            let (a, b) = ends(stops);
+            (BackdropKind::Linear, a, b)
+        }
+        Fill::Radial { stops, .. } => {
+            let (a, b) = ends(stops);
+            (BackdropKind::Radial, a, b)
+        }
+    }
+}
+
+/// A backdrop fill over a `frame`-sized image (frame space): a diagonal
+/// linear gradient corner to corner, or a radial one from the centre to
+/// the farthest corner.
+pub fn backdrop_fill_of(kind: BackdropKind, a: Color, b: Color, frame: Size) -> Fill {
+    let (w, h) = (f64::from(frame.width), f64::from(frame.height));
+    let stops = vec![
+        GradientStop {
+            offset: 0.0,
+            color: a,
+        },
+        GradientStop {
+            offset: 1.0,
+            color: b,
+        },
+    ];
+    match kind {
+        BackdropKind::Solid => Fill::Solid { color: a },
+        BackdropKind::Linear => Fill::Linear {
+            from: Point::new(0.0, 0.0),
+            to: Point::new(w, h),
+            stops,
+        },
+        BackdropKind::Radial => Fill::Radial {
+            center: Point::new(w / 2.0, h / 2.0),
+            radius: (w.hypot(h) / 2.0) as f32,
+            stops,
+        },
+    }
+}
+
+fn margin_changed(before: &CanvasBackdrop, now: f32) -> bool {
+    match before {
+        CanvasBackdrop::RoundedShadowFrame { margin_px, .. } => *margin_px != now,
+        CanvasBackdrop::None => true,
+    }
 }
 
 fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
@@ -993,6 +1196,43 @@ fn paint_seam(p: &egui::Painter, r: ERect, torn: bool, t: &Tokens) {
 mod tests {
     use super::*;
     use capturecraft_format::NodeId;
+
+    #[test]
+    fn backdrop_fills_span_the_frame() {
+        let frame = Size::new(200, 100);
+        let (red, blue) = (Color::rgb(255, 0, 0), Color::rgb(0, 0, 255));
+        let f = backdrop_fill_of(BackdropKind::Linear, red, blue, frame);
+        assert_eq!(fill_parts(&f), (BackdropKind::Linear, red, blue));
+        let Fill::Linear { to, .. } = f else {
+            unreachable!()
+        };
+        assert_eq!((to.x, to.y), (200.0, 100.0));
+        let f = backdrop_fill_of(BackdropKind::Radial, red, blue, frame);
+        let Fill::Radial { center, radius, .. } = &f else {
+            unreachable!()
+        };
+        assert_eq!((center.x, center.y), (100.0, 50.0));
+        assert!((f64::from(*radius) - 200f64.hypot(100.0) / 2.0).abs() < 1e-3);
+        assert_eq!(
+            fill_parts(&backdrop_fill_of(BackdropKind::Solid, red, blue, frame)),
+            (BackdropKind::Solid, red, red)
+        );
+        // The engine's format accepts what the panel builds.
+        let mut m = capturecraft_format::Manifest::new(Size::new(10, 10));
+        if let CanvasBackdrop::RoundedShadowFrame { backdrop_fill, .. } =
+            CanvasBackdrop::rounded_shadow_frame()
+        {
+            assert!(matches!(backdrop_fill, Fill::Solid { .. }));
+        }
+        m.canvas.backdrop = CanvasBackdrop::RoundedShadowFrame {
+            margin_px: 20.0,
+            corner_radius_px: 8.0,
+            backdrop_fill: f,
+            shadow: None,
+            border: None,
+        };
+        assert!(m.validate().is_ok());
+    }
 
     #[test]
     fn shadow_dial_round_trips_every_direction() {
