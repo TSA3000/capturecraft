@@ -41,6 +41,7 @@ use serde_json::{Value, json};
 
 use crate::UiIntent;
 use crate::icons::{self, Icon};
+use crate::panels::layers_panel::LayersPanel;
 use crate::state::{
     BlurOptions, ColorTarget, EditorState, ExpandBackdrop, InspectorMode, PixelateOptions,
     QuickStyle, SelectionFill, SelectionMode, StylePreset, ToolId,
@@ -210,11 +211,35 @@ impl RightSidebar<'_> {
                 "Effects change the whole canvas: a border, a drop shadow or a rounded shadow frame. Every change is one undo step.",
             ),
             InspectorMode::Properties => ("Tool Properties", tool_help(tool)),
+            InspectorMode::Layers => (
+                "Layers",
+                "Every annotation, topmost first. The eye hides it, the padlock locks it; drag a row to restack, double-click to rename.",
+            ),
+            InspectorMode::History => (
+                "History",
+                "Every edit of this capture. Click a row to go back (or forward) to that point.",
+            ),
         };
         header(ui, title, help, t);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| match mode {
+                InspectorMode::Layers => {
+                    ui.add_space(t.space_sm);
+                    LayersPanel {
+                        doc: self.doc,
+                        tokens: t,
+                    }
+                    .layers(ui, editor, intents);
+                }
+                InspectorMode::History => {
+                    ui.add_space(t.space_sm);
+                    LayersPanel {
+                        doc: self.doc,
+                        tokens: t,
+                    }
+                    .history(ui, intents);
+                }
                 InspectorMode::Effects => {
                     ui.add_space(t.space_sm);
                     self.effects(ui, intents);

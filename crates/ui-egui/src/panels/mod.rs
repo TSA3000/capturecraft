@@ -4,5 +4,6 @@
 pub mod canvas_viewport;
 pub mod editor_toolbar;
 pub mod gizmo;
+pub mod layers_panel;
 pub mod recent_tray;
 pub mod right_sidebar;

@@ -582,28 +582,36 @@ fn utility_bar(
     );
 
     // Right, under the drawer.
-    let tabs_w = 210.0;
+    let tabs_w = 272.0;
     let x = if editor.sidebar.visible {
         full.max.x - DRAWER_W + (DRAWER_W - tabs_w) / 2.0
     } else {
         full.max.x - tabs_w - 8.0
     };
     ui.scope_builder(egui::UiBuilder::new().max_rect(place(x, tabs_w)), |ui| {
-        let selected = match (editor.sidebar.visible, editor.sidebar.mode) {
-            (true, InspectorMode::Effects) => 0,
-            (true, InspectorMode::Properties) => 1,
-            (false, _) => 2,
+        const MODES: [InspectorMode; 4] = [
+            InspectorMode::Effects,
+            InspectorMode::Properties,
+            InspectorMode::Layers,
+            InspectorMode::History,
+        ];
+        let selected = if editor.sidebar.visible {
+            MODES
+                .iter()
+                .position(|m| *m == editor.sidebar.mode)
+                .unwrap_or(0)
+        } else {
+            MODES.len()
         };
+        // Labels only: four tabs with icons are wider than the drawer.
         let items = [
-            (Some(Icon::Effects), "Effects"),
-            (Some(Icon::Properties), "Properties"),
+            (None, "Effects"),
+            (None, "Properties"),
+            (None, "Layers"),
+            (None, "History"),
         ];
         if let Some(i) = segmented(ui, Id::new("utility.drawer"), &items, selected, t) {
-            let mode = if i == 0 {
-                InspectorMode::Effects
-            } else {
-                InspectorMode::Properties
-            };
+            let mode = MODES.get(i).copied().unwrap_or_default();
             // Clicking the shown tab hides the drawer; the other shows it.
             if editor.sidebar.visible && editor.sidebar.mode == mode {
                 editor.sidebar.visible = false;
@@ -1052,6 +1060,69 @@ mod tests {
         assert!(h.state.editor.tray.visible);
     }
 
+    /// The Layers and History tabs and the keyboard shortcuts drive the
+    /// engine.
+    #[test]
+    fn layers_history_and_shortcuts_are_wired() {
+        let mut h = Harness::new();
+        h.frame(Vec::new());
+        for x in [10, 60] {
+            h.session
+                .run("annotation.addStep", &json!({ "at": { "x": x, "y": 10 } }))
+                .unwrap();
+        }
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        // Ctrl+Z, then Ctrl+Y.
+        let out = h.frame(vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert!(out.iter().any(|i| matches!(
+            i,
+            UiIntent::Command {
+                id: "edit.undo",
+                ..
+            }
+        )));
+        crate::dispatch(&mut h.session, out);
+        let out = h.frame(vec![key(egui::Key::Y, egui::Modifiers::COMMAND)]);
+        assert!(out.iter().any(|i| matches!(
+            i,
+            UiIntent::Command {
+                id: "edit.redo",
+                ..
+            }
+        )));
+        crate::dispatch(&mut h.session, out);
+        // Ctrl+C without a selection is Copy All.
+        assert!(
+            h.frame(vec![egui::Event::Copy])
+                .contains(&UiIntent::CopyImage)
+        );
+
+        h.click(Id::new("utility.drawer").with(2));
+        assert_eq!(h.state.editor.sidebar.mode, InspectorMode::Layers);
+        h.frame(Vec::new());
+        let id = h.session.active().unwrap().manifest.annotations[0].id.0;
+        h.click(Id::new(("layers.eye", id)));
+        h.click(Id::new(("layers.lock", id)));
+        let n = h.session.active().unwrap().manifest.annotations[0].clone();
+        assert!(!n.visible && n.locked);
+
+        h.click(Id::new("utility.drawer").with(3));
+        assert_eq!(h.state.editor.sidebar.mode, InspectorMode::History);
+        // Ctrl+Z twice undoes the lock and the hide.
+        for _ in 0..2 {
+            let out = h.frame(vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+            crate::dispatch(&mut h.session, out);
+        }
+        let (undo, redo) = h.session.active().unwrap().history_labels();
+        assert_eq!((undo.len(), redo.len()), (2, 2));
+    }
+
     /// Nothing in the drawer is wider than the drawer: an overflowing row
     /// makes egui push the whole right panel past the window edge.
     #[test]
@@ -1060,6 +1131,10 @@ mod tests {
         let right = h.screen.max.x;
         let mut cases = vec![(InspectorMode::Effects, ToolId::Arrow)];
         cases.extend(ToolId::ALL.map(|t| (InspectorMode::Properties, t)));
+        cases.extend([
+            (InspectorMode::Layers, ToolId::Move),
+            (InspectorMode::History, ToolId::Move),
+        ]);
         for (mode, tool) in cases {
             h.state.editor.sidebar.mode = mode;
             h.state.editor.toolbar.active = tool;

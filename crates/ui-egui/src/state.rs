@@ -1038,6 +1038,8 @@ pub enum InspectorMode {
     #[default]
     Properties,
     Effects,
+    Layers,
+    History,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
