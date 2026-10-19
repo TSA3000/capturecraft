@@ -7,8 +7,8 @@
 //! silhouette; the coverage step unites them, so where they overlap the
 //! colour is applied once.
 //!
-//! Step badges (numbered circles, teardrops, shields) need text shaping and
-//! join this module together with photocraft-text.
+//! Step badges are plain shapes with a label ([`crate::scene::ShapeSpec`]
+//! with text, see [`crate::text`]).
 
 use photocraft_doc::{Knot, LineCap, LineJoin, Subpath};
 use photocraft_geom::Point;

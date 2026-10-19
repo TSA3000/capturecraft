@@ -11,13 +11,17 @@
 //!   interactive editor canvas.
 //!
 //! Both start from the same prepared ops ([`prepare`]): vector work
-//! (callout outline unions, strokes, arrow heads) is done once and turned
-//! into exact-area coverage masks, so anti-aliasing is identical on both.
-//! The per-pixel work (blending, Gaussian blurs, mosaics, magnifier
-//! resampling, spotlight dimming, torn-edge Cut Outs) is written twice, in
-//! [`effects`] and in `shaders/effects.wgsl`, with the same arithmetic; the
-//! [`parity`] contract bounds their difference (≤ 2/255 per channel,
-//! SSIM ≥ 0.995).
+//! (callout outline unions, strokes, arrow heads, glyph outlines shaped by
+//! photocraft-text, node transforms) is done once and turned into
+//! exact-area coverage masks, so anti-aliasing is identical on both; so are
+//! the feathered edges (signed distance from photocraft-algo's distance
+//! transform), the shadow frame's blurred shadow (photocraft-algo's
+//! Gaussian) and resampled rasters (photocraft-algo's warp). The per-pixel
+//! work (blending, solid and gradient paints, Gaussian blurs, mosaics,
+//! magnifier resampling, spotlight dimming, torn-edge Cut Outs, the shadow
+//! frame) is written twice, in [`effects`] and in `shaders/effects.wgsl`,
+//! with the same arithmetic; the [`parity`] contract bounds their
+//! difference (≤ 2/255 per channel, SSIM ≥ 0.995).
 //!
 //! The crate sits on layer 4: it uses only photocraft crates from L0–L3 and
 //! knows nothing of the engine, the file format or egui. L5/L7 translate
@@ -41,6 +45,7 @@ pub mod parity;
 pub mod prepare;
 pub mod primitives;
 pub mod scene;
+pub mod text;
 
 pub use canvas::{Frame, TileSet, TiledCanvas};
 pub use cpu_compositor::{CpuCompositor, RenderStats};

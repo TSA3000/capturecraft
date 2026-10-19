@@ -891,10 +891,13 @@ name = "capturecraft-compositor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "photocraft-algo",
+ "photocraft-cms",
  "photocraft-color",
  "photocraft-doc",
  "photocraft-geom",
  "photocraft-raster",
+ "photocraft-text",
  "photocraft-vector",
  "pollster 0.4.0",
  "rayon",

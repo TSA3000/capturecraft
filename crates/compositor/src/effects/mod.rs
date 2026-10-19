@@ -85,6 +85,131 @@ impl Mask {
 /// Largest mask (pixels): 16k × 16k.
 pub const MAX_MASK_PX: u64 = 1 << 28;
 
+/// Most stops a gradient keeps (the format's limit).
+pub const MAX_STOPS: usize = 16;
+
+/// A fill paint resolved for the compositors. Mirrors `paint_at`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaintPx {
+    /// Premultiplied colour.
+    Solid(Px),
+    Gradient(Gradient),
+}
+
+impl PaintPx {
+    /// Premultiplied colour at pixel `(x, y)` (sampled at its centre).
+    #[inline]
+    pub fn at(&self, x: i32, y: i32) -> Px {
+        match self {
+            PaintPx::Solid(c) => *c,
+            PaintPx::Gradient(g) => g.at(x, y),
+        }
+    }
+
+    /// Nothing visible anywhere.
+    pub fn is_clear(&self) -> bool {
+        match self {
+            PaintPx::Solid(c) => c[3] <= 0.0,
+            PaintPx::Gradient(g) => g.stops.iter().all(|s| s.1[3] <= 0.0),
+        }
+    }
+}
+
+/// Linear or radial gradient over straight-alpha stops.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gradient {
+    pub radial: bool,
+    /// Linear: `from.x, from.y, d.x / |d|², d.y / |d|²` (`d = to - from`);
+    /// radial: `center.x, center.y, 1 / radius, 0`.
+    pub geo: [f32; 4],
+    /// `(offset, straight sRGB-encoded RGBA)`, sorted by offset, all
+    /// channels in `0..=1`; at least one.
+    pub stops: Vec<(f32, [f32; 4])>,
+}
+
+impl Gradient {
+    /// Position along the gradient, clamped to `0..=1`.
+    #[inline]
+    pub fn t(&self, x: i32, y: i32) -> f32 {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let g = self.geo;
+        let t = if self.radial {
+            let dx = px - g[0];
+            let dy = py - g[1];
+            (dx * dx + dy * dy).sqrt() * g[2]
+        } else {
+            (px - g[0]) * g[2] + (py - g[1]) * g[3]
+        };
+        t.clamp(0.0, 1.0)
+    }
+
+    /// Straight colours interpolated between the stops around `t`, then
+    /// premultiplied.
+    #[inline]
+    pub fn at(&self, x: i32, y: i32) -> Px {
+        let t = self.t(x, y);
+        let n = self.stops.len();
+        let Some(first) = self.stops.first() else {
+            return [0.0; 4];
+        };
+        let mut c = first.1;
+        if t > first.0 {
+            c = self.stops[n - 1].1;
+            for i in 1..n {
+                let (o0, c0) = self.stops[i - 1];
+                let (o1, c1) = self.stops[i];
+                if t <= o1 {
+                    let span = o1 - o0;
+                    let f = if span > 0.0 { (t - o0) / span } else { 1.0 };
+                    c = mix(c0, c1, f);
+                    break;
+                }
+            }
+        }
+        [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]
+    }
+}
+
+/// Coverage with a soft edge `feather` pixels wide, centred on the outline
+/// of `hard` (exact-area coverage, empty `pad` pixels around it): a
+/// smoothstep of the signed distance from each pixel centre to the edge.
+/// The distances are photocraft-algo's Euclidean distance transforms of
+/// the inside and the outside. `hard` must have room for half the feather.
+pub fn feather_mask(hard: &Mask, feather: f32) -> Mask {
+    if !feather.is_finite() || feather < 0.5 {
+        return hard.clone();
+    }
+    let w = hard.rect.width() as usize;
+    let h = hard.rect.height() as usize;
+    let inside: Vec<bool> = hard.data.iter().map(|v| *v >= 0.5).collect();
+    let outside: Vec<bool> = inside.iter().map(|v| !v).collect();
+    // Distance to the nearest inside pixel (outside pixels) and to the
+    // nearest outside pixel (inside pixels); the edge lies half a pixel
+    // short of either.
+    let to_inside = photocraft_algo::selection::edt(&inside, w, h);
+    let to_outside = photocraft_algo::selection::edt(&outside, w, h);
+    if to_inside.len() != w * h || to_outside.len() != w * h {
+        return hard.clone();
+    }
+    let data = (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let sd = if inside[i] {
+                0.5 - to_outside[i]
+            } else {
+                to_inside[i] - 0.5
+            };
+            let t = (0.5 - sd / feather).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        })
+        .collect();
+    Mask {
+        rect: hard.rect,
+        data,
+    }
+}
+
 /// Normalized 1D Gaussian, radius `ceil(3σ)`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Kernel {

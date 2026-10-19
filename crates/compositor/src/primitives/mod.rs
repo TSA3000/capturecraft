@@ -11,6 +11,7 @@ pub mod boolean;
 pub mod callout;
 
 use photocraft_doc::{LineCap, LineJoin, Path};
+use photocraft_geom::{Affine, Point};
 use photocraft_vector::{Polyline, StrokeStyle, flatten_path, shapes, stroke_polygons};
 
 use crate::scene::{DropShadowStyle, PointF32, ShapeGeometry, ShapeSpec, StrokeSpec};
@@ -64,6 +65,52 @@ impl Silhouette {
         comps.retain(|c| !c.is_empty());
         comps
     }
+}
+
+impl Silhouette {
+    /// The silhouette drawn through `t` (strokes turn and scale with it).
+    pub fn transformed(self, t: &Affine) -> Silhouette {
+        if *t == Affine::IDENTITY {
+            return self;
+        }
+        Silhouette {
+            fill: transform_polys(self.fill, t),
+            stroke: transform_polys(self.stroke, t),
+            outline: transform_lines(self.outline, t),
+        }
+    }
+}
+
+fn apply(t: &Affine, p: P) -> P {
+    let q = t.apply(Point::new(p.0, p.1));
+    (q.x, q.y)
+}
+
+/// Polygons through `t`; any that leave the coordinate range are dropped.
+pub fn transform_polys(polys: Vec<Vec<P>>, t: &Affine) -> Vec<Vec<P>> {
+    if *t == Affine::IDENTITY {
+        return polys;
+    }
+    polys
+        .into_iter()
+        .map(|p| p.into_iter().map(|q| apply(t, q)).collect::<Vec<P>>())
+        .filter(|p| p.iter().all(|q| coord_ok(q.0) && coord_ok(q.1)))
+        .collect()
+}
+
+/// Polylines through `t`; any that leave the coordinate range are dropped.
+pub fn transform_lines(lines: Vec<Polyline>, t: &Affine) -> Vec<Polyline> {
+    if *t == Affine::IDENTITY {
+        return lines;
+    }
+    lines
+        .into_iter()
+        .map(|mut l| {
+            l.pts.iter_mut().for_each(|q| *q = apply(t, *q));
+            l
+        })
+        .filter(|l| l.pts.iter().all(|q| coord_ok(q.0) && coord_ok(q.1)))
+        .collect()
 }
 
 pub fn translate(polys: &[Vec<P>], d: P) -> Vec<Vec<P>> {

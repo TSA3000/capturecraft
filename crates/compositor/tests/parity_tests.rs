@@ -492,3 +492,282 @@ fn cpu_oracle_is_deterministic_across_thread_counts() {
         _ => panic!("thread pool"),
     }
 }
+
+fn label(text: &str, frame: RectF32, size_px: f32, color: Color) -> TextSpec {
+    TextSpec {
+        runs: vec![TextRunSpec {
+            text: text.into(),
+            family: "Inter".into(),
+            size_px,
+            weight: 700,
+            italic: false,
+            color,
+            underline: false,
+            strike: false,
+        }],
+        frame,
+        align: TextAlign::Center,
+        valign: TextVAlign::Middle,
+        wrap: false,
+    }
+}
+
+fn stops(a: Color, b: Color) -> Vec<GradientStop> {
+    vec![
+        GradientStop {
+            offset: 0.0,
+            color: a,
+        },
+        GradientStop {
+            offset: 1.0,
+            color: b,
+        },
+    ]
+}
+
+/// Rotation about `(cx, cy)` by `deg` degrees (clockwise on screen).
+fn turn(cx: f64, cy: f64, deg: f64) -> Affine {
+    Affine::translate(-cx, -cy)
+        .then(&Affine::rotate(deg.to_radians()))
+        .then(&Affine::translate(cx, cy))
+}
+
+/// Everything the second pass added: a turned and scaled raster, a turned
+/// callout with wrapped, underlined text, a step badge with its number,
+/// linear and radial gradient fills, a feathered blur region and spotlight,
+/// and the shadow frame (with a gradient backdrop and a border) last.
+fn presentation_scene(surface: Arc<Surface>) -> RenderScene {
+    let mut c = callout();
+    c.body = CalloutBody::RoundedRect {
+        rect: RectF32::new(300.0, 60.0, 200.0, 90.0),
+        radius: 12.0,
+    };
+    c.tails.truncate(1);
+    c.text = Some(TextSpec {
+        runs: vec![
+            TextRunSpec {
+                text: "Click Save ".into(),
+                family: "Inter".into(),
+                size_px: 18.0,
+                weight: 400,
+                italic: false,
+                color: Color::BLACK,
+                underline: false,
+                strike: false,
+            },
+            TextRunSpec {
+                text: "then wait".into(),
+                family: "Inter".into(),
+                size_px: 18.0,
+                weight: 700,
+                italic: true,
+                color: Color::new(0.8, 0.1, 0.1, 1.0),
+                underline: true,
+                strike: false,
+            },
+        ],
+        frame: RectF32::new(310.0, 70.0, 180.0, 70.0),
+        align: TextAlign::Center,
+        valign: TextVAlign::Middle,
+        wrap: true,
+    });
+    let small = {
+        let mut s = Surface::new(PixelFormat::RGBA8);
+        let mut data = Vec::with_capacity(80 * 60 * 4);
+        for y in 0..60 {
+            for x in 0..80 {
+                let edge = x < 3 || y < 3 || x > 76 || y > 56;
+                data.extend(if edge {
+                    [0.1, 0.1, 0.1, 1.0]
+                } else {
+                    [x as f32 / 80.0, 0.6, y as f32 / 60.0, 1.0]
+                });
+            }
+        }
+        s.write_region(Rect::new(0, 0, 80, 60), &data);
+        Arc::new(s)
+    };
+    let object = SceneNode::new(
+        3,
+        1,
+        RenderNode::Raster(RasterSpec {
+            surface: small,
+            origin: [60, 250],
+            opacity: 0.9,
+        }),
+    )
+    .with_transform(
+        Affine::translate(-100.0, -280.0)
+            .then(&Affine::scale(1.5))
+            .then(&Affine::rotate(0.3))
+            .then(&Affine::translate(110.0, 290.0)),
+    );
+    RenderScene {
+        width: W,
+        height: H,
+        background: Color::WHITE,
+        nodes: vec![
+            raster(1, 1, surface),
+            SceneNode::new(
+                2,
+                1,
+                RenderNode::BackdropFilter(BackdropFilterSpec {
+                    shape: ShapeGeometry::Rect(RectF32::new(30.0, 30.0, 200.0, 120.0)),
+                    filter: BackdropFilterKind::GaussianBlur { sigma: 4.0 },
+                    feather_px: 16.0,
+                }),
+            ),
+            object,
+            SceneNode::new(4, 1, RenderNode::Callout(c)).with_transform(turn(400.0, 105.0, -8.0)),
+            SceneNode::new(
+                5,
+                1,
+                RenderNode::Shape(ShapeSpec {
+                    geometry: ShapeGeometry::Ellipse(RectF32::new(495.0, 160.0, 40.0, 40.0)),
+                    fill: Some(Color::new(0.9, 0.2, 0.1, 1.0).into()),
+                    stroke: Some(StrokeSpec::solid(Color::WHITE, 2.0)),
+                    shadow: Some(DropShadowStyle::default()),
+                    text: Some(label(
+                        "7",
+                        RectF32::new(495.0, 160.0, 40.0, 40.0),
+                        22.0,
+                        Color::WHITE,
+                    )),
+                }),
+            ),
+            SceneNode::new(
+                6,
+                1,
+                RenderNode::Shape(ShapeSpec {
+                    geometry: ShapeGeometry::RoundedRect {
+                        rect: RectF32::new(250.0, 200.0, 220.0, 70.0),
+                        radius: 10.0,
+                    },
+                    fill: Some(Paint::Linear {
+                        from: PointF32::new(250.0, 200.0),
+                        to: PointF32::new(470.0, 270.0),
+                        stops: stops(
+                            Color::new(0.1, 0.4, 0.95, 0.9),
+                            Color::new(0.95, 0.3, 0.6, 0.4),
+                        ),
+                    }),
+                    stroke: None,
+                    shadow: None,
+                    text: None,
+                }),
+            )
+            .with_transform(turn(360.0, 235.0, 12.0)),
+            SceneNode::new(
+                7,
+                1,
+                RenderNode::Shape(ShapeSpec {
+                    geometry: ShapeGeometry::Ellipse(RectF32::new(40.0, 300.0, 110.0, 110.0)),
+                    fill: Some(Paint::Radial {
+                        center: PointF32::new(95.0, 355.0),
+                        radius: 55.0,
+                        stops: vec![
+                            GradientStop {
+                                offset: 0.0,
+                                color: Color::new(1.0, 1.0, 0.3, 1.0),
+                            },
+                            GradientStop {
+                                offset: 0.6,
+                                color: Color::new(1.0, 0.5, 0.0, 0.8),
+                            },
+                            GradientStop {
+                                offset: 1.0,
+                                color: Color::new(0.6, 0.0, 0.0, 0.0),
+                            },
+                        ],
+                    }),
+                    stroke: None,
+                    shadow: None,
+                    text: None,
+                }),
+            ),
+            SceneNode::new(
+                8,
+                1,
+                RenderNode::Spotlight(SpotlightSpec {
+                    targets: vec![ShapeGeometry::RoundedRect {
+                        rect: RectF32::new(280.0, 40.0, 260.0, 260.0),
+                        radius: 20.0,
+                    }],
+                    dim_opacity: 0.45,
+                    dim_color: Color::BLACK,
+                    feather_px: 24.0,
+                    blur_sigma: 0.0,
+                }),
+            ),
+            SceneNode::new(
+                9,
+                1,
+                RenderNode::ShadowFrame(ShadowFrameSpec {
+                    margin: 36,
+                    corner_radius: 14.0,
+                    backdrop: Paint::Linear {
+                        from: PointF32::new(0.0, 0.0),
+                        to: PointF32::new(712.0, 492.0),
+                        stops: stops(
+                            Color::rgba8(0xE2, 0xE8, 0xF0, 255),
+                            Color::rgba8(0x1E, 0x29, 0x3B, 255),
+                        ),
+                    },
+                    shadow: Some(DropShadowStyle {
+                        color: Color::new(0.06, 0.09, 0.16, 0.35),
+                        offset: PointF32::new(0.0, 8.0),
+                        blur_sigma: 12.0,
+                        spread: 0.0,
+                    }),
+                    border: Some(StrokeSpec::solid(Color::new(1.0, 1.0, 1.0, 0.7), 2.0)),
+                }),
+            ),
+        ],
+    }
+}
+
+#[test]
+fn transforms_text_gradients_feathers_and_the_shadow_frame_match() {
+    let scene = presentation_scene(Arc::new(base_surface(9)));
+    let reference = cpu(&scene);
+    assert_eq!((reference.width, reference.height), (W + 72, H + 72));
+    // The frame's corner shows the backdrop, the centre the canvas.
+    let corner = reference.pixel(2, 2);
+    assert!((corner[0] - 0xE2 as f32 / 255.0).abs() < 0.02, "{corner:?}");
+    assert_eq!(reference.pixel(1, 1)[3], 1.0);
+    // The badge number is drawn (white inside the red badge).
+    let badge = (0..40)
+        .flat_map(|dy| (0..40).map(move |dx| (531 + dx, 196 + dy)))
+        .map(|(x, y)| reference.pixel(x, y))
+        .filter(|p| p[1] > 0.9 && p[2] > 0.9)
+        .count();
+    assert!(badge > 20, "no label pixels in the badge ({badge})");
+    assert_parity(&scene, "transforms/text/gradients/feathers/frame", true);
+}
+
+#[test]
+fn transform_changes_alone_redraw_on_both_backends() {
+    let surface = Arc::new(base_surface(9));
+    let scene = presentation_scene(surface.clone());
+    let mut moved = presentation_scene(surface);
+    // Same revision, new transform: the caches must not serve the old one.
+    moved.nodes[3] = moved.nodes[3]
+        .clone()
+        .with_transform(turn(400.0, 105.0, 20.0));
+    let mut c = CpuCompositor::new();
+    let _ = c.update(&scene, &DirtyRegion::none());
+    let stats = c.update(&moved, &DirtyRegion::none()).unwrap_or_default();
+    assert!(!stats.full && stats.tiles > 0, "{stats:?}");
+    let reference = cpu(&moved);
+    assert_eq!(c.frame(), Some(reference.clone()));
+    with_gpu(true, |g| {
+        let _ = g
+            .render(&scene)
+            .unwrap_or_else(|e| panic!("GPU render failed: {e}"));
+        let frame = g
+            .render(&moved)
+            .unwrap_or_else(|e| panic!("GPU render failed: {e}"));
+        let cmp = parity::compare(&reference, &frame).unwrap_or_else(|| panic!("size mismatch"));
+        assert!(cmp.passes(), "after a transform change: {}", report(&cmp));
+    });
+}

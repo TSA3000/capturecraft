@@ -3,9 +3,10 @@
 //! Runs the prepared ops of [`crate::prepare`] as compute dispatches
 //! (`shaders/effects.wgsl`) over a storage-buffer canvas in the same
 //! tile-major layout as [`TiledCanvas`]. Per node, everything that does not
-//! change between frames lives on the GPU, keyed by `(NodeId, RevisionId)`:
-//! coverage masks (already blurred for shadows and feathers), blur weights
-//! and raster tiles. When a raster node gets a new revision with the same
+//! change between frames lives on the GPU, keyed by `(NodeId, RevisionId,
+//! transform)`: coverage masks (already blurred for shadows, feathered for
+//! spotlights and blur regions), gradient stops, blur weights and raster
+//! tiles. When a raster node gets a new revision with the same
 //! tile grid, only the tiles whose copy-on-write pointer changed are
 //! uploaded again. A frame then costs one dispatch chain and no uploads.
 //!
@@ -17,16 +18,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use photocraft_geom::{Rect, TILE_SIZE, TileCoord};
+use photocraft_geom::{Affine, Rect, TILE_SIZE, TileCoord};
 use photocraft_raster::Surface;
 use wgpu::util::DeviceExt;
 
 use crate::CompositorError;
 use crate::canvas::{Frame, TILE_PX, TiledCanvas, tiles_for};
-use crate::effects::Kernel;
 use crate::effects::backdrop::LensSampler;
 use crate::effects::cutout::{CutParams, OCTAVES};
-use crate::prepare::{Op, PixelateOp, clamp_into, prepare};
+use crate::effects::{Kernel, PaintPx, Px};
+use crate::prepare::{FrameOp, Op, PixelateOp, clamp_into, prepare};
 use crate::scene::{NodeId, RenderNode, RenderScene, RevisionId};
 
 const SHADER: &str = include_str!("shaders/effects.wgsl");
@@ -73,6 +74,8 @@ struct FillParams {
     clip_rect: [i32; 4],
     flags: [u32; 4],
     color: [f32; 4],
+    paint: [u32; 4],
+    geo: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -140,6 +143,20 @@ struct CutUniform {
 struct PresentParams {
     size: [u32; 4],
 }
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FrameUniform {
+    src: [u32; 4],
+    dst: [u32; 4],
+    shadow_rect: [i32; 4],
+    clip_rect: [i32; 4],
+    border_rect: [i32; 4],
+    shadow_color: [f32; 4],
+    border_color: [f32; 4],
+    color: [f32; 4],
+    paint: [u32; 4],
+    geo: [f32; 4],
+}
 
 struct Pipelines {
     clear: wgpu::ComputePipeline,
@@ -155,7 +172,17 @@ struct Pipelines {
     magnifier: wgpu::ComputePipeline,
     spotlight: wgpu::ComputePipeline,
     cutout: wgpu::ComputePipeline,
+    frame: wgpu::ComputePipeline,
     present: wgpu::ComputePipeline,
+}
+
+/// A paint on the GPU: the uniform fields of `paint_at` and the stops.
+#[derive(Clone)]
+struct GpuPaint {
+    paint: [u32; 4],
+    geo: [f32; 4],
+    color: [f32; 4],
+    stops: Option<wgpu::Buffer>,
 }
 
 /// A mask on the GPU (row-major over `rect`).
@@ -177,7 +204,7 @@ enum GpuOp {
         mask: GpuMask,
         clip: Option<GpuMask>,
         invert: bool,
-        color: [f32; 4],
+        paint: GpuPaint,
     },
     Blur {
         mask: GpuMask,
@@ -198,10 +225,18 @@ enum GpuOp {
         dim: [f32; 4],
     },
     Cut(CutParams),
+    Frame {
+        op: Box<FrameOp>,
+        backdrop: GpuPaint,
+        shadow: Option<(GpuMask, Px)>,
+        clip: GpuMask,
+        border: Option<(GpuMask, Px)>,
+    },
 }
 
 struct GpuNode {
     revision: RevisionId,
+    transform: Option<Affine>,
     stage: (u32, u32),
     /// The prepared op (for its data-flow rectangles) and its GPU form.
     ops: Vec<(Op, GpuOp)>,
@@ -264,6 +299,7 @@ impl GpuCompositor {
             magnifier: p("magnifier"),
             spotlight: p("spotlight"),
             cutout: p("cutout"),
+            frame: p("frame"),
             present: p("present"),
         };
         if let Some(e) = pollster::block_on(scope.pop()) {
@@ -332,6 +368,10 @@ impl GpuCompositor {
 
     pub fn device(&self) -> &wgpu::Device {
         &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Drops every cached node (e.g. when another document is shown and
@@ -514,6 +554,30 @@ impl GpuCompositor {
         })
     }
 
+    fn paint(&self, p: &PaintPx) -> GpuPaint {
+        match p {
+            PaintPx::Solid(c) => GpuPaint {
+                paint: [0; 4],
+                geo: [0.0; 4],
+                color: *c,
+                stops: None,
+            },
+            PaintPx::Gradient(g) => {
+                let data: Vec<f32> = g
+                    .stops
+                    .iter()
+                    .flat_map(|(o, c)| [*o, 0.0, 0.0, 0.0, c[0], c[1], c[2], c[3]])
+                    .collect();
+                GpuPaint {
+                    paint: [if g.radial { 2 } else { 1 }, g.stops.len() as u32, 0, 0],
+                    geo: g.geo,
+                    color: [0.0; 4],
+                    stops: Some(self.storage_f32(&data)),
+                }
+            }
+        }
+    }
+
     /// Writes surface tiles `coords` into an image buffer whose tile grid
     /// covers `grid` (surface coordinates).
     fn upload_tiles(
@@ -547,12 +611,13 @@ impl GpuCompositor {
         &self,
         enc: &mut wgpu::CommandEncoder,
         node: &RenderNode,
+        transform: Option<&Affine>,
         size: (u32, u32),
         old: Option<GpuNode>,
     ) -> Result<GpuNode, GpuError> {
-        let prepared = prepare(node, size);
+        let prepared = prepare(node, transform, size);
         let raster = match node {
-            RenderNode::Raster(r) => Some((r.surface.clone(), r.origin)),
+            RenderNode::Raster(r) if transform.is_none() => Some((r.surface.clone(), r.origin)),
             _ => None,
         };
         let mut ops = Vec::with_capacity(prepared.ops.len());
@@ -617,7 +682,7 @@ impl GpuCompositor {
                         mask,
                         clip,
                         invert: f.invert,
-                        color: f.color,
+                        paint: self.paint(&f.paint),
                     }
                 }
                 Op::Blur(b) => GpuOp::Blur {
@@ -637,7 +702,7 @@ impl GpuCompositor {
                     mask: s
                         .mask
                         .as_ref()
-                        .map(|m| self.mask(enc, m, s.feather.as_deref()))
+                        .map(|m| self.mask(enc, m, None))
                         .transpose()?,
                     blur: s
                         .blur
@@ -646,11 +711,27 @@ impl GpuCompositor {
                     dim: [s.dim_rgb[0], s.dim_rgb[1], s.dim_rgb[2], s.dim_a],
                 },
                 Op::Cut(c) => GpuOp::Cut(*c),
+                Op::Frame(f) => GpuOp::Frame {
+                    op: Box::new(f.clone()),
+                    backdrop: self.paint(&f.backdrop),
+                    shadow: f
+                        .shadow
+                        .as_ref()
+                        .map(|(m, c)| Ok::<_, GpuError>((self.mask(enc, m, None)?, *c)))
+                        .transpose()?,
+                    clip: self.mask(enc, &f.clip, None)?,
+                    border: f
+                        .border
+                        .as_ref()
+                        .map(|(m, c)| Ok::<_, GpuError>((self.mask(enc, m, None)?, *c)))
+                        .transpose()?,
+                },
             };
             ops.push((op.clone(), g));
         }
         Ok(GpuNode {
             revision: RevisionId::default(),
+            transform: transform.copied(),
             stage: size,
             ops,
             out_size: prepared.out_size(size),
@@ -731,13 +812,12 @@ impl GpuCompositor {
         let mut size = size0;
         let mut order = Vec::with_capacity(scene.nodes.len());
         for n in &scene.nodes {
-            let fresh = self
-                .cache
-                .get(&n.id)
-                .is_some_and(|c| c.revision == n.revision && c.stage == size);
+            let fresh = self.cache.get(&n.id).is_some_and(|c| {
+                c.revision == n.revision && c.transform == n.transform && c.stage == size
+            });
             if !fresh {
                 let old = self.cache.remove(&n.id);
-                let mut node = self.build_node(enc, &n.node, size, old)?;
+                let mut node = self.build_node(enc, &n.node, n.transform.as_ref(), size, old)?;
                 node.revision = n.revision;
                 self.cache.insert(n.id, node);
             }
@@ -798,7 +878,7 @@ impl GpuCompositor {
                         mask,
                         clip,
                         invert,
-                        color,
+                        paint,
                     } => {
                         let (cb, cr) = clip
                             .as_ref()
@@ -809,14 +889,17 @@ impl GpuCompositor {
                             mask_rect: xywh(mask.rect),
                             clip_rect: xywh(cr),
                             flags: [u32::from(clip.is_some()), u32::from(*invert), 0, 0],
-                            color: *color,
+                            color: paint.color,
+                            paint: paint.paint,
+                            geo: paint.geo,
                         };
+                        let stops = paint.stops.as_ref().unwrap_or(&self.dummy);
                         self.run(
                             enc,
                             &self.pipes.fill,
                             12,
                             &p,
-                            &[(0, &canvas), (2, &mask.buf), (3, cb)],
+                            &[(0, &canvas), (2, &mask.buf), (3, cb), (9, stops)],
                             (w.width(), w.height()),
                         );
                     }
@@ -968,6 +1051,49 @@ impl GpuCompositor {
                         );
                         canvas = dst;
                     }
+                    GpuOp::Frame {
+                        op: f,
+                        backdrop,
+                        shadow,
+                        clip,
+                        border,
+                    } => {
+                        slot = 1 - slot.min(1);
+                        let dst = self.canvas_buffer(slot, f.dst)?;
+                        let flags =
+                            u32::from(shadow.is_some()) | (u32::from(border.is_some()) << 1);
+                        let p = FrameUniform {
+                            src: [f.src.0, f.src.1, tiles_for(f.src.0), f.margin as u32],
+                            dst: [f.dst.0, f.dst.1, tiles_for(f.dst.0), flags],
+                            shadow_rect: shadow.as_ref().map_or([0; 4], |(m, _)| xywh(m.rect)),
+                            clip_rect: xywh(clip.rect),
+                            border_rect: border.as_ref().map_or([0; 4], |(m, _)| xywh(m.rect)),
+                            shadow_color: shadow.as_ref().map_or([0.0; 4], |(_, c)| *c),
+                            border_color: border.as_ref().map_or([0.0; 4], |(_, c)| *c),
+                            color: backdrop.color,
+                            paint: backdrop.paint,
+                            geo: backdrop.geo,
+                        };
+                        let sb = shadow.as_ref().map_or(&self.dummy, |(m, _)| &m.buf);
+                        let bb = border.as_ref().map_or(&self.dummy, |(m, _)| &m.buf);
+                        let stops = backdrop.stops.as_ref().unwrap_or(&self.dummy);
+                        self.run(
+                            enc,
+                            &self.pipes.frame,
+                            23,
+                            &p,
+                            &[
+                                (0, &dst),
+                                (1, &canvas),
+                                (2, sb),
+                                (3, &clip.buf),
+                                (22, bb),
+                                (9, stops),
+                            ],
+                            f.dst,
+                        );
+                        canvas = dst;
+                    }
                 }
                 size = op.out_size(size);
             }
@@ -1024,6 +1150,16 @@ impl GpuCompositor {
     /// Renders into `target` (an `Rgba8Unorm` texture with
     /// `STORAGE_BINDING`, at least the frame size) as premultiplied RGBA,
     /// for display. Returns the frame size.
+    ///
+    /// The bytes are the compositor's own values, premultiplied and
+    /// sRGB-encoded, quantized without any transfer function. That is what
+    /// egui-wgpu 0.36 expects of a native texture: its `egui.wgsl`
+    /// (`fs_main_linear_framebuffer` / `fs_main_gamma_framebuffer`)
+    /// multiplies the sampled texel, as premultiplied gamma-space colour,
+    /// with the gamma-space vertex colour. The target must therefore stay
+    /// `Rgba8Unorm`: an `Rgba8UnormSrgb` view would decode the bytes to
+    /// linear on sampling and the canvas would show too dark (double
+    /// gamma). `tests/color_encoding.rs` pins the bytes.
     pub fn render_to_texture(
         &mut self,
         scene: &RenderScene,
