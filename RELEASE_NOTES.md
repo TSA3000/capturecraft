@@ -1,3 +1,32 @@
+# v0.24.0
+
+## Changes
+
+- **Text formatting toolbar**: select a text or callout and a toolbar floats above it with
+  the text colour (and an eyedropper), font, size, **Bold**, *Italic*, Underline and
+  left / centre / right / justified alignment. Every click is one undo step.
+- **Advanced text properties** in the drawer: font, size, colour, outline width, B / I / U,
+  horizontal and vertical (top / middle / bottom) alignment, opacity and padding. The drawer
+  and the toolbar always show the same values; Fill, Outline and Shadow above them show the
+  selected text's own style.
+- **Text gizmo**: a selected text has a dashed border, round handles and a green rotation
+  knob; drag the yellow diamond in the top-right corner to change a text box's padding.
+  The Text and Callout tools can resize and rotate the selected text too, and a text you
+  just typed stays selected.
+- **Filled and outlined text boxes**: the Text tool now has Fill and Outline colours.
+- **Live eyedropper**: the 💧 / pipette buttons show the colour under the pointer as
+  `R:255 G:255 B:255` before you click, and pick from everything on the canvas
+  (annotations included), not only the capture. Esc cancels.
+- **One Blur tool** for blur and pixelate: four blur and four pixelate Quick Style tiles,
+  then Type and Intensity (1–100). Changes also apply to the selected blurs.
+- **Sharper blur and mosaic** on the CPU (export, clipboard), matching the GPU canvas.
+
+## Upgrading
+
+- Install over v0.23.0; nothing else to do. Toolbar layouts with the old Pixelate tool show
+  it as Blur.
+- Documents with justified text need v0.24.0 or later to open.
+
 # v0.23.0
 
 ## Changes

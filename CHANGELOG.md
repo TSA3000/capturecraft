@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.24.0 (2026-10-20)
+
+- Floating text toolbar (colour, eyedropper, font, size, B / I / U, alignment incl. justify)
+  and an Advanced section in Properties (font, size, colour, line width, B / I / U,
+  horizontal and vertical alignment, opacity, padding); both edit the selected text.
+- Text gizmo: dashed border, round handles, green rotation knob, padding diamond on text
+  boxes; usable with the Text and Callout tools. New text stays selected.
+- Text tool Fill and Outline; the inspector shows the selected text's style.
+- Eyedropper: live RGB tooltip, samples the composited canvas, Esc cancels.
+- Blur and Pixelate merged into one Blur tool with preset tiles, Type and Intensity.
+- Compositor: CPU blur and mosaic on photocraft-algo.
+- Engine: `annotation.setTextFormat`; `annotation.setBackdropFilter`; `annotation.addText`
+  takes `fill` and `stroke`. Format: `justify` text alignment.
+
 ## v0.23.0 (2026-10-19)
 
 - Drawer split into two PhotoCraft-style panel groups: Properties / Effects above, Layers /
