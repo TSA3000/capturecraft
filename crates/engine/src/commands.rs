@@ -151,6 +151,7 @@ static ALL: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
         .chain(edit_commands::REGISTRY)
         .chain(smart_commands::REGISTRY)
         .chain(transform_commands::REGISTRY)
+        .chain(crate::node_commands::REGISTRY)
         .copied()
         .collect()
 });

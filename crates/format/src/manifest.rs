@@ -602,6 +602,9 @@ pub struct AnnotationNode {
     /// replaces its own output.
     #[serde(default)]
     pub generated_by: Option<String>,
+    /// Nodes sharing a group id select, move and arrange together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u64>,
     pub kind: NodeKind,
 }
 
@@ -641,6 +644,7 @@ impl AnnotationNode {
             opacity: 1.0,
             rotation_rad: 0.0,
             generated_by: None,
+            group: None,
             kind: NodeKind::Known(annotation),
         }
     }

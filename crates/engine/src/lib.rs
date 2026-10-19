@@ -15,6 +15,7 @@
 
 pub mod commands;
 pub mod edit_commands;
+pub mod node_commands;
 pub mod render;
 pub mod smart_commands;
 pub mod transform_commands;
@@ -403,6 +404,20 @@ impl DocState {
 
     pub fn can_redo(&self) -> bool {
         !self.history.redo.is_empty()
+    }
+
+    /// The undo stack, oldest first (each label is an edit that was made),
+    /// and the redo stack, next first (edits that were undone).
+    pub fn history_labels(&self) -> (Vec<&str>, Vec<&str>) {
+        let undo = self.history.undo.iter().map(|s| s.label.as_str()).collect();
+        let redo = self
+            .history
+            .redo
+            .iter()
+            .rev()
+            .map(|s| s.label.as_str())
+            .collect();
+        (undo, redo)
     }
 
     pub fn undo_label(&self) -> Option<&str> {

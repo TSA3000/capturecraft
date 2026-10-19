@@ -227,7 +227,7 @@ pub enum RegionKind {
 }
 
 /// A region tool's area: positive size, `kind`'s outline.
-fn region_of(
+pub(crate) fn region_of(
     cmd: &str,
     bounds: RectF,
     kind: RegionKind,
@@ -361,7 +361,7 @@ pub fn border_color(p: &Pixels) -> Color {
         .map_or(Color::WHITE, |([r, g, b, a], _)| Color::rgba(r, g, b, a))
 }
 
-fn expand_bounds(s: &mut Session, p: &Value) -> Result<Value> {
+pub(crate) fn expand_bounds(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "canvas.expandBounds";
     let p: ExpandBoundsParams = parse(CMD, p)?;
     let background = match p.background {
