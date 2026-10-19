@@ -8,8 +8,13 @@
 //! Space + drag, the wheel) and cursor-centred zoom (Ctrl + wheel, pinch),
 //! and on top of it:
 //!
-//! - eight expansion handles outside the canvas edge; dragging one out
-//!   previews the new bounds and commits `canvas.expandBounds`;
+//! - eight small dark squares on the canvas border (corners and edge
+//!   midpoints); dragging one out adds padding (inward trims), previews
+//!   the new bounds and commits `canvas.expandBounds`;
+//! - the Selection tool's marquee: drag to select a region of the capture,
+//!   drag inside it to move its pixels (`smart.moveObject`), Delete to
+//!   remove them (`smart.deleteObject`), with the hole left transparent or
+//!   filled by the analyzer (`ToolOptions::selection.background`);
 //! - selection outlines turned with the node's rotation and, for a single
 //!   selection with the Move tool, the transform gizmo ([`super::gizmo`]):
 //!   eight resize handles (Shift keeps the aspect, Alt resizes from the
@@ -326,25 +331,65 @@ pub fn zoom_about(
 // ---------------------------------------------------------------------------
 // Expansion handles
 
-/// The eight handles around `canvas` (screen rect), outside its edge.
+/// The eight resize squares of `canvas` (screen rect), centred on its
+/// corners and edge midpoints.
 pub fn expand_handle_rects(canvas: ERect, t: &Tokens) -> [(ResizeHandle, ERect); 8] {
-    let g = t.expand_handle_gap + t.expand_handle_thickness / 2.0;
-    let (len, th) = (t.expand_handle_len, t.expand_handle_thickness);
-    let corner = Vec2::splat(th * 1.6);
+    let side = Vec2::splat(t.canvas_handle_size);
     let (c, r) = (canvas.center(), canvas);
-    let horiz = |y: f32| ERect::from_center_size(pos2(c.x, y), vec2(len, th));
-    let vert = |x: f32| ERect::from_center_size(pos2(x, c.y), vec2(th, len));
-    let at = |x: f32, y: f32| ERect::from_center_size(pos2(x, y), corner);
+    let at = |x: f32, y: f32| ERect::from_center_size(pos2(x, y), side);
     [
-        (ResizeHandle::N, horiz(r.min.y - g)),
-        (ResizeHandle::S, horiz(r.max.y + g)),
-        (ResizeHandle::W, vert(r.min.x - g)),
-        (ResizeHandle::E, vert(r.max.x + g)),
-        (ResizeHandle::NW, at(r.min.x - g, r.min.y - g)),
-        (ResizeHandle::NE, at(r.max.x + g, r.min.y - g)),
-        (ResizeHandle::SW, at(r.min.x - g, r.max.y + g)),
-        (ResizeHandle::SE, at(r.max.x + g, r.max.y + g)),
+        (ResizeHandle::N, at(c.x, r.min.y)),
+        (ResizeHandle::S, at(c.x, r.max.y)),
+        (ResizeHandle::W, at(r.min.x, c.y)),
+        (ResizeHandle::E, at(r.max.x, c.y)),
+        (ResizeHandle::NW, at(r.min.x, r.min.y)),
+        (ResizeHandle::NE, at(r.max.x, r.min.y)),
+        (ResizeHandle::SW, at(r.min.x, r.max.y)),
+        (ResizeHandle::SE, at(r.max.x, r.max.y)),
     ]
+}
+
+fn inside(r: RectF, p: Point) -> bool {
+    p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h
+}
+
+/// The marquee's base-space rect as `smart.*Object` wants it.
+fn marquee_base(m: &capturecraft_format::Manifest, r: RectF) -> Option<Value> {
+    let b = capturecraft_engine::commands::canvas_rect_to_base(m, r)?;
+    Some(json!({ "x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1 }))
+}
+
+/// `smart.moveObject` for a marquee dragged by `(dx, dy)` canvas pixels.
+pub fn move_selection_intent(
+    editor: &EditorState,
+    m: &capturecraft_format::Manifest,
+    dx: f64,
+    dy: f64,
+) -> Option<UiIntent> {
+    let rect = marquee_base(m, editor.canvas.marquee?)?;
+    (dx != 0.0 || dy != 0.0).then(|| {
+        UiIntent::command(
+            "smart.moveObject",
+            json!({
+                "rect": rect,
+                "by": { "x": dx, "y": dy },
+                "matte": false,
+                "background": editor.tools.selection.background.param(),
+            }),
+        )
+    })
+}
+
+/// `smart.deleteObject` for the marquee.
+pub fn delete_selection_intent(
+    editor: &EditorState,
+    m: &capturecraft_format::Manifest,
+) -> Option<UiIntent> {
+    let rect = marquee_base(m, editor.canvas.marquee?)?;
+    Some(UiIntent::command(
+        "smart.deleteObject",
+        json!({ "rect": rect, "background": editor.tools.selection.background.param() }),
+    ))
 }
 
 /// Margins `[left, top, right, bottom]` a finished handle drag adds.
@@ -630,13 +675,13 @@ impl CanvasViewport<'_> {
                 let fill = if hot {
                     t.expand_preview
                 } else {
-                    t.expand_handle_fill
+                    t.canvas_handle_fill
                 };
                 painter.rect(
                     rect,
-                    Tokens::corner(t.radius_pill),
+                    0.0,
                     fill,
-                    stroke(1.0, t.expand_handle_stroke),
+                    stroke(1.0, t.canvas_handle_stroke),
                     StrokeKind::Outside,
                 );
                 if hot {
@@ -676,7 +721,7 @@ impl CanvasViewport<'_> {
                 dashed_rect(&painter, preview, t.expand_preview);
                 badge(
                     &painter,
-                    preview.center_bottom() + vec2(0.0, t.space_lg + t.expand_handle_gap),
+                    preview.center_bottom() + vec2(0.0, t.space_lg),
                     &format!("{} × {} px", size.width, size.height),
                     t,
                 );
@@ -1058,6 +1103,10 @@ impl CanvasViewport<'_> {
                     None if !shift => editor.canvas.selection.clear(),
                     None => {}
                 }
+            } else if tool == ToolId::Selection {
+                if !editor.canvas.marquee.is_some_and(|r| inside(r, c)) {
+                    editor.canvas.marquee = None;
+                }
             } else if let Some(i) = draw_intent(editor, c, c) {
                 intents.push(i);
             }
@@ -1093,13 +1142,22 @@ impl CanvasViewport<'_> {
                     from: along(c),
                     to: along(c),
                 }),
+                (ToolId::Selection, _, _) => Some(match editor.canvas.marquee {
+                    Some(r) if inside(r, c) => CanvasGesture::MoveMarquee { from: c, to: c },
+                    _ => CanvasGesture::Marquee { from: c, to: c },
+                }),
                 _ => Some(CanvasGesture::Draw { from: c, to: c }),
             };
         }
         if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
             let c = to_canvas(p);
             match &mut editor.canvas.gesture {
-                Some(CanvasGesture::Draw { to, .. } | CanvasGesture::MoveSelection { to, .. }) => {
+                Some(
+                    CanvasGesture::Draw { to, .. }
+                    | CanvasGesture::MoveSelection { to, .. }
+                    | CanvasGesture::Marquee { to, .. }
+                    | CanvasGesture::MoveMarquee { to, .. },
+                ) => {
                     *to = c;
                 }
                 Some(CanvasGesture::CutOut { to, .. }) => *to = along(c),
@@ -1122,6 +1180,56 @@ impl CanvasViewport<'_> {
         if let Some(CanvasGesture::Draw { from, to }) = &editor.canvas.gesture {
             draw_preview(&painter, &xf, tool, *from, *to, t);
         }
+        if tool == ToolId::Selection {
+            let shown = match &editor.canvas.gesture {
+                Some(CanvasGesture::Marquee { from, to }) => Some(normalized(*from, *to)),
+                Some(CanvasGesture::MoveMarquee { from, to }) => {
+                    editor.canvas.marquee.map(|mut r| {
+                        r.translate(to.x - from.x, to.y - from.y);
+                        r
+                    })
+                }
+                _ => editor.canvas.marquee,
+            };
+            if let Some(r) = shown {
+                let sr = xf.rect_to_screen(r);
+                painter.rect_stroke(sr, 0.0, stroke(1.0, t.gizmo_outline), StrokeKind::Middle);
+                dashed_rect(&painter, sr, t.handle_fill);
+                if let Some(b) = capturecraft_engine::commands::canvas_rect_to_base(m, r) {
+                    badge(
+                        &painter,
+                        sr.center_bottom() + vec2(0.0, t.space_lg),
+                        &format!("{} × {} px", b.width(), b.height()),
+                        t,
+                    );
+                }
+            }
+            if let Some(p) = resp.hover_pos()
+                && editor
+                    .canvas
+                    .marquee
+                    .is_some_and(|r| inside(r, to_canvas(p)))
+            {
+                ui.ctx().set_cursor_icon(CursorIcon::Move);
+            }
+            let (delete, escape) = ui.input(|i| {
+                (
+                    i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            let typing = ui.ctx().memory(|mem| mem.focused().is_some());
+            if !typing
+                && delete
+                && let Some(i) = delete_selection_intent(editor, m)
+            {
+                intents.push(i);
+                editor.canvas.marquee = None;
+            }
+            if !typing && escape {
+                editor.canvas.marquee = None;
+            }
+        }
         if resp.drag_stopped() {
             match editor.canvas.gesture.take() {
                 Some(CanvasGesture::Draw { from, to }) => {
@@ -1137,6 +1245,19 @@ impl CanvasViewport<'_> {
                             "annotation.move",
                             json!({ "ids": ids, "dx": dx, "dy": dy }),
                         ));
+                    }
+                }
+                Some(CanvasGesture::Marquee { from, to }) => {
+                    let r = normalized(from, to);
+                    editor.canvas.marquee = (r.w >= 2.0 && r.h >= 2.0).then_some(r);
+                }
+                Some(CanvasGesture::MoveMarquee { from, to }) => {
+                    if let Some(i) = move_selection_intent(editor, m, to.x - from.x, to.y - from.y)
+                    {
+                        intents.push(i);
+                        // The pixels are a smart object now; the hole is
+                        // not a selection.
+                        editor.canvas.marquee = None;
                     }
                 }
                 Some(CanvasGesture::CutOut { from, to }) if (to - from).abs() >= 1.0 => {
@@ -1159,7 +1280,10 @@ impl CanvasViewport<'_> {
                 _ => {}
             }
         }
-        if resp.hovered() && (editor.canvas.eyedropper.is_some() || tool != ToolId::Move) {
+        if resp.hovered()
+            && (editor.canvas.eyedropper.is_some()
+                || !matches!(tool, ToolId::Move | ToolId::Selection))
+        {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
         resp
@@ -1608,14 +1732,54 @@ mod tests {
     }
 
     #[test]
-    fn handles_sit_outside_the_canvas() {
+    fn handles_sit_on_the_corners_and_edge_midpoints() {
         let canvas = ERect::from_min_size(pos2(100.0, 100.0), vec2(400.0, 300.0));
-        let rects = expand_handle_rects(canvas, &Tokens::default());
-        for (h, r) in rects {
-            assert!(!canvas.intersects(r), "{h:?}");
+        let t = Tokens::default();
+        let rects = expand_handle_rects(canvas, &t);
+        let at = |h| rects.iter().find(|(x, _)| *x == h).unwrap().1;
+        assert_eq!(at(ResizeHandle::NW).center(), canvas.min);
+        assert_eq!(at(ResizeHandle::SE).center(), canvas.max);
+        assert_eq!(at(ResizeHandle::N).center(), canvas.center_top());
+        assert_eq!(at(ResizeHandle::E).center(), canvas.right_center());
+        for (_, r) in rects {
+            assert_eq!(r.width(), t.canvas_handle_size);
         }
-        let n = rects.iter().find(|(h, _)| *h == ResizeHandle::N).unwrap().1;
-        assert!((n.center().x - canvas.center().x).abs() < 1e-3 && n.max.y < canvas.min.y);
+    }
+
+    #[test]
+    fn marquee_moves_and_deletes_run_in_the_engine() {
+        use crate::state::SelectionFill;
+        let mut s = capturecraft_engine::Session::new();
+        let size = Size::new(80, 60);
+        s.open(
+            capturecraft_format::Manifest::new(size),
+            capturecraft_engine::Pixels::new(size, vec![200; 80 * 60 * 4]),
+        )
+        .unwrap();
+        // Healing needs the analyzer; Transparent does not heal.
+        let mut e = EditorState::default();
+        let m = s.active().unwrap().manifest.clone();
+        assert!(delete_selection_intent(&e, &m).is_none());
+        e.canvas.marquee = Some(RectF::new(10.0, 10.0, 20.0, 10.0));
+        assert!(move_selection_intent(&e, &m, 0.0, 0.0).is_none());
+        let Some(UiIntent::Command { id, params }) = move_selection_intent(&e, &m, 30.0, 5.0)
+        else {
+            unreachable!("a move intent")
+        };
+        assert_eq!(id, "smart.moveObject");
+        assert_eq!(
+            params["rect"],
+            json!({ "x0": 10, "y0": 10, "x1": 30, "y1": 20 })
+        );
+        assert_eq!(params["background"], "transparent");
+        e.tools.selection.background = SelectionFill::AutoFill;
+        let Some(UiIntent::Command { params, .. }) = delete_selection_intent(&e, &m) else {
+            unreachable!("a delete intent")
+        };
+        assert_eq!(params["background"], "heal");
+        // Without an analyzer installed the smart commands are disabled,
+        // and the document is unchanged.
+        assert!(s.run(id, &params).is_err());
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //! its [`StylePreset`]) and `RecentTrayItem` is [`TrayItem`].
 
 use capturecraft_format::{
-    Axis, Color, DropShadow, Fill, FontSpec, HeadStyle, NodeId, Numbering, Offset, Stroke,
+    Axis, Color, DropShadow, Fill, FontSpec, HeadStyle, NodeId, Numbering, Offset, RectF, Stroke,
 };
 use photocraft_geom::{Point, Rect, Size};
 use serde::{Deserialize, Serialize};
@@ -487,10 +487,82 @@ pub struct HoverTarget {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolOptions {
+    pub selection: SelectionOptions,
     pub step: StepOptions,
     pub callout: CalloutOptions,
     pub cut_out: CutOutOptions,
     pub simplify: SimplifyOptions,
+}
+
+/// The Selection tool's mode tiles and options.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SelectionOptions {
+    pub mode: SelectionMode,
+    /// Snap the marquee to the UI element under the cursor (the analyzer's).
+    pub snap_to_object: bool,
+    /// What fills the hole a moved or deleted selection leaves.
+    pub background: SelectionFill,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    #[default]
+    Rectangle,
+    Ellipse,
+    Polygon,
+    Lasso,
+}
+
+impl SelectionMode {
+    pub const ALL: [SelectionMode; 4] = [
+        SelectionMode::Rectangle,
+        SelectionMode::Ellipse,
+        SelectionMode::Polygon,
+        SelectionMode::Lasso,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SelectionMode::Rectangle => "Rectangle",
+            SelectionMode::Ellipse => "Ellipse",
+            SelectionMode::Polygon => "Polygon",
+            SelectionMode::Lasso => "Freehand Lasso",
+        }
+    }
+
+    /// The engine moves and heals rectangles only; the shaped modes wait
+    /// for masked regions.
+    pub fn available(self) -> bool {
+        self == SelectionMode::Rectangle
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionFill {
+    #[default]
+    Transparent,
+    /// Inpainted by the UI analyzer (`capturecraft-ocr`).
+    AutoFill,
+}
+
+impl SelectionFill {
+    pub fn label(self) -> &'static str {
+        match self {
+            SelectionFill::Transparent => "Transparent",
+            SelectionFill::AutoFill => "Auto Fill",
+        }
+    }
+
+    /// The `background` parameter of `smart.moveObject` / `smart.deleteObject`.
+    pub fn param(self) -> &'static str {
+        match self {
+            SelectionFill::Transparent => "transparent",
+            SelectionFill::AutoFill => "heal",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -596,49 +668,69 @@ pub struct EditorState {
     pub tools: ToolOptions,
 }
 
-/// Editor tools, in toolbar order.
+/// Editor tools: the default pinned ones in toolbar order, then the ones
+/// behind More in menu order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolId {
-    #[default]
-    Move,
     Arrow,
     Text,
     Callout,
     Shape,
     Stamp,
-    Step,
     Fill,
-    CutOut,
-    Pen,
-    Highlighter,
+    #[default]
+    Move,
+    /// Marquee a region of the capture to move or delete it.
+    Selection,
+    Step,
     Blur,
+    Pixelate,
+    Highlighter,
+    Pen,
+    Eraser,
     Magnify,
     Spotlight,
+    CutOut,
     SmartMove,
     Simplify,
     Crop,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 17] = [
-        ToolId::Move,
+    pub const ALL: [ToolId; 20] = [
         ToolId::Arrow,
         ToolId::Text,
         ToolId::Callout,
         ToolId::Shape,
         ToolId::Stamp,
-        ToolId::Step,
         ToolId::Fill,
-        ToolId::CutOut,
-        ToolId::Pen,
-        ToolId::Highlighter,
+        ToolId::Move,
+        ToolId::Selection,
+        ToolId::Step,
         ToolId::Blur,
+        ToolId::Pixelate,
+        ToolId::Highlighter,
+        ToolId::Pen,
+        ToolId::Eraser,
         ToolId::Magnify,
         ToolId::Spotlight,
+        ToolId::CutOut,
         ToolId::SmartMove,
         ToolId::Simplify,
         ToolId::Crop,
+    ];
+
+    /// Pinned to the toolbar by default.
+    pub const PINNED: [ToolId; 8] = [
+        ToolId::Arrow,
+        ToolId::Text,
+        ToolId::Callout,
+        ToolId::Shape,
+        ToolId::Stamp,
+        ToolId::Fill,
+        ToolId::Move,
+        ToolId::Selection,
     ];
 
     pub fn label(self) -> &'static str {
@@ -649,11 +741,14 @@ impl ToolId {
             ToolId::Callout => "Callout",
             ToolId::Shape => "Shape",
             ToolId::Stamp => "Stamp",
+            ToolId::Selection => "Selection",
             ToolId::Step => "Step",
             ToolId::Fill => "Fill",
             ToolId::CutOut => "Cut Out",
             ToolId::Pen => "Pen",
-            ToolId::Highlighter => "Highlighter",
+            ToolId::Pixelate => "Pixelate",
+            ToolId::Eraser => "Eraser",
+            ToolId::Highlighter => "Highlight",
             ToolId::Blur => "Blur",
             ToolId::Magnify => "Magnify",
             ToolId::Spotlight => "Spotlight",
@@ -668,6 +763,7 @@ impl ToolId {
     pub fn command(self) -> Option<&'static str> {
         match self {
             ToolId::Move => Some("annotation.move"),
+            ToolId::Selection => Some("smart.moveObject"),
             ToolId::Arrow => Some("annotation.addArrow"),
             ToolId::Step => Some("annotation.addStep"),
             ToolId::Callout => Some("annotation.addCallout"),
@@ -708,19 +804,7 @@ pub struct ToolbarState {
 
 impl Default for ToolbarState {
     fn default() -> Self {
-        let pinned = vec![
-            ToolId::Move,
-            ToolId::Arrow,
-            ToolId::Text,
-            ToolId::Callout,
-            ToolId::Shape,
-            ToolId::Step,
-            ToolId::Blur,
-            ToolId::Magnify,
-            ToolId::Spotlight,
-            ToolId::CutOut,
-            ToolId::Crop,
-        ];
+        let pinned = ToolId::PINNED.to_vec();
         let overflow = ToolId::ALL
             .into_iter()
             .filter(|t| !pinned.contains(t))
@@ -734,11 +818,56 @@ impl Default for ToolbarState {
     }
 }
 
+impl ToolbarState {
+    /// Every tool exactly once, pinned or behind More: drops repeats and
+    /// adds tools a saved layout does not know yet (to More, in order).
+    pub fn normalize(&mut self) {
+        let mut seen = Vec::with_capacity(ToolId::ALL.len());
+        self.pinned.retain(|t| {
+            let new = !seen.contains(t);
+            seen.push(*t);
+            new
+        });
+        self.overflow.retain(|t| {
+            let new = !seen.contains(t);
+            seen.push(*t);
+            new
+        });
+        for t in ToolId::ALL {
+            if !seen.contains(&t) {
+                self.overflow.push(t);
+            }
+        }
+        // Keep More in menu order.
+        self.overflow
+            .sort_by_key(|t| ToolId::ALL.iter().position(|a| a == t));
+    }
+
+    /// Moves `tool` from More onto the toolbar (at the end).
+    pub fn pin(&mut self, tool: ToolId) {
+        if !self.pinned.contains(&tool) {
+            self.overflow.retain(|t| *t != tool);
+            self.pinned.push(tool);
+        }
+    }
+
+    /// Moves `tool` from the toolbar back behind More.
+    pub fn unpin(&mut self, tool: ToolId) {
+        if self.pinned.contains(&tool) {
+            self.pinned.retain(|t| *t != tool);
+            self.overflow.push(tool);
+            self.normalize();
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarState {
     pub visible: bool,
     pub width_px: f32,
+    /// Tool Properties or canvas Effects (the utility bar's tabs).
+    pub mode: InspectorMode,
     pub quick_styles: QuickStyles,
     /// Expanded property sections below the Quick Styles grid.
     pub expanded: Vec<PropertySection>,
@@ -823,6 +952,7 @@ impl SidebarState {
             name: name.into(),
             builtin: false,
             hidden: false,
+            favorite: false,
             preset: d.preset,
         });
         t.selected = Some(t.styles.len() - 1);
@@ -835,12 +965,22 @@ impl Default for SidebarState {
         Self {
             visible: true,
             width_px: 280.0,
+            mode: InspectorMode::Properties,
             quick_styles: QuickStyles::default(),
             expanded: vec![PropertySection::Style, PropertySection::Shadow],
             theme: "studio".into(),
             draft: None,
         }
     }
+}
+
+/// What the right drawer shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectorMode {
+    #[default]
+    Properties,
+    Effects,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +1035,44 @@ impl QuickStyles {
         self.tools.iter().find(|t| t.tool == tool)
     }
 
+    /// Every favourite style as (tool, index in that tool's styles).
+    pub fn favorites(&self) -> Vec<(ToolId, usize)> {
+        self.tools
+            .iter()
+            .flat_map(|t| {
+                t.styles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.favorite && !s.hidden)
+                    .map(|(i, _)| (t.tool, i))
+            })
+            .collect()
+    }
+
+    pub fn style(&self, tool: ToolId, index: usize) -> Option<&QuickStyle> {
+        self.for_tool(tool)?.styles.get(index)
+    }
+
+    pub fn toggle_favorite(&mut self, tool: ToolId, index: usize) {
+        if let Some(s) = self
+            .tools
+            .iter_mut()
+            .find(|t| t.tool == tool)
+            .and_then(|t| t.styles.get_mut(index))
+        {
+            s.favorite = !s.favorite;
+        }
+    }
+
+    /// Makes style `index` the one the next `tool` annotation gets.
+    pub fn select(&mut self, tool: ToolId, index: usize) {
+        if let Some(t) = self.tools.iter_mut().find(|t| t.tool == tool)
+            && index < t.styles.len()
+        {
+            t.selected = Some(index);
+        }
+    }
+
     /// The preset the next annotation of `tool` gets.
     pub fn selected(&self, tool: ToolId) -> Option<&QuickStyle> {
         let t = self.for_tool(tool)?;
@@ -928,6 +1106,8 @@ pub struct QuickStyle {
     /// Built-ins cannot be deleted, only hidden.
     pub builtin: bool,
     pub hidden: bool,
+    /// Listed under the toolbar's Favorites.
+    pub favorite: bool,
     pub preset: StylePreset,
 }
 
@@ -988,6 +1168,7 @@ impl QuickStyle {
             name: name.into(),
             builtin: true,
             hidden: false,
+            favorite: false,
             preset,
         }
     }
@@ -1074,6 +1255,9 @@ pub struct CanvasViewState {
     pub selection: Vec<NodeId>,
     #[serde(skip)]
     pub hovered: Option<NodeId>,
+    /// The Selection tool's marquee, canvas pixels.
+    #[serde(skip)]
+    pub marquee: Option<RectF>,
     pub resize: CanvasResize,
     /// What fills the new margin when the canvas grows.
     pub expand_backdrop: ExpandBackdrop,
@@ -1139,6 +1323,16 @@ pub enum CanvasGesture {
         to: Point,
     },
     MoveSelection {
+        from: Point,
+        to: Point,
+    },
+    /// Dragging out the Selection tool's marquee.
+    Marquee {
+        from: Point,
+        to: Point,
+    },
+    /// Dragging the marquee's pixels (`smart.moveObject` on release).
+    MoveMarquee {
         from: Point,
         to: Point,
     },
@@ -1211,6 +1405,7 @@ impl Default for CanvasViewState {
             checkerboard: true,
             selection: Vec::new(),
             hovered: None,
+            marquee: None,
             resize: CanvasResize::default(),
             expand_backdrop: ExpandBackdrop::default(),
             gesture: None,

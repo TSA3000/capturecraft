@@ -13,10 +13,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 pub mod dpi;
+pub mod icons;
 pub mod panels;
 pub mod state;
 pub mod theme;
 pub mod views;
+pub mod widgets;
 
 use capturecraft_engine::{EngineError, Session};
 use serde_json::Value;
@@ -53,6 +55,18 @@ pub enum UiIntent {
     /// Close these documents and drop them from the library (the app asks
     /// before discarding unsaved ones).
     DeleteDocuments { doc_ids: Vec<String> },
+    /// Close these documents (the tray card's ×); nothing is deleted.
+    CloseDocuments { doc_ids: Vec<String> },
+    /// Open a copy of a document next to it.
+    DuplicateDocument { doc_id: String },
+    /// Copy a document's flattened image (tray context menu).
+    CopyDocument { doc_id: String },
+    /// Save a document under a chosen name; `None` = the active one.
+    SaveAs { doc_id: Option<String> },
+    /// A new blank white canvas.
+    NewBlankImage,
+    /// A control whose feature is not built yet: the app says so.
+    Unavailable(&'static str),
 }
 
 impl UiIntent {
@@ -134,6 +148,10 @@ pub const COMMANDS_USED: &[&str] = &[
     "node.rotate",
     "canvas.setBackdrop",
     "annotation.setMagnifierSource",
+    // The Selection tool, the Tag button.
+    "smart.moveObject",
+    "smart.deleteObject",
+    "document.setTags",
 ];
 
 #[cfg(test)]

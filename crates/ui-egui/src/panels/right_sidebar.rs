@@ -1,4 +1,15 @@
-//! Zone 2: Quick Styles above, the Property Inspector below.
+//! Zone 2: the right drawer, "Tool Properties" or "Effects" (the utility
+//! bar's tabs pick which).
+//!
+//! Tool Properties: the Selection tool shows its mode tiles, Snap to
+//! Object and the Background Fill toggle (Transparent clears the hole a
+//! moved or deleted selection leaves, Auto Fill inpaints it with the UI
+//! analyzer). Every other tool shows Quick Styles above, the Property
+//! Inspector below.
+//!
+//! Effects: tiles for the document's canvas effects (border, drop shadow,
+//! rounded shadow frame; the rest are marked as not available yet), the
+//! frame's settings and the canvas options.
 //!
 //! The grid shows the active tool's presets as live vector thumbnails
 //! (two or three columns by sidebar width). Clicking a card selects it as
@@ -29,8 +40,13 @@ use photocraft_geom::{Point, Size};
 use serde_json::{Value, json};
 
 use crate::UiIntent;
-use crate::state::{ColorTarget, EditorState, ExpandBackdrop, QuickStyle, StylePreset, ToolId};
+use crate::icons::{self, Icon};
+use crate::state::{
+    ColorTarget, EditorState, ExpandBackdrop, InspectorMode, QuickStyle, SelectionFill,
+    SelectionMode, StylePreset, ToolId,
+};
 use crate::theme::{Tokens, stroke};
+use crate::widgets::{self, icon_style, tile};
 
 const CARD_MIN_W: f32 = 76.0;
 const CARD_H: f32 = 64.0;
@@ -179,23 +195,50 @@ impl RightSidebar<'_> {
         let t = self.tokens;
         let tool = editor.toolbar.active;
         let pending_id = Id::new("sidebar.style_pending");
+        let mode = editor.sidebar.mode;
+        let (title, help) = match mode {
+            InspectorMode::Effects => (
+                "Effects",
+                "Effects change the whole canvas: a border, a drop shadow or a rounded shadow frame. Every change is one undo step.",
+            ),
+            InspectorMode::Properties => ("Tool Properties", tool_help(tool)),
+        };
+        header(ui, title, help, t);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(t.space_md);
-                ui.horizontal(|ui| {
+            .show(ui, |ui| match mode {
+                InspectorMode::Effects => {
+                    ui.add_space(t.space_sm);
+                    self.effects(ui, intents);
+                    self.frame_section(ui, intents);
+                    canvas_section(ui, editor);
+                }
+                InspectorMode::Properties if tool == ToolId::Selection => {
+                    ui.add_space(t.space_sm);
+                    self.selection(ui, editor, intents);
+                }
+                InspectorMode::Properties => {
+                    ui.add_space(t.space_sm);
+                    if tool.command().is_none() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Drawing with {} on the canvas is not available yet; its styles are kept for when it is.",
+                                tool.label()
+                            ))
+                            .color(t.text_faint)
+                            .small(),
+                        );
+                        ui.add_space(t.space_sm);
+                    }
                     ui.label(egui::RichText::new("Quick Styles").strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(tool.label()).color(t.text_dim));
-                    });
-                });
-                ui.add_space(t.space_sm);
-                let changed = self.quick_styles(ui, editor, intents);
-                ui.add_space(t.space_md);
-                ui.separator();
-                let edited = self.inspector(ui, editor, intents);
-                if edited || changed {
-                    ui.ctx().data_mut(|d| d.insert_temp(pending_id, edited));
+                    ui.add_space(t.space_sm);
+                    let changed = self.quick_styles(ui, editor, intents);
+                    ui.add_space(t.space_md);
+                    ui.separator();
+                    let edited = self.inspector(ui, editor, intents);
+                    if edited || changed {
+                        ui.ctx().data_mut(|d| d.insert_temp(pending_id, edited));
+                    }
                 }
             });
         // Commit inspector edits to the selection on release.
@@ -310,6 +353,7 @@ impl RightSidebar<'_> {
                     .as_ref()
                     .is_some_and(|d| d.tool == tool);
                 let mut remove = None;
+                let mut favorite = None;
                 grid(ui, visible.len(), &mut |ui, i, rect| {
                     let Some((index, style)) = visible.get(i) else {
                         return false;
@@ -324,7 +368,26 @@ impl RightSidebar<'_> {
                         t,
                     );
                     let r = r.on_hover_text(&style.name);
+                    if style.favorite {
+                        let star =
+                            ERect::from_min_size(r.rect.min + vec2(4.0, 4.0), Vec2::splat(12.0));
+                        icons::paint(
+                            ui.painter(),
+                            star,
+                            Icon::Favorites,
+                            icon_style(t, true, true),
+                        );
+                    }
                     r.context_menu(|ui| {
+                        let fav = if style.favorite {
+                            "Remove from Favorites"
+                        } else {
+                            "Add to Favorites"
+                        };
+                        if ui.button(fav).clicked() {
+                            favorite = Some(*index);
+                            ui.close();
+                        }
                         let label = if style.builtin { "Hide" } else { "Delete" };
                         if ui.button(label).clicked() {
                             remove = Some((*index, style.builtin));
@@ -348,6 +411,9 @@ impl RightSidebar<'_> {
                     }
                     r.clicked()
                 });
+                if let Some(index) = favorite {
+                    editor.sidebar.quick_styles.toggle_favorite(tool, index);
+                }
                 if let Some((index, builtin)) = remove
                     && let Some(ts) = editor
                         .sidebar
@@ -538,19 +604,6 @@ impl RightSidebar<'_> {
             _ => {}
         }
 
-        section(ui, "Canvas", |ui| {
-            let c = &mut editor.canvas;
-            ComboBox::from_label("New margin")
-                .selected_text(c.expand_backdrop.label())
-                .show_ui(ui, |ui| {
-                    for b in ExpandBackdrop::ALL {
-                        ui.selectable_value(&mut c.expand_backdrop, b, b.label());
-                    }
-                });
-            ui.checkbox(&mut c.checkerboard, "Transparency checkerboard");
-        });
-        self.frame_section(ui, intents);
-
         if let Some(target) = eyedropper {
             editor.canvas.eyedropper = Some(target);
         }
@@ -559,6 +612,152 @@ impl RightSidebar<'_> {
             editor.sidebar.edit_draft(tool, |p| *p = style);
         }
         edited
+    }
+
+    /// The Selection tool: mode tiles, Snap to Object, Background Fill and
+    /// the marquee's actions.
+    fn selection(&self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
+        let t = self.tokens;
+        let o = &mut editor.tools.selection;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = t.space_md;
+            for m in SelectionMode::ALL {
+                let icon = match m {
+                    SelectionMode::Rectangle => Icon::RectangleSelect,
+                    SelectionMode::Ellipse => Icon::EllipseSelect,
+                    SelectionMode::Polygon => Icon::PolygonSelect,
+                    SelectionMode::Lasso => Icon::LassoSelect,
+                };
+                let r = tile(
+                    ui,
+                    Id::new(("sidebar.select_mode", m.label())),
+                    icon,
+                    o.mode == m,
+                    m.available(),
+                    t,
+                );
+                let r = if m.available() {
+                    r.on_hover_text(m.label())
+                } else {
+                    r.on_hover_text(format!("{}: not available yet", m.label()))
+                };
+                if r.clicked() {
+                    o.mode = m;
+                }
+            }
+        });
+        ui.add_space(t.space_md);
+        ui.add_enabled(
+            false,
+            egui::Checkbox::new(&mut o.snap_to_object, "Snap to Object"),
+        )
+        .on_disabled_hover_text("Snapping to detected UI elements is not available yet");
+        ui.add_space(t.space_md);
+        ui.label(egui::RichText::new("Background Fill").strong());
+        ui.add_space(t.space_xs);
+        let fills = [
+            (None, SelectionFill::Transparent.label()),
+            (None, SelectionFill::AutoFill.label()),
+        ];
+        let current = usize::from(o.background == SelectionFill::AutoFill);
+        if let Some(i) = widgets::segmented(ui, Id::new("sidebar.select_fill"), &fills, current, t)
+        {
+            o.background = if i == 0 {
+                SelectionFill::Transparent
+            } else {
+                SelectionFill::AutoFill
+            };
+        }
+        ui.label(
+            egui::RichText::new(match o.background {
+                SelectionFill::Transparent => {
+                    "Moving or deleting the selection leaves a transparent hole."
+                }
+                SelectionFill::AutoFill => {
+                    "Moving or deleting the selection fills the hole from its surroundings."
+                }
+            })
+            .color(t.text_faint)
+            .small(),
+        );
+        ui.add_space(t.space_md);
+        ui.separator();
+        let marquee = editor.canvas.marquee;
+        let base = marquee
+            .zip(self.doc)
+            .and_then(|(r, d)| capturecraft_engine::commands::canvas_rect_to_base(&d.manifest, r));
+        match base {
+            Some(b) => {
+                ui.label(format!("Selected {} × {} px", b.width(), b.height()));
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").on_hover_text("Delete key").clicked()
+                        && let Some(d) = self.doc
+                        && let Some(i) = crate::panels::canvas_viewport::delete_selection_intent(
+                            editor,
+                            &d.manifest,
+                        )
+                    {
+                        intents.push(i);
+                        editor.canvas.marquee = None;
+                    }
+                    if ui.button("Deselect").on_hover_text("Esc").clicked() {
+                        editor.canvas.marquee = None;
+                    }
+                });
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(
+                        "Drag on the capture to select a region, then drag inside it to move it.",
+                    )
+                    .color(t.text_dim),
+                );
+            }
+        }
+    }
+
+    /// The effect tiles; a click sets the canvas backdrop.
+    fn effects(&self, ui: &mut Ui, intents: &mut Vec<UiIntent>) {
+        let t = self.tokens;
+        let current = self.doc.map(|d| &d.manifest.canvas.backdrop);
+        let active = current.map(Effect::of);
+        let enabled = self.doc.is_some();
+        let w = ui.available_width();
+        let cols = ((w + t.space_md) / (widgets::TILE.x + t.space_md))
+            .floor()
+            .max(1.0) as usize;
+        egui::Grid::new("sidebar.effects")
+            .spacing(Vec2::splat(t.space_md))
+            .show(ui, |ui| {
+                for (i, e) in Effect::ALL.into_iter().enumerate() {
+                    ui.vertical(|ui| {
+                        let on = active == Some(e);
+                        let available = e.backdrop().is_some() || e == Effect::None;
+                        let r = tile(
+                            ui,
+                            Id::new(("sidebar.effect", i)),
+                            e.icon(),
+                            on,
+                            enabled && available,
+                            t,
+                        );
+                        let r = if available {
+                            r.on_hover_text(e.label())
+                        } else {
+                            r.on_hover_text(format!("{}: not available yet", e.label()))
+                        };
+                        ui.label(egui::RichText::new(e.short()).size(10.0).color(t.text_dim));
+                        if r.clicked() && !on {
+                            let b = e.backdrop().unwrap_or(CanvasBackdrop::None);
+                            intents.push(crate::panels::gizmo::backdrop_intent(&b));
+                        }
+                    });
+                    if (i + 1) % cols == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+        ui.add_space(t.space_md);
     }
 
     /// The rounded shadow frame; commits on release.
@@ -923,6 +1122,168 @@ fn head_combo(ui: &mut Ui, label: &str, head: &mut Option<HeadStyle>, default: H
         });
     if Some(h) != *head && (head.is_some() || h != default) {
         *head = Some(h);
+    }
+}
+
+/// The drawer's title row with the round `?` help icon.
+fn header(ui: &mut Ui, title: &str, help: &str, t: &Tokens) {
+    ui.add_space(t.space_md);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).strong().size(14.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (r, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            icons::paint(
+                ui.painter(),
+                r,
+                Icon::Help,
+                icon_style(t, resp.hovered(), true),
+            );
+            resp.on_hover_text(help);
+        });
+    });
+    ui.add_space(t.space_sm);
+    let r = ui.available_rect_before_wrap();
+    ui.painter().line_segment(
+        [pos2(r.min.x, r.min.y), pos2(r.max.x, r.min.y)],
+        stroke(1.0, t.chrome_border),
+    );
+    ui.add_space(t.space_sm);
+}
+
+/// What the `?` says about a tool.
+pub fn tool_help(tool: ToolId) -> &'static str {
+    match tool {
+        ToolId::Selection => {
+            "Drag to select part of the capture, drag inside the selection to move it, Delete to remove it."
+        }
+        ToolId::Arrow => "Drag from the tail to the tip. Drag the green handle to bend it.",
+        ToolId::Callout => {
+            "Click or drag to place a callout; drag the yellow diamond to aim its tail."
+        }
+        ToolId::Step => "Click to drop the next number of the sequence.",
+        ToolId::Move => {
+            "Click to select annotations, drag to move them; handles resize and rotate."
+        }
+        ToolId::CutOut => "Drag across the capture to remove a strip and close the gap.",
+        ToolId::Simplify => "Replace text and detail with clean shapes in the chosen palette.",
+        _ => "Pick a Quick Style, then adjust it below. + Add Quick Style saves it.",
+    }
+}
+
+/// New-margin fill and the transparency grid.
+fn canvas_section(ui: &mut Ui, editor: &mut EditorState) {
+    section(ui, "Canvas", |ui| {
+        let c = &mut editor.canvas;
+        ComboBox::from_label("New margin")
+            .selected_text(c.expand_backdrop.label())
+            .show_ui(ui, |ui| {
+                for b in ExpandBackdrop::ALL {
+                    ui.selectable_value(&mut c.expand_backdrop, b, b.label());
+                }
+            });
+        ui.checkbox(&mut c.checkerboard, "Transparency checkerboard");
+    });
+}
+
+/// A canvas effect tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    Border,
+    DropShadow,
+    RoundedFrame,
+    TornEdge,
+    Perspective,
+    Spotlight,
+    ColorFilter,
+}
+
+impl Effect {
+    pub const ALL: [Effect; 8] = [
+        Effect::None,
+        Effect::Border,
+        Effect::DropShadow,
+        Effect::RoundedFrame,
+        Effect::TornEdge,
+        Effect::Perspective,
+        Effect::Spotlight,
+        Effect::ColorFilter,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Effect::None => "No effect",
+            Effect::Border => "Border",
+            Effect::DropShadow => "Drop Shadow",
+            Effect::RoundedFrame => "Rounded Drop-Shadow Frame",
+            Effect::TornEdge => "Torn Edge",
+            Effect::Perspective => "Perspective / Shear",
+            Effect::Spotlight => "Spotlight",
+            Effect::ColorFilter => "Color Filter",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            Effect::None => "None",
+            Effect::RoundedFrame => "Frame",
+            Effect::DropShadow => "Shadow",
+            Effect::Perspective => "Perspective",
+            Effect::ColorFilter => "Filter",
+            e => e.label(),
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Effect::None => Icon::Close,
+            Effect::Border => Icon::Border,
+            Effect::DropShadow => Icon::DropShadow,
+            Effect::RoundedFrame => Icon::Frame,
+            Effect::TornEdge => Icon::TornEdge,
+            Effect::Perspective => Icon::Perspective,
+            Effect::Spotlight => Icon::Spotlight,
+            Effect::ColorFilter => Icon::ColorFilter,
+        }
+    }
+
+    /// The backdrop this effect sets; `None` for the effects the engine
+    /// cannot draw yet (and for [`Effect::None`], which clears it).
+    pub fn backdrop(self) -> Option<CanvasBackdrop> {
+        let frame =
+            |margin_px, corner_radius_px, shadow, border| CanvasBackdrop::RoundedShadowFrame {
+                margin_px,
+                corner_radius_px,
+                backdrop_fill: Fill::None,
+                shadow,
+                border,
+            };
+        match self {
+            Effect::Border => Some(frame(
+                0.0,
+                0.0,
+                None,
+                Some(Stroke {
+                    color: Color::rgb(0x33, 0x37, 0x3E),
+                    width: 4.0,
+                    ..Stroke::default()
+                }),
+            )),
+            Effect::DropShadow => Some(frame(24.0, 0.0, Some(DropShadow::default()), None)),
+            Effect::RoundedFrame => Some(CanvasBackdrop::rounded_shadow_frame()),
+            _ => None,
+        }
+    }
+
+    /// Which tile a backdrop shows as active.
+    pub fn of(b: &CanvasBackdrop) -> Effect {
+        match b {
+            CanvasBackdrop::None => Effect::None,
+            b => Effect::ALL
+                .into_iter()
+                .find(|e| e.backdrop().as_ref() == Some(b))
+                .unwrap_or(Effect::RoundedFrame),
+        }
     }
 }
 

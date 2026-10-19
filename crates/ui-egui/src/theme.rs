@@ -8,6 +8,13 @@
 //! capture accent, gizmos, the crosshair overlay, the checkerboard,
 //! spacing) are defined here. Selection and gizmo colours stay readable on
 //! arbitrary screenshot pixels, so they do not follow the surface colours.
+//!
+//! Studio (the default) is the editor's dark studio look: a darker title
+//! and menu strip, one panel colour for the toolbar, drawer and bars with
+//! crisp 1 px borders, a deep surround that makes the capture stand out,
+//! blue for the active tool and the primary Share button, and a crimson
+//! record dot on Capture. The other themes derive the same roles from
+//! PhotoCraft's tokens.
 
 use egui::epaint::Shadow;
 use egui::{Color32, CornerRadius, Stroke};
@@ -27,8 +34,12 @@ pub fn kind_from_name(name: &str) -> ThemeKind {
 pub struct Tokens {
     pub kind: ThemeKind,
     // Surfaces
+    /// Title and menu strip above the toolbar.
+    pub title_bar: Color32,
     /// Toolbar ribbon and window chrome.
     pub chrome: Color32,
+    /// 1 px borders between the toolbar, drawer, bars and canvas.
+    pub chrome_border: Color32,
     /// Sidebar, tray and library background.
     pub panel: Color32,
     /// Around the canvas.
@@ -49,6 +60,16 @@ pub struct Tokens {
     pub accent: Color32,
     pub accent_soft: Color32,
     pub accent_text: Color32,
+    /// Behind the active tool, tile or tab.
+    pub tool_active_fill: Color32,
+    /// Around the active tool, tile or tab.
+    pub tool_active_border: Color32,
+    /// The primary Share / Save split button.
+    pub share_fill: Color32,
+    pub share_fill_hover: Color32,
+    pub share_text: Color32,
+    /// The Capture icon's record dot.
+    pub record: Color32,
     /// The Capture button and the capture HUD's brand colour.
     pub accent_capture: Color32,
     pub accent_capture_hover: Color32,
@@ -72,6 +93,11 @@ pub struct Tokens {
     pub tail_handle: Color32,
     /// Arrow bend handle.
     pub bend_handle: Color32,
+    /// The eight canvas resize squares on the image border.
+    pub canvas_handle_fill: Color32,
+    pub canvas_handle_stroke: Color32,
+    /// Edge of a canvas resize square, points.
+    pub canvas_handle_size: f32,
     pub expand_handle_fill: Color32,
     pub expand_handle_stroke: Color32,
     pub expand_preview: Color32,
@@ -126,6 +152,33 @@ const fn rgba(hex: u32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied_const((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, a)
 }
 
+/// WCAG contrast ratio of two opaque colours.
+fn contrast(a: Color32, b: Color32) -> f32 {
+    let lum = |c: Color32| {
+        let ch = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
+    };
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// White or near-black text, whichever reads better on `fill`.
+fn text_on(fill: Color32) -> Color32 {
+    let (white, black) = (rgb(0xFFFFFF), rgb(0x111111));
+    if contrast(white, fill) >= contrast(black, fill) {
+        white
+    } else {
+        black
+    }
+}
+
 const fn shadow(offset: [i8; 2], blur: u8, alpha: u8) -> Shadow {
     Shadow {
         offset,
@@ -139,9 +192,11 @@ impl Tokens {
     pub fn for_kind(kind: ThemeKind) -> Self {
         let b = pc::Tokens::for_kind(kind);
         let dark = b.dark();
-        Tokens {
+        let t = Tokens {
             kind,
+            title_bar: b.chrome,
             chrome: b.chrome,
+            chrome_border: b.separator,
             panel: b.dock,
             canvas_surround: b.canvas,
             card: b.card,
@@ -157,6 +212,12 @@ impl Tokens {
             accent: b.accent,
             accent_soft: b.accent_soft,
             accent_text: b.accent_text,
+            tool_active_fill: b.accent_soft,
+            tool_active_border: b.accent,
+            share_fill: b.accent,
+            share_fill_hover: b.accent_border,
+            share_text: text_on(b.accent),
+            record: rgb(0xE11D48),
             accent_capture: if dark { rgb(0xF04E23) } else { rgb(0xC93A14) },
             accent_capture_hover: if dark { rgb(0xFF6A3D) } else { rgb(0xE0451C) },
             accent_capture_text: rgb(0xFFFFFF),
@@ -176,6 +237,9 @@ impl Tokens {
             handle_stroke: rgb(0x3D8BFF),
             tail_handle: rgb(0xFFD21F),
             bend_handle: rgb(0x2ED1A2),
+            canvas_handle_fill: if dark { rgb(0x4B5059) } else { rgb(0x6B7280) },
+            canvas_handle_stroke: if dark { rgb(0x111317) } else { rgb(0xFFFFFF) },
+            canvas_handle_size: 7.0,
             expand_handle_fill: rgb(0xF2F3F5),
             expand_handle_stroke: rgb(0x161719),
             expand_preview: rgb(0xFF6A2B),
@@ -204,6 +268,36 @@ impl Tokens {
             card_elevation: shadow([0, 1], 4, 0x60),
             card_elevation_hover: shadow([0, 3], 10, 0x80),
             popup_elevation: shadow([0, 6], 18, 0x90),
+        };
+        if kind == ThemeKind::Studio {
+            Self::studio(t)
+        } else {
+            t
+        }
+    }
+
+    /// The dark studio palette over PhotoCraft's Studio tokens.
+    fn studio(t: Tokens) -> Tokens {
+        let border = rgb(0x33373E);
+        Tokens {
+            title_bar: rgb(0x1B1D21),
+            chrome: rgb(0x24272C),
+            chrome_border: border,
+            panel: rgb(0x24272C),
+            canvas_surround: rgb(0x181A1E),
+            card: rgb(0x2B2F35),
+            card_hover: rgb(0x32363D),
+            card_border: border,
+            card_selected_border: rgb(0x3B82F6),
+            separator: border,
+            accent: rgb(0x0078D4),
+            accent_soft: rgb(0x1E3A5F),
+            tool_active_fill: rgb(0x1E3A5F),
+            tool_active_border: rgb(0x3B82F6),
+            share_fill: rgb(0x1D70B8),
+            share_fill_hover: rgb(0x2563EB),
+            share_text: rgb(0xFFFFFF),
+            ..t
         }
     }
 
@@ -249,23 +343,6 @@ impl Default for Tokens {
 mod tests {
     use super::*;
 
-    /// WCAG relative luminance contrast of two opaque colours.
-    fn contrast(a: Color32, b: Color32) -> f32 {
-        let lum = |c: Color32| {
-            let ch = |v: u8| {
-                let v = f32::from(v) / 255.0;
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
-        };
-        let (x, y) = (lum(a), lum(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
-
     #[test]
     fn text_is_readable_in_every_theme() {
         for t in ThemeKind::ALL.map(Tokens::for_kind) {
@@ -275,6 +352,22 @@ mod tests {
                 "{:?}",
                 t.kind
             );
+        }
+    }
+
+    #[test]
+    fn studio_uses_the_studio_palette() {
+        let t = Tokens::for_kind(ThemeKind::Studio);
+        assert_eq!(t.title_bar, rgb(0x1B1D21));
+        assert_eq!(t.chrome, rgb(0x24272C));
+        assert_eq!(t.chrome_border, rgb(0x33373E));
+        assert_eq!(t.canvas_surround, rgb(0x181A1E));
+        assert_eq!(t.share_fill, rgb(0x1D70B8));
+        assert_eq!(t.record, rgb(0xE11D48));
+        assert!(contrast(t.text, t.chrome) >= 4.5);
+        assert!(contrast(t.text, t.title_bar) >= 4.5);
+        for t in ThemeKind::ALL.map(Tokens::for_kind) {
+            assert!(contrast(t.share_text, t.share_fill) >= 3.0, "{:?}", t.kind);
         }
     }
 

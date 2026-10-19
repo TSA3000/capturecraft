@@ -2,9 +2,11 @@
 //!
 //! Every item is an open engine document, so a click switches the canvas
 //! at once (`UiIntent::ActivateDocument`, no save prompt); unsaved items
-//! carry a dot and are never dropped from the strip. Ctrl/Cmd+Click
-//! toggles and Shift+Click extends a multi-selection, whose context menu
-//! offers Combine Images.
+//! carry a dot and are never dropped from the strip. The open capture has
+//! a 2 px blue border and a hovered card a × that closes it. Ctrl/Cmd+Click
+//! toggles and Shift+Click extends a multi-selection; the context menu
+//! offers Duplicate, Combine Images, Save As, Copy and Delete. The utility
+//! bar's Hide Recent collapses the strip.
 
 use egui::{
     Align2, Color32, FontId, Id, Pos2, Rect as ERect, Sense, StrokeKind, TextureId, Ui, pos2, vec2,
@@ -14,6 +16,7 @@ use capturecraft_engine::{DocState, Session};
 use capturecraft_format::CaptureMode;
 
 use crate::UiIntent;
+use crate::icons::{self, Icon, IconStyle};
 use crate::state::{MediaKind, RecentTray as TrayState, TrayItem};
 use crate::theme::{Tokens, stroke};
 
@@ -83,8 +86,10 @@ pub fn sync_tray(tray: &mut TrayState, session: &Session) {
     tray.active = session.active().map(|d| d.manifest.id.clone());
 }
 
-/// Height of the strip's header row, points.
-const HEADER_H: f32 = 24.0;
+/// A filmstrip card, points.
+pub const CARD: egui::Vec2 = egui::vec2(130.0, 85.0);
+/// Space between cards.
+const CARD_GAP: f32 = 10.0;
 
 pub struct RecentTray<'a> {
     /// Thumbnail of a document id, when loaded.
@@ -99,53 +104,45 @@ pub fn fit_rect(size: [u32; 2], bounds: ERect) -> ERect {
     ERect::from_center_size(bounds.center(), vec2(w * s, h * s))
 }
 
+/// The documents a context-menu action applies to: the multi-selection
+/// when the clicked card is part of it, otherwise just that card.
+pub fn action_targets(tray: &TrayState, doc_id: &str) -> Vec<String> {
+    if tray.selected.len() > 1 && tray.selected.iter().any(|d| d == doc_id) {
+        tray.selected.clone()
+    } else {
+        vec![doc_id.to_string()]
+    }
+}
+
 impl RecentTray<'_> {
     pub fn show(self, ui: &mut Ui, tray: &mut TrayState, intents: &mut Vec<UiIntent>) {
         let t = self.tokens;
-        ui.horizontal(|ui| {
-            ui.set_height(HEADER_H);
-            let arrow = if tray.visible { "▾" } else { "▸" };
-            if ui
-                .selectable_label(
-                    false,
-                    format!("{arrow} Recent Captures ({})", tray.items.len()),
-                )
-                .clicked()
-            {
-                tray.visible = !tray.visible;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ New Capture").clicked() {
-                    intents.push(UiIntent::NewCapture);
-                }
-                if tray.selected.len() >= 2 && ui.button("Combine Images…").clicked() {
-                    intents.push(UiIntent::CombineImages {
-                        doc_ids: tray.selected.clone(),
-                    });
-                }
-            });
-        });
-        if !tray.visible {
+        let full = ui.max_rect();
+        if tray.items.is_empty() {
+            ui.painter().text(
+                full.center(),
+                Align2::CENTER_CENTER,
+                "Captures you take appear here",
+                FontId::proportional(12.0),
+                t.text_faint,
+            );
             return;
         }
-        let card_h = (tray.height_px - HEADER_H).max(48.0);
-        let card_w = card_h * 1.5;
+        let pad_y = ((full.height() - CARD.y) / 2.0).max(0.0);
         let out = egui::ScrollArea::horizontal()
             .id_salt("recent_tray")
             .horizontal_scroll_offset(tray.scroll_px)
-            .auto_shrink([false, true])
+            .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.add_space(pad_y);
                 ui.horizontal(|ui| {
-                    if tray.items.is_empty() {
-                        ui.label(
-                            egui::RichText::new("Captures you take appear here.")
-                                .color(t.text_faint),
-                        );
-                    }
+                    ui.spacing_mut().item_spacing.x = CARD_GAP;
+                    ui.add_space(CARD_GAP);
                     let items = tray.items.clone();
                     for item in &items {
-                        self.card(ui, item, vec2(card_w, card_h), tray, intents);
+                        self.card(ui, item, tray, intents);
                     }
+                    ui.add_space(CARD_GAP);
                 });
             });
         tray.scroll_px = out.state.offset.x;
@@ -155,32 +152,28 @@ impl RecentTray<'_> {
         &self,
         ui: &mut Ui,
         item: &TrayItem,
-        size: egui::Vec2,
         tray: &mut TrayState,
         intents: &mut Vec<UiIntent>,
     ) {
         let t = self.tokens;
-        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(CARD, Sense::hover());
         let resp = ui.interact(rect, Id::new(("tray.item", &item.doc_id)), Sense::click());
         let active = tray.active.as_deref() == Some(item.doc_id.as_str());
         let selected = tray.selected.contains(&item.doc_id);
         let corner = Tokens::corner(t.radius);
+        let hovered = resp.hovered() || ui.rect_contains_pointer(rect.expand(1.0));
         let p = ui.painter();
 
         p.add(
-            if resp.hovered() {
+            if hovered {
                 t.card_elevation_hover
             } else {
                 t.card_elevation
             }
             .as_shape(rect, corner),
         );
-        p.rect_filled(
-            rect,
-            corner,
-            if resp.hovered() { t.card_hover } else { t.card },
-        );
-        let inner = rect.shrink(t.space_sm);
+        p.rect_filled(rect, corner, if hovered { t.card_hover } else { t.card });
+        let inner = rect.shrink(4.0);
         match (self.thumbnail)(&item.doc_id) {
             Some(th) => {
                 p.image(
@@ -204,13 +197,13 @@ impl RecentTray<'_> {
                 );
             }
         }
-        if selected {
-            p.rect_filled(rect, corner, t.accent_soft);
+        if selected && !active {
+            p.rect_filled(rect, corner, t.accent_soft.gamma_multiply(0.5));
         }
         let ring = if active {
             stroke(2.0, t.accent)
         } else if selected {
-            stroke(1.5, t.accent)
+            stroke(1.5, t.tool_active_border)
         } else {
             stroke(1.0, t.card_border)
         };
@@ -228,8 +221,39 @@ impl RecentTray<'_> {
             p.galley(b.min + pad, galley, t.badge_text);
         }
         if item.unsaved {
-            let c = pos2(inner.max.x - 4.0, inner.min.y + 4.0);
-            p.circle(c, 4.0, t.dirty, stroke(1.0, t.badge_bg));
+            let c = pos2(inner.min.x + 5.0, inner.min.y + 5.0);
+            p.circle(c, 3.5, t.dirty, stroke(1.0, t.badge_bg));
+        }
+
+        // The × of a hovered card closes it.
+        let mut closed = false;
+        if hovered {
+            let x = ERect::from_center_size(
+                pos2(rect.max.x - 11.0, rect.min.y + 11.0),
+                vec2(16.0, 16.0),
+            );
+            let xr = ui.interact(x, Id::new(("tray.close", &item.doc_id)), Sense::click());
+            let p = ui.painter();
+            p.circle_filled(
+                x.center(),
+                8.0,
+                if xr.hovered() { t.danger } else { t.badge_bg },
+            );
+            icons::paint(
+                p,
+                x.shrink(4.5),
+                Icon::Close,
+                IconStyle {
+                    fg: t.badge_text,
+                    accent: t.badge_text,
+                },
+            );
+            if xr.on_hover_text("Close").clicked() {
+                intents.push(UiIntent::CloseDocuments {
+                    doc_ids: vec![item.doc_id.clone()],
+                });
+                closed = true;
+            }
         }
 
         let tip = match (item.title.as_str(), item.unsaved) {
@@ -238,8 +262,13 @@ impl RecentTray<'_> {
             (title, true) => format!("{title}\n{} · unsaved", item.captured_at),
             (title, false) => format!("{title}\n{}", item.captured_at),
         };
+        let tip = if item.tags.is_empty() {
+            tip
+        } else {
+            format!("{tip}\n# {}", item.tags.join(", "))
+        };
         let resp = resp.on_hover_text(tip);
-        if resp.clicked() {
+        if resp.clicked() && !closed {
             let m = ui.input(|i| i.modifiers);
             tray.click(&item.doc_id, m.command, m.shift);
             if !m.command && !m.shift && !active {
@@ -253,11 +282,9 @@ impl RecentTray<'_> {
             tray.click(&item.doc_id, false, false);
         }
         resp.context_menu(|ui| {
-            if ui.button("Open").clicked() {
-                tray.active = Some(item.doc_id.clone());
-                intents.push(UiIntent::ActivateDocument {
-                    doc_id: item.doc_id.clone(),
-                });
+            let id = item.doc_id.clone();
+            if ui.button("Duplicate").clicked() {
+                intents.push(UiIntent::DuplicateDocument { doc_id: id.clone() });
                 ui.close();
             }
             let n = tray.selected.len();
@@ -271,6 +298,24 @@ impl RecentTray<'_> {
                 });
                 ui.close();
             }
+            ui.separator();
+            if ui.button("Save As…").clicked() {
+                intents.push(UiIntent::SaveAs {
+                    doc_id: Some(id.clone()),
+                });
+                ui.close();
+            }
+            if ui.button("Copy").clicked() {
+                intents.push(UiIntent::CopyDocument { doc_id: id.clone() });
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Delete").clicked() {
+                intents.push(UiIntent::DeleteDocuments {
+                    doc_ids: action_targets(tray, &id),
+                });
+                ui.close();
+            }
         });
     }
 }
@@ -278,6 +323,16 @@ impl RecentTray<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_actions_cover_the_multi_selection() {
+        let tray = TrayState {
+            selected: vec!["a".into(), "b".into()],
+            ..TrayState::default()
+        };
+        assert_eq!(action_targets(&tray, "a"), ["a", "b"]);
+        assert_eq!(action_targets(&tray, "c"), ["c"]);
+    }
 
     #[test]
     fn thumbnails_keep_their_aspect() {
