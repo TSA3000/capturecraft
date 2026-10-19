@@ -45,6 +45,8 @@ pub struct Tokens {
     /// Around the canvas.
     pub canvas_surround: Color32,
     pub card: Color32,
+    /// Behind a drawer group's tabs (PhotoCraft's dock strip).
+    pub tab_strip: Color32,
     pub card_hover: Color32,
     pub card_border: Color32,
     pub card_selected_border: Color32,
@@ -200,6 +202,7 @@ impl Tokens {
             panel: b.dock,
             canvas_surround: b.canvas,
             card: b.card,
+            tab_strip: b.tab_strip,
             card_hover: b.hover,
             card_border: b.card_border,
             card_selected_border: b.accent_border,
@@ -286,6 +289,7 @@ impl Tokens {
             panel: rgb(0x24272C),
             canvas_surround: rgb(0x181A1E),
             card: rgb(0x2B2F35),
+            tab_strip: rgb(0x1E2125),
             card_hover: rgb(0x32363D),
             card_border: border,
             card_selected_border: rgb(0x3B82F6),

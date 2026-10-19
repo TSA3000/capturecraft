@@ -1,7 +1,11 @@
-//! Zone 2: the right drawer, "Tool Properties" or "Effects" (the utility
-//! bar's tabs pick which).
+//! Zone 2: the right drawer, split like PhotoCraft's: an upper group with
+//! the tabs `Properties | Effects` and a lower group with `Layers |
+//! History`, each with its own scroll area, divided by a bar that drags
+//! to share the height (`SidebarState::split`).
 //!
-//! Tool Properties: the Selection tool shows its mode tiles, Snap to
+//! Properties: with one callout or text box selected, a Text section on
+//! top edits its text (`annotation.setText` when the field loses focus),
+//! size, colour (`annotation.setStyle`) and alignment. The Selection tool shows its mode tiles, Snap to
 //! Object and the Background Fill toggle (Transparent clears the hole a
 //! moved or deleted selection leaves, Auto Fill inpaints it with the UI
 //! analyzer). Every other tool shows Quick Styles above, the Property
@@ -29,8 +33,10 @@
 //! commits `canvas.setBackdrop` on release, the same way.
 
 use capturecraft_engine::DocState;
+use capturecraft_engine::node_commands::is_text_box;
 use capturecraft_format::{
-    Axis, CanvasBackdrop, Color, DropShadow, Fill, GradientStop, HeadStyle, Numbering, Stroke,
+    Annotation, Axis, Callout, CanvasBackdrop, Color, DropShadow, Fill, GradientStop, HeadStyle,
+    NodeId, Numbering, Stroke, TextAlign,
 };
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Pos2, Rect as ERect, Sense, Shape, Slider, StrokeKind,
@@ -43,7 +49,7 @@ use crate::UiIntent;
 use crate::icons::{self, Icon};
 use crate::panels::layers_panel::LayersPanel;
 use crate::state::{
-    BlurOptions, ColorTarget, EditorState, ExpandBackdrop, InspectorMode, MagnifyOptions,
+    BlurOptions, ColorTarget, DockTab, EditorState, ExpandBackdrop, InspectorMode, MagnifyOptions,
     PixelateOptions, QuickStyle, SelectionFill, SelectionMode, ShapeKind, StylePreset, ToolId,
 };
 use crate::theme::{Tokens, stroke};
@@ -51,6 +57,9 @@ use crate::widgets::{self, icon_style, tile};
 
 const CARD_MIN_W: f32 = 76.0;
 const CARD_H: f32 = 64.0;
+/// A drawer group's tab strip, and the gap around and between groups.
+pub const STRIP_H: f32 = 26.0;
+pub const GAP: f32 = 6.0;
 
 /// Simplify palettes (`smart.simplify` names).
 pub const PALETTES: [(&str, &str); 7] = [
@@ -200,58 +209,50 @@ impl RightSidebar<'_> {
         // Size sliders and combos to the drawer: PhotoCraft's defaults
         // (150 / 120 px) make a labelled row wider than it, and egui then
         // pushes the whole right panel past the window edge.
-        let width = ui.available_width();
+        // The width inside a group: the gaps and the body's margins off.
+        let width = ui.available_width() - 2.0 * GAP - 16.0;
         let spacing = ui.spacing_mut();
         spacing.slider_width = (width - 130.0).clamp(60.0, 150.0);
         spacing.combo_width = (width - 120.0).clamp(80.0, 120.0);
-        ui.set_max_width(width);
-        let (title, help) = match mode {
-            InspectorMode::Effects => (
-                "Effects",
-                "Effects change the whole canvas: a border, a drop shadow or a rounded shadow frame. Every change is one undo step.",
-            ),
-            InspectorMode::Properties => ("Tool Properties", tool_help(tool)),
-            InspectorMode::Layers => (
-                "Layers",
-                "Every annotation, topmost first. The eye hides it, the padlock locks it; drag a row to restack, double-click to rename.",
-            ),
-            InspectorMode::History => (
-                "History",
-                "Every edit of this capture. Click a row to go back (or forward) to that point.",
-            ),
+        // Two panel groups, PhotoCraft's dock: Properties | Effects above,
+        // Layers | History below, the gap between them a splitter.
+        let full = ui.max_rect().shrink(GAP);
+        let (upper, lower) = group_rects(
+            full,
+            editor.sidebar.split,
+            editor.sidebar.upper_collapsed,
+            editor.sidebar.lower_collapsed,
+        );
+
+        const MODES: [InspectorMode; 2] = [InspectorMode::Properties, InspectorMode::Effects];
+        let help = match mode {
+            InspectorMode::Effects => {
+                "Effects change the whole canvas: a border, a drop shadow or a rounded shadow frame. Every change is one undo step."
+            }
+            InspectorMode::Properties => tool_help(tool),
         };
-        header(ui, title, help, t);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| match mode {
-                InspectorMode::Layers => {
-                    ui.add_space(t.space_sm);
-                    LayersPanel {
-                        doc: self.doc,
-                        tokens: t,
-                    }
-                    .layers(ui, editor, intents);
-                }
-                InspectorMode::History => {
-                    ui.add_space(t.space_sm);
-                    LayersPanel {
-                        doc: self.doc,
-                        tokens: t,
-                    }
-                    .history(ui, intents);
-                }
+        let mut selected = MODES.iter().position(|m| *m == mode).unwrap_or(0);
+        let mut collapsed = editor.sidebar.upper_collapsed;
+        dock_group(
+            ui,
+            upper,
+            Id::new("sidebar.upper"),
+            &["Properties", "Effects"],
+            (&mut selected, &mut collapsed),
+            help,
+            t,
+            |ui, tab| match MODES.get(tab).copied().unwrap_or_default() {
                 InspectorMode::Effects => {
-                    ui.add_space(t.space_sm);
                     self.effects(ui, intents);
                     self.frame_section(ui, intents);
                     canvas_section(ui, editor);
                 }
-                InspectorMode::Properties if tool == ToolId::Selection => {
-                    ui.add_space(t.space_sm);
-                    self.selection(ui, editor, intents);
-                }
                 InspectorMode::Properties => {
-                    ui.add_space(t.space_sm);
+                    self.selection_text(ui, editor, intents);
+                    if tool == ToolId::Selection {
+                        self.selection(ui, editor, intents);
+                        return;
+                    }
                     if tool.command().is_none() {
                         ui.label(
                             egui::RichText::new(format!(
@@ -280,7 +281,63 @@ impl RightSidebar<'_> {
                         ui.ctx().data_mut(|d| d.insert_temp(pending_id, edited));
                     }
                 }
-            });
+            },
+        );
+        editor.sidebar.mode = MODES.get(selected).copied().unwrap_or_default();
+        editor.sidebar.upper_collapsed = collapsed;
+
+        // The splitter, while both groups are open.
+        if !editor.sidebar.upper_collapsed && !editor.sidebar.lower_collapsed {
+            let gap =
+                ERect::from_min_max(pos2(full.min.x, upper.max.y), pos2(full.max.x, lower.min.y))
+                    .expand2(vec2(0.0, 2.0));
+            let drag = ui
+                .interact(gap, Id::new("sidebar.splitter"), Sense::drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+            if drag.dragged() && full.height() > 0.0 {
+                let split = editor.sidebar.split.clamp(0.2, 0.8);
+                editor.sidebar.split =
+                    (split + drag.drag_delta().y / full.height()).clamp(0.2, 0.8);
+            }
+            if drag.hovered() || drag.dragged() {
+                ui.painter().line_segment(
+                    [gap.left_center(), gap.right_center()],
+                    stroke(2.0, t.accent.gamma_multiply(0.7)),
+                );
+            }
+        }
+
+        const DOCK: [DockTab; 2] = [DockTab::Layers, DockTab::History];
+        let dock = editor.sidebar.dock;
+        let help = match dock {
+            DockTab::Layers => {
+                "Every annotation, topmost first. The eye hides it, the padlock locks it; drag a row to restack, double-click to rename (Enter saves, Esc cancels)."
+            }
+            DockTab::History => {
+                "Every edit of this capture. Click a row to go back (or forward) to that point."
+            }
+        };
+        let mut selected = DOCK.iter().position(|d| *d == dock).unwrap_or(0);
+        let mut collapsed = editor.sidebar.lower_collapsed;
+        let panel = LayersPanel {
+            doc: self.doc,
+            tokens: t,
+        };
+        dock_group(
+            ui,
+            lower,
+            Id::new("sidebar.lower"),
+            &["Layers", "History"],
+            (&mut selected, &mut collapsed),
+            help,
+            t,
+            |ui, tab| match DOCK.get(tab).copied().unwrap_or_default() {
+                DockTab::Layers => panel.layers(ui, editor, intents),
+                DockTab::History => panel.history(ui, intents),
+            },
+        );
+        editor.sidebar.dock = DOCK.get(selected).copied().unwrap_or_default();
+        editor.sidebar.lower_collapsed = collapsed;
         // Commit inspector edits to the selection on release.
         let pending = ui
             .ctx()
@@ -805,6 +862,122 @@ impl RightSidebar<'_> {
         edited
     }
 
+    /// With one callout or text box selected: its text, size, colour and
+    /// alignment. The text is committed when the field loses focus (one
+    /// `annotation.setText`), size and colour as `annotation.setStyle`
+    /// once the pointer is released.
+    fn selection_text(&self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
+        let t = self.tokens;
+        let Some((id, c)) = self
+            .doc
+            .and_then(|d| selected_callout(d, &editor.canvas.selection))
+        else {
+            return;
+        };
+        let run = c.text.runs.first().cloned().unwrap_or_default();
+        let current = c.text.text();
+        let title = if is_text_box(c) {
+            "Text"
+        } else {
+            "Callout Text"
+        };
+        section(ui, title, |ui| {
+            // The field's own copy while it has focus; the document's
+            // text otherwise (so undo and canvas edits show up).
+            let edit_id = Id::new(("sidebar.callout_text", id.0));
+            let focused = ui.memory(|m| m.has_focus(edit_id));
+            let mut text = if focused {
+                ui.data(|d| d.get_temp::<String>(edit_id))
+                    .unwrap_or_else(|| current.clone())
+            } else {
+                current.clone()
+            };
+            let resp = ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .id(edit_id)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Type the callout text"),
+            );
+            if resp.lost_focus() {
+                ui.data_mut(|d| d.remove::<String>(edit_id));
+                if let Some(i) = set_text_intent(id, &current, &text) {
+                    intents.push(i);
+                }
+            } else if resp.has_focus() {
+                ui.data_mut(|d| d.insert_temp(edit_id, text));
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Click away to apply; double-click the callout to type on the canvas.",
+                )
+                .small()
+                .color(t.text_faint),
+            );
+            ui.add_space(t.space_sm);
+
+            // Size and colour: a draft held while the slider is dragged.
+            let draft_id = Id::new(("sidebar.callout_font", id.0));
+            let (mut size, mut color) = ui
+                .data(|d| d.get_temp::<(f32, Color32)>(draft_id))
+                .unwrap_or((run.font.size, c32(run.color)));
+            let mut changed = ui
+                .add(
+                    Slider::new(&mut size, 6.0..=200.0)
+                        .text("Size")
+                        .suffix(" px"),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                ui.label("Colour");
+                changed |= egui::color_picker::color_edit_button_srgba(
+                    ui,
+                    &mut color,
+                    egui::color_picker::Alpha::OnlyBlend,
+                )
+                .changed();
+            });
+            if changed {
+                ui.data_mut(|d| d.insert_temp(draft_id, (size, color)));
+            }
+            let held = ui.data(|d| d.get_temp::<(f32, Color32)>(draft_id));
+            if let Some((size, color)) = held
+                && !ui.input(|i| i.pointer.any_down())
+            {
+                ui.data_mut(|d| d.remove::<(f32, Color32)>(draft_id));
+                let font = capturecraft_format::FontSpec {
+                    size,
+                    ..run.font.clone()
+                };
+                if font != run.font || from_c32(color) != run.color {
+                    intents.push(UiIntent::command(
+                        "annotation.setStyle",
+                        json!({ "ids": [id.0], "font": font, "text_color": from_c32(color) }),
+                    ));
+                }
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Align");
+                for (align, label) in [
+                    (TextAlign::Left, "Left"),
+                    (TextAlign::Center, "Centre"),
+                    (TextAlign::Right, "Right"),
+                ] {
+                    if ui.selectable_label(c.text.align == align, label).clicked()
+                        && c.text.align != align
+                    {
+                        intents.push(UiIntent::command(
+                            "annotation.setText",
+                            json!({ "id": id.0, "align": align }),
+                        ));
+                    }
+                }
+            });
+        });
+        ui.add_space(t.space_sm);
+    }
+
     /// The Selection tool: mode tiles, Snap to Object, Background Fill and
     /// the marquee's actions.
     fn selection(&self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
@@ -1159,6 +1332,27 @@ fn direction_name(dx: i8, dy: i8) -> &'static str {
     }
 }
 
+/// The callout (or text box) when the selection is exactly one.
+pub fn selected_callout<'a>(
+    doc: &'a DocState,
+    selection: &[NodeId],
+) -> Option<(NodeId, &'a Callout)> {
+    let [id] = selection else {
+        return None;
+    };
+    match doc.manifest.node(*id)?.annotation()? {
+        Annotation::Callout(c) => Some((*id, c)),
+        _ => None,
+    }
+}
+
+/// `annotation.setText` for an edited callout text; `None` when unchanged.
+pub fn set_text_intent(id: NodeId, before: &str, text: &str) -> Option<UiIntent> {
+    let text = text.trim_end_matches('\n');
+    (text != before)
+        .then(|| UiIntent::command("annotation.setText", json!({ "id": id.0, "text": text })))
+}
+
 /// `annotation.setStyle` with the tool's current style, for the selection.
 pub fn apply_to_selection(editor: &EditorState, tool: ToolId) -> Option<UiIntent> {
     if editor.canvas.selection.is_empty() {
@@ -1327,29 +1521,170 @@ fn head_combo(ui: &mut Ui, label: &str, head: &mut Option<HeadStyle>, default: H
     }
 }
 
-/// The drawer's title row with the round `?` help icon.
-fn header(ui: &mut Ui, title: &str, help: &str, t: &Tokens) {
-    ui.add_space(t.space_md);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).strong().size(14.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (r, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-            icons::paint(
-                ui.painter(),
-                r,
-                Icon::Help,
-                icon_style(t, resp.hovered(), true),
-            );
-            resp.on_hover_text(help);
-        });
-    });
-    ui.add_space(t.space_sm);
-    let r = ui.available_rect_before_wrap();
-    ui.painter().line_segment(
-        [pos2(r.min.x, r.min.y), pos2(r.max.x, r.min.y)],
-        stroke(1.0, t.chrome_border),
+/// The upper and lower group rects in `full`: open groups share the
+/// height by `split` (with a [`GAP`] between them), a collapsed one keeps
+/// only its tab strip and the other takes the rest.
+pub fn group_rects(
+    full: ERect,
+    split: f32,
+    upper_collapsed: bool,
+    lower_collapsed: bool,
+) -> (ERect, ERect) {
+    let avail = (full.height() - GAP).max(2.0 * STRIP_H);
+    let upper_h = match (upper_collapsed, lower_collapsed) {
+        (true, _) => STRIP_H,
+        (false, true) => avail - STRIP_H,
+        (false, false) => (avail * split.clamp(0.2, 0.8)).max(STRIP_H),
+    };
+    let lower_h = if lower_collapsed {
+        STRIP_H
+    } else {
+        avail - upper_h
+    };
+    let upper = ERect::from_min_size(full.min, vec2(full.width(), upper_h));
+    let lower = ERect::from_min_size(
+        pos2(full.min.x, upper.max.y + GAP),
+        vec2(full.width(), lower_h),
     );
-    ui.add_space(t.space_sm);
+    (upper, lower)
+}
+
+/// One panel group in `rect`, after PhotoCraft's Pro dock: a dark strip
+/// of flat tabs with the ≡ panel menu (collapse, the group's help), the
+/// selected tab's body below in its own scroll area. Double-clicking a
+/// tab folds the group to its strip; clicking a tab of a folded group
+/// opens it again.
+#[allow(clippy::too_many_arguments)]
+fn dock_group(
+    ui: &mut Ui,
+    rect: ERect,
+    id: Id,
+    tabs: &[&str],
+    (selected, collapsed): (&mut usize, &mut bool),
+    help: &str,
+    t: &Tokens,
+    body: impl FnOnce(&mut Ui, usize),
+) {
+    let strip = ERect::from_min_size(rect.min, vec2(rect.width(), STRIP_H));
+    let p = ui.painter().clone();
+    let top = egui::CornerRadius {
+        nw: 3,
+        ne: 3,
+        sw: 0,
+        se: 0,
+    };
+    p.rect_filled(
+        strip,
+        if *collapsed {
+            egui::CornerRadius::same(3)
+        } else {
+            top
+        },
+        t.tab_strip,
+    );
+    let strip_resp = ui.interact(strip, id.with("strip"), Sense::click());
+    let menu = ERect::from_center_size(
+        pos2(strip.right() - 14.0, strip.center().y),
+        vec2(20.0, 18.0),
+    );
+    let font = FontId::proportional(11.5);
+    let mut x = strip.left();
+    let mut toggle = strip_resp.double_clicked();
+    for (i, name) in tabs.iter().enumerate() {
+        let galley = p.layout_no_wrap((*name).to_string(), font.clone(), t.text);
+        let w = (galley.size().x + 22.0).min(menu.left() - x).max(0.0);
+        let r = ERect::from_min_size(pos2(x, strip.top()), vec2(w, STRIP_H));
+        x += w;
+        let resp = ui.interact(r, id.with(i), Sense::click());
+        let active = i == *selected && !*collapsed;
+        if active {
+            let round = egui::CornerRadius {
+                nw: if i == 0 { 3 } else { 0 },
+                ..egui::CornerRadius::ZERO
+            };
+            p.rect_filled(r, round, t.card);
+        } else if resp.hovered() {
+            p.rect_filled(r, 0.0, t.card_hover.gamma_multiply(0.4));
+        }
+        let color = if active {
+            t.text
+        } else if resp.hovered() {
+            t.text_dim
+        } else {
+            t.text_faint
+        };
+        p.with_clip_rect(r).galley_with_override_text_color(
+            r.center() - galley.size() / 2.0,
+            galley,
+            color,
+        );
+        if resp.double_clicked() {
+            *selected = i;
+            toggle = true;
+        } else if resp.clicked() {
+            *selected = i;
+            *collapsed = false;
+        }
+    }
+    let mresp = ui
+        .interact(menu, id.with("menu"), Sense::click())
+        .on_hover_text("Panel menu");
+    let c = if mresp.hovered() {
+        t.text
+    } else {
+        t.text_faint
+    };
+    for k in 0..3 {
+        let y = menu.center().y - 3.5 + k as f32 * 3.5;
+        p.line_segment(
+            [
+                pos2(menu.center().x - 5.0, y),
+                pos2(menu.center().x + 5.0, y),
+            ],
+            stroke(1.0, c),
+        );
+    }
+    egui::Popup::menu(&mresp).show(|ui| {
+        ui.set_max_width(220.0);
+        if ui
+            .button(if *collapsed { "Expand" } else { "Collapse" })
+            .clicked()
+        {
+            toggle = true;
+            ui.close();
+        }
+        ui.separator();
+        ui.label(egui::RichText::new(help).small().color(t.text_dim));
+    });
+    if toggle {
+        *collapsed = !*collapsed;
+    }
+    if *collapsed {
+        return;
+    }
+    let inner = ERect::from_min_max(pos2(rect.min.x, strip.max.y), rect.max);
+    p.rect_filled(
+        inner,
+        egui::CornerRadius {
+            sw: 3,
+            se: 3,
+            ..egui::CornerRadius::ZERO
+        },
+        t.card,
+    );
+    let content = inner.shrink(8.0);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id.with("body"))
+            .max_rect(content),
+    );
+    child.set_clip_rect(inner.intersect(ui.clip_rect()));
+    child.spacing_mut().scroll.fade.strength = 0.0;
+    egui::ScrollArea::vertical()
+        .id_salt(id.with(("scroll", *selected)))
+        .auto_shrink([false, false])
+        .max_height(content.height())
+        .show(&mut child, |ui| body(ui, *selected));
 }
 
 /// What the `?` says about a tool.

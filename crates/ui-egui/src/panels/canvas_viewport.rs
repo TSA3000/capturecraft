@@ -40,7 +40,7 @@ use capturecraft_compositor::{CpuCompositor, GpuCompositor, GpuError, RenderScen
 use capturecraft_engine::DocState;
 use capturecraft_engine::edit_commands::{arrow_midpoint, node_at};
 use capturecraft_engine::node_commands::expand_groups;
-use capturecraft_format::{Annotation, Axis, Color, NodeId, RectF};
+use capturecraft_format::{Annotation, Axis, Color, NodeId, RectF, TextAlign};
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{
     Align2, Color32, ColorImage, CursorIcon, FontId, Id, Key, PointerButton, Pos2, Rect as ERect,
@@ -1192,7 +1192,7 @@ impl CanvasViewport<'_> {
         }
         if resp.double_clicked()
             && !typing_before
-            && matches!(tool, ToolId::Move | ToolId::Text)
+            && matches!(tool, ToolId::Move | ToolId::Text | ToolId::Callout)
             && let Some(p) = resp.interact_pointer_pos()
             && let Some(e) = canvas_tools::text_box_at(m, to_canvas(p))
                 .and_then(|id| canvas_tools::begin_edit_text(m, id))
@@ -1639,9 +1639,10 @@ fn draw_trace(painter: &egui::Painter, xf: &ViewTransform, editor: &EditorState,
     }
 }
 
-/// The text being typed, as a text field over its box at the canvas
-/// zoom. Enter (or a click elsewhere) finishes, Shift+Enter starts a new
-/// line, Esc finishes too; the commit is one command.
+/// The text being typed, as a text field over its box (a callout's: inside
+/// its body) at the canvas zoom. Enter (or a click elsewhere) finishes,
+/// Shift+Enter starts a new line, Esc finishes too; the commit is one
+/// command.
 fn inline_text(
     ui: &mut Ui,
     xf: &ViewTransform,
@@ -1652,9 +1653,14 @@ fn inline_text(
     let Some(mut e) = editor.canvas.text_edit.clone() else {
         return;
     };
-    let (font, color) = canvas_tools::text_style(editor);
+    let (font, color, align) = canvas_tools::edit_style(editor, &e);
     let px = (font.size * xf.scale).clamp(6.0, 200.0);
-    let fit = canvas_tools::fit_text_rect(e.rect, &e.text, font.size);
+    // A callout's text stays inside its body; a text box grows to fit.
+    let fit = if e.bubble {
+        e.rect
+    } else {
+        canvas_tools::fit_text_rect(e.rect, &e.text, font.size)
+    };
     let r = xf.rect_to_screen(fit);
     let id = Id::new("canvas.inline_text");
     let col = Color32::from_rgba_unmultiplied(color.r, color.g, color.b, 255);
@@ -1671,6 +1677,11 @@ fn inline_text(
         .text_color(col)
         .frame(egui::Frame::NONE)
         .desired_width(r.width())
+        .horizontal_align(match align {
+            TextAlign::Left => egui::Align::LEFT,
+            TextAlign::Center => egui::Align::Center,
+            TextAlign::Right => egui::Align::RIGHT,
+        })
         .return_key(Some(egui::KeyboardShortcut::new(
             egui::Modifiers::SHIFT,
             Key::Enter,

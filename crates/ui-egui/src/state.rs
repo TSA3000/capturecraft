@@ -15,6 +15,7 @@
 
 use capturecraft_format::{
     Axis, Color, DropShadow, Fill, FontSpec, HeadStyle, NodeId, Numbering, Offset, RectF, Stroke,
+    TextAlign,
 };
 use photocraft_geom::{Point, Rect, Size};
 use serde::{Deserialize, Serialize};
@@ -1012,8 +1013,15 @@ impl ToolbarState {
 pub struct SidebarState {
     pub visible: bool,
     pub width_px: f32,
-    /// Tool Properties or canvas Effects (the utility bar's tabs).
+    /// The drawer's upper group: Tool Properties or canvas Effects.
     pub mode: InspectorMode,
+    /// The drawer's lower group: Layers or History.
+    pub dock: DockTab,
+    /// Share of the drawer's height the upper group takes (0.2..=0.8).
+    pub split: f32,
+    /// Groups folded to their tab strip (double-click a tab).
+    pub upper_collapsed: bool,
+    pub lower_collapsed: bool,
     pub quick_styles: QuickStyles,
     /// Expanded property sections below the Quick Styles grid.
     pub expanded: Vec<PropertySection>,
@@ -1112,6 +1120,10 @@ impl Default for SidebarState {
             visible: true,
             width_px: 280.0,
             mode: InspectorMode::Properties,
+            dock: DockTab::Layers,
+            split: 0.5,
+            upper_collapsed: false,
+            lower_collapsed: false,
             quick_styles: QuickStyles::default(),
             expanded: vec![PropertySection::Style, PropertySection::Shadow],
             theme: "studio".into(),
@@ -1120,13 +1132,23 @@ impl Default for SidebarState {
     }
 }
 
-/// What the right drawer shows.
+/// What the right drawer's upper group shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InspectorMode {
-    #[default]
-    Properties,
     Effects,
+    /// Also what older saved states that showed Layers or History up
+    /// here load as.
+    #[default]
+    #[serde(other)]
+    Properties,
+}
+
+/// What the right drawer's lower group shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockTab {
+    #[default]
     Layers,
     History,
 }
@@ -1452,6 +1474,12 @@ pub struct TextEditState {
     pub text: String,
     /// The text when editing began (unchanged text commits nothing).
     pub original: String,
+    /// An existing node's font, colour and alignment (a new box takes the
+    /// Text tool's style).
+    pub style: Option<(FontSpec, Color, TextAlign)>,
+    /// The text of a callout bubble: typed inside the body, and emptying
+    /// it clears the text instead of deleting the callout.
+    pub bubble: bool,
 }
 
 /// What a Crop drag grabbed: a handle (`hx`, `hy` each -1, 0 or 1; 0 is
@@ -1949,6 +1977,17 @@ pub enum LibraryView {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawer_tabs_from_older_states_still_load() {
+        let old: SidebarState =
+            serde_json::from_str(r#"{"mode":"layers","theme":"light"}"#).unwrap();
+        assert_eq!(old.mode, InspectorMode::Properties);
+        assert_eq!((old.dock, old.split), (DockTab::Layers, 0.5));
+        assert_eq!(old.theme, "light");
+        let fx: SidebarState = serde_json::from_str(r#"{"mode":"effects"}"#).unwrap();
+        assert_eq!(fx.mode, InspectorMode::Effects);
+    }
 
     #[test]
     fn round_trips_and_tolerates_old_files() {

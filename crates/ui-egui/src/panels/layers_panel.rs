@@ -106,6 +106,23 @@ pub fn history_rows(doc: &DocState) -> (Vec<String>, usize) {
     (rows, current)
 }
 
+/// How a rename field ends this frame: `None` keeps editing; `Some(None)`
+/// ends it without a change (Esc, or the name is the same); `Some(name)`
+/// commits (Enter or a click away). `ended` is the field losing focus.
+pub fn rename_outcome(
+    first: bool,
+    ended: bool,
+    escape: bool,
+    text: &str,
+    current: &str,
+) -> Option<Option<String>> {
+    if first || !ended {
+        return None;
+    }
+    let name = text.trim();
+    Some((!escape && name != current).then(|| name.to_string()))
+}
+
 fn cell_icon(ui: &Ui, r: ERect, on: bool, eye: bool, t: &Tokens) {
     let p = ui.painter();
     let c = r.center();
@@ -239,25 +256,41 @@ impl LayersPanel<'_> {
             match &renaming {
                 Some((id, text)) if *id == node.id => {
                     let mut text = text.clone();
-                    let edit = ui.put(
-                        name_rect,
-                        egui::TextEdit::singleline(&mut text).id(Id::new("layers.rename.edit")),
-                    );
-                    edit.request_focus();
-                    if edit.lost_focus() {
-                        ui.ctx()
-                            .data_mut(|d| d.remove::<(NodeId, String)>(rename_id));
-                        if !ui.input(|i| i.key_pressed(egui::Key::Escape))
-                            && text.trim() != node.name
-                        {
-                            intents.push(UiIntent::command(
-                                "annotation.setProps",
-                                json!({ "ids": [node.id.0], "name": text }),
-                            ));
+                    let edit_id = Id::new("layers.rename.edit");
+                    let edit = ui.put(name_rect, egui::TextEdit::singleline(&mut text).id(edit_id));
+                    // Focus once, when renaming starts: requesting it every
+                    // frame would take it back before `lost_focus` is read,
+                    // so Enter, Esc and a click away could never end it.
+                    let first = ui.ctx().data(|d| d.get_temp::<bool>(edit_id)).is_none();
+                    if first {
+                        edit.request_focus();
+                        ui.ctx().data_mut(|d| d.insert_temp(edit_id, true));
+                    }
+                    match rename_outcome(
+                        first,
+                        edit.lost_focus() || (!first && !edit.has_focus()),
+                        ui.input(|i| i.key_pressed(egui::Key::Escape)),
+                        &text,
+                        &node_label(node),
+                    ) {
+                        Some(commit) => {
+                            ui.ctx().data_mut(|d| {
+                                d.remove::<(NodeId, String)>(rename_id);
+                                d.remove::<bool>(edit_id);
+                            });
+                            if let Some(name) = commit
+                                && name != node.name
+                            {
+                                intents.push(UiIntent::command(
+                                    "annotation.setProps",
+                                    json!({ "ids": [node.id.0], "name": name }),
+                                ));
+                            }
                         }
-                    } else {
-                        ui.ctx()
-                            .data_mut(|d| d.insert_temp(rename_id, (node.id, text)));
+                        None => {
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(rename_id, (node.id, text)));
+                        }
                     }
                 }
                 _ => {
@@ -434,6 +467,24 @@ mod tests {
         // Onto itself, or where it already is.
         assert_eq!(drop_index(2, 2, Drop::Above), None);
         assert_eq!(drop_index(1, 2, Drop::Below), None);
+    }
+
+    #[test]
+    fn renames_commit_on_enter_or_click_away_and_esc_cancels() {
+        // Still typing, or the frame the field opens.
+        assert_eq!(rename_outcome(false, false, false, "New", "Old"), None);
+        assert_eq!(rename_outcome(true, true, false, "New", "Old"), None);
+        // Enter or a click away commits the trimmed name.
+        assert_eq!(
+            rename_outcome(false, true, false, "  New ", "Old"),
+            Some(Some("New".into()))
+        );
+        // Esc ends without a command, as does an unchanged name.
+        assert_eq!(rename_outcome(false, true, true, "New", "Old"), Some(None));
+        assert_eq!(
+            rename_outcome(false, true, false, "Old ", "Old"),
+            Some(None)
+        );
     }
 
     #[test]

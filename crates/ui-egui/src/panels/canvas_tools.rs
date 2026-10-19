@@ -5,7 +5,7 @@
 //! display; `canvas_viewport` wires them to the pointer.
 
 use capturecraft_engine::node_commands::is_text_box;
-use capturecraft_format::{Annotation, FontSpec, Manifest, NodeId, RectF};
+use capturecraft_format::{Annotation, FontSpec, Manifest, NodeId, RectF, TextAlign};
 use photocraft_geom::Point;
 use serde_json::{Map, Value, json};
 
@@ -187,10 +187,14 @@ pub fn begin_new_text(editor: &EditorState, at: Point, rect: Option<RectF>) -> T
         rect,
         text: String::new(),
         original: String::new(),
+        style: None,
+        bubble: false,
     }
 }
 
-/// Starts editing the text of node `id`, if it has any.
+/// Starts editing the text of node `id`, if it has any: a text box in
+/// its box, a callout inside its body (inset by the text padding), both
+/// in the node's own font and colour.
 pub fn begin_edit_text(m: &Manifest, id: NodeId) -> Option<TextEditState> {
     let n = m.node(id)?;
     if n.locked {
@@ -199,32 +203,60 @@ pub fn begin_edit_text(m: &Manifest, id: NodeId) -> Option<TextEditState> {
     match n.annotation()? {
         Annotation::Callout(c) => {
             let text = c.text.text();
+            let run = c.text.runs.first().cloned().unwrap_or_default();
+            let bubble = !is_text_box(c);
+            let rect = if bubble {
+                let pad = f64::from(c.text.padding)
+                    .min(c.bounds.w / 3.0)
+                    .min(c.bounds.h / 3.0);
+                RectF::new(
+                    c.bounds.x + pad,
+                    c.bounds.y + pad,
+                    c.bounds.w - 2.0 * pad,
+                    c.bounds.h - 2.0 * pad,
+                )
+            } else {
+                c.bounds
+            };
             Some(TextEditState {
                 node: Some(id),
-                rect: c.bounds,
+                rect,
                 text: text.clone(),
                 original: text,
+                style: Some((run.font, run.color, c.text.align)),
+                bubble,
             })
         }
         _ => None,
     }
 }
 
-/// The topmost text box under `p` (double-click to edit; the Text tool
-/// clicks into it instead of making a new one).
+/// The topmost text box or callout under `p` (double-click to edit its
+/// text; the Text tool clicks into it instead of making a new box).
 pub fn text_box_at(m: &Manifest, p: Point) -> Option<NodeId> {
     m.annotations
         .iter()
         .rev()
         .filter(|n| n.visible && !n.locked)
         .find(|n| match n.annotation() {
-            Some(Annotation::Callout(c)) if is_text_box(c) => {
+            Some(Annotation::Callout(c)) => {
                 let b = c.bounds;
                 p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h
             }
             _ => false,
         })
         .map(|n| n.id)
+}
+
+/// The font, colour and alignment an inline edit types in.
+pub fn edit_style(
+    editor: &EditorState,
+    e: &TextEditState,
+) -> (FontSpec, capturecraft_format::Color, TextAlign) {
+    e.style.clone().unwrap_or_else(|| {
+        let (font, color) = text_style(editor);
+        (font, color, TextAlign::Left)
+    })
 }
 
 /// The box a new text needs: at least `rect`, grown to the text's lines.
@@ -241,8 +273,8 @@ pub fn fit_text_rect(rect: RectF, text: &str, font_px: f32) -> RectF {
 }
 
 /// What committing an inline edit runs: `annotation.addText` for a new
-/// box (nothing when left empty), `annotation.setText` for a changed one,
-/// `annotation.delete` for one emptied.
+/// box (nothing when left empty), `annotation.setText` for a changed one
+/// or a callout, `annotation.delete` for a text box emptied.
 pub fn text_commit_intent(editor: &EditorState, e: &TextEditState) -> Option<UiIntent> {
     let text = e.text.trim_end_matches('\n');
     match e.node {
@@ -265,11 +297,15 @@ pub fn text_commit_intent(editor: &EditorState, e: &TextEditState) -> Option<UiI
             }
             Some(UiIntent::command("annotation.addText", p))
         }
+        Some(_) if text == e.original => None,
+        Some(id) if e.bubble => Some(UiIntent::command(
+            "annotation.setText",
+            json!({ "id": id.0, "text": text.trim_end() }),
+        )),
         Some(id) if text.trim().is_empty() => Some(UiIntent::command(
             "annotation.delete",
             json!({ "ids": [id.0] }),
         )),
-        Some(_) if text == e.original => None,
         Some(id) => Some(UiIntent::command(
             "annotation.setText",
             json!({ "id": id.0, "text": text }),
@@ -390,6 +426,44 @@ mod tests {
         run(&mut s, text_commit_intent(&e, &edit));
         assert!(s.active().unwrap().manifest.node(id).is_none());
         assert!(text_commit_intent(&e, &begin_new_text(&e, Point::new(1.0, 1.0), None)).is_none());
+    }
+
+    #[test]
+    fn callouts_are_typed_into_inside_their_body_and_survive_emptying() {
+        let mut s = Session::new();
+        let size = Size::new(400, 300);
+        s.open(
+            Manifest::new(size),
+            Pixels::new(size, vec![255; 400 * 300 * 4]),
+        )
+        .unwrap();
+        let out = s
+            .run(
+                "annotation.addCallout",
+                &json!({ "bounds": { "x": 20, "y": 20, "w": 200, "h": 100 },
+                    "font": { "family": "Inter", "size": 30 }, "text_color": "#0000ff" }),
+            )
+            .unwrap();
+        let id = NodeId(out["id"].as_u64().unwrap());
+        let e = EditorState::default();
+        let m = &s.active().unwrap().manifest;
+        assert_eq!(text_box_at(m, Point::new(100.0, 60.0)), Some(id));
+        let mut edit = begin_edit_text(m, id).unwrap();
+        assert!(edit.bubble);
+        assert_eq!(edit.rect, RectF::new(30.0, 30.0, 180.0, 80.0));
+        let (font, color, align) = edit_style(&e, &edit);
+        assert_eq!(
+            (font.size, color),
+            (30.0, capturecraft_format::Color::rgba(0, 0, 255, 255))
+        );
+        assert_eq!(align, TextAlign::Center);
+        edit.text = "Hi\n".into();
+        run(&mut s, text_commit_intent(&e, &edit));
+        edit.original = "Hi".into();
+        edit.text = String::new();
+        run(&mut s, text_commit_intent(&e, &edit));
+        let n = s.active().unwrap().manifest.node(id).unwrap();
+        assert!(matches!(n.annotation(), Some(Annotation::Callout(c)) if c.text.text().is_empty()));
     }
 
     #[test]

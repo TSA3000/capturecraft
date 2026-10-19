@@ -3,10 +3,10 @@
 //! ```text
 //! ┌ menu strip 28 px: File Edit Image Video Share View Help │ name.capturecraft ▾ ┐
 //! ├ toolbar 58 px: Library Assets │ Capture Create   Favorites … More │ Undo Redo   Copy All [Share ▾] ┤
-//! │                                                         │ Tool Properties ?  │
-//! │   canvas on a deep surround (zone 3)                    │ (or Effects)       │
-//! │   or the Library (zone 5)                               │ drawer, 280 px     │
-//! ├ utility bar 32 px: Hide Recent  Tag      100% ▾  W × H px ▾      Effects│Properties ┤
+//! │                                                         │[Properties|Effects]│
+//! │   canvas on a deep surround (zone 3)                    │ drawer, 280 px     │
+//! │   or the Library (zone 5)                               │[Layers | History ] │
+//! ├ utility bar 32 px: Hide Recent  Tag      100% ▾  W × H px ▾                    ┤
 //! └ Recent Captures filmstrip 110 px (zone 4) ──────────────────────────────────────────┘
 //! ```
 //!
@@ -29,10 +29,12 @@ use crate::panels::editor_toolbar::{
 };
 use crate::panels::recent_tray::{RecentTray, Thumbnail};
 use crate::panels::right_sidebar::RightSidebar;
+#[cfg(test)]
+use crate::state::DockTab;
 use crate::state::{AppState, EditorState, InspectorMode, ToolId, TrayItem, Zoom};
 use crate::theme::{ThemeKind, Tokens};
 use crate::views::library_view::LibraryPanel;
-use crate::widgets::{self, icon_style, pill, segmented};
+use crate::widgets::{self, icon_style, pill};
 
 /// Heights of the fixed strips, points.
 pub const MENU_H: f32 = 28.0;
@@ -222,7 +224,7 @@ impl EditorWindow<'_> {
                 .frame(
                     Frame::new()
                         .fill(t.panel)
-                        .inner_margin(Margin::symmetric(t.space_lg as i8 - 4, 0))
+                        .inner_margin(Margin::ZERO)
                         .stroke(egui::Stroke::new(1.0, t.chrome_border)),
                 )
                 .show(ui, |ui| {
@@ -414,7 +416,7 @@ impl EditorWindow<'_> {
                 }
                 ui.separator();
                 ui.checkbox(&mut editor.tray.visible, "Recent Captures");
-                ui.checkbox(&mut editor.sidebar.visible, "Tool Properties");
+                ui.checkbox(&mut editor.sidebar.visible, "Panels");
                 ui.checkbox(&mut editor.library.visible, "Library");
                 ui.checkbox(&mut editor.canvas.checkerboard, "Transparency Grid");
             });
@@ -481,8 +483,8 @@ impl EditorWindow<'_> {
     }
 }
 
-/// Recent and Tag on the left, zoom and canvas size in the middle, the
-/// drawer's Effects / Properties tabs under the drawer.
+/// Recent and Tag on the left, zoom and canvas size in the middle (the
+/// drawer's tabs live in the drawer itself).
 fn utility_bar(
     ui: &mut Ui,
     editor: &mut EditorState,
@@ -588,47 +590,6 @@ fn utility_bar(
             });
         },
     );
-
-    // Right, under the drawer.
-    let tabs_w = 272.0;
-    let x = if editor.sidebar.visible {
-        full.max.x - DRAWER_W + (DRAWER_W - tabs_w) / 2.0
-    } else {
-        full.max.x - tabs_w - 8.0
-    };
-    ui.scope_builder(egui::UiBuilder::new().max_rect(place(x, tabs_w)), |ui| {
-        const MODES: [InspectorMode; 4] = [
-            InspectorMode::Effects,
-            InspectorMode::Properties,
-            InspectorMode::Layers,
-            InspectorMode::History,
-        ];
-        let selected = if editor.sidebar.visible {
-            MODES
-                .iter()
-                .position(|m| *m == editor.sidebar.mode)
-                .unwrap_or(0)
-        } else {
-            MODES.len()
-        };
-        // Labels only: four tabs with icons are wider than the drawer.
-        let items = [
-            (None, "Effects"),
-            (None, "Properties"),
-            (None, "Layers"),
-            (None, "History"),
-        ];
-        if let Some(i) = segmented(ui, Id::new("utility.drawer"), &items, selected, t) {
-            let mode = MODES.get(i).copied().unwrap_or_default();
-            // Clicking the shown tab hides the drawer; the other shows it.
-            if editor.sidebar.visible && editor.sidebar.mode == mode {
-                editor.sidebar.visible = false;
-            } else {
-                editor.sidebar.visible = true;
-                editor.sidebar.mode = mode;
-            }
-        }
-    });
 }
 
 fn tag_popover(anchor: &egui::Response, doc: &DocState, intents: &mut Vec<UiIntent>, t: &Tokens) {
@@ -894,7 +855,11 @@ mod tests {
         /// Clicks the centre of widget `id`; runs the intents in the engine
         /// and returns them.
         fn click(&mut self, id: Id) -> Vec<UiIntent> {
-            let pos = self.rect(id).center();
+            self.click_at(self.rect(id).center())
+        }
+
+        /// Clicks at `pos`, like [`Harness::click`].
+        fn click_at(&mut self, pos: egui::Pos2) -> Vec<UiIntent> {
             let button = |pressed| egui::Event::PointerButton {
                 pos,
                 button: egui::PointerButton::Primary,
@@ -957,15 +922,13 @@ mod tests {
         assert!(h.screen.max.x - rects[rects.len() - 1].max.x < 12.0);
 
         // The utility bar sits above the filmstrip: Recent, Tag, then zoom
-        // and size, then the drawer tabs under the drawer.
+        // and size.
         let bottom = h.screen.max.y - TRAY_H;
         let util = [
             Id::new("utility.recent"),
             Id::new("utility.tag"),
             Id::new("utility.zoom"),
             Id::new("utility.size"),
-            Id::new("utility.drawer").with(0),
-            Id::new("utility.drawer").with(1),
         ];
         let ur: Vec<egui::Rect> = util.iter().map(|id| h.rect(*id)).collect();
         for w in ur.windows(2) {
@@ -974,10 +937,6 @@ mod tests {
         for r in &ur {
             assert!(r.min.y >= bottom - UTILITY_H && r.max.y <= bottom, "{r:?}");
         }
-        assert!(
-            ur[4].min.x >= h.screen.max.x - DRAWER_W,
-            "tabs under the drawer"
-        );
     }
 
     /// Clicking each button does what it says, through the engine.
@@ -1054,11 +1013,17 @@ mod tests {
             h.frame(Vec::new());
         }
 
-        // The drawer tabs and Hide Recent.
-        h.click(Id::new("utility.drawer").with(0));
+        // The drawer's two tab groups, stacked, and Hide Recent.
+        let upper = h.rect(Id::new("sidebar.upper").with(0));
+        let lower = h.rect(Id::new("sidebar.lower").with(0));
+        assert!(upper.max.y < lower.min.y, "{upper:?} {lower:?}");
+        assert!(upper.min.x >= h.screen.max.x - DRAWER_W, "{upper:?}");
+        h.click(Id::new("sidebar.upper").with(1));
         assert_eq!(h.state.editor.sidebar.mode, InspectorMode::Effects);
-        h.click(Id::new("utility.drawer").with(1));
+        h.click(Id::new("sidebar.upper").with(0));
         assert_eq!(h.state.editor.sidebar.mode, InspectorMode::Properties);
+        h.click(Id::new("sidebar.lower").with(1));
+        assert_eq!(h.state.editor.sidebar.dock, DockTab::History);
         assert!(h.state.editor.sidebar.visible);
         h.click(Id::new("utility.recent"));
         assert!(!h.state.editor.tray.visible);
@@ -1260,8 +1225,8 @@ mod tests {
                 .contains(&UiIntent::CopyImage)
         );
 
-        h.click(Id::new("utility.drawer").with(2));
-        assert_eq!(h.state.editor.sidebar.mode, InspectorMode::Layers);
+        h.click(Id::new("sidebar.lower").with(0));
+        assert_eq!(h.state.editor.sidebar.dock, DockTab::Layers);
         h.frame(Vec::new());
         let id = h.session.active().unwrap().manifest.annotations[0].id.0;
         h.click(Id::new(("layers.eye", id)));
@@ -1269,8 +1234,8 @@ mod tests {
         let n = h.session.active().unwrap().manifest.annotations[0].clone();
         assert!(!n.visible && n.locked);
 
-        h.click(Id::new("utility.drawer").with(3));
-        assert_eq!(h.state.editor.sidebar.mode, InspectorMode::History);
+        h.click(Id::new("sidebar.lower").with(1));
+        assert_eq!(h.state.editor.sidebar.dock, DockTab::History);
         // Ctrl+Z twice undoes the lock and the hide.
         for _ in 0..2 {
             let out = h.frame(vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
@@ -1286,14 +1251,12 @@ mod tests {
     fn the_drawer_fits_in_every_mode_and_tool() {
         let mut h = Harness::new();
         let right = h.screen.max.x;
-        let mut cases = vec![(InspectorMode::Effects, ToolId::Arrow)];
-        cases.extend(ToolId::ALL.map(|t| (InspectorMode::Properties, t)));
-        cases.extend([
-            (InspectorMode::Layers, ToolId::Move),
-            (InspectorMode::History, ToolId::Move),
-        ]);
-        for (mode, tool) in cases {
+        let mut cases = vec![(InspectorMode::Effects, DockTab::Layers, ToolId::Arrow)];
+        cases.extend(ToolId::ALL.map(|t| (InspectorMode::Properties, DockTab::Layers, t)));
+        cases.push((InspectorMode::Properties, DockTab::History, ToolId::Move));
+        for (mode, dock, tool) in cases {
             h.state.editor.sidebar.mode = mode;
+            h.state.editor.sidebar.dock = dock;
             h.state.editor.toolbar.active = tool;
             h.frame(Vec::new());
             h.frame(Vec::new());
@@ -1305,11 +1268,133 @@ mod tests {
                     .filter(|r| r.max.x > right + 0.5)
                     .collect()
             });
-            assert!(over.is_empty(), "{mode:?} {tool:?}: {over:?}");
+            assert!(over.is_empty(), "{mode:?} {dock:?} {tool:?}: {over:?}");
             if mode == InspectorMode::Effects {
                 let tile = h.rect(Id::new(("sidebar.effect", 0usize)));
                 assert!(tile.min.x >= right - DRAWER_W, "{tile:?}");
             }
         }
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Double-click a layer to rename it: Enter saves, Esc cancels, a
+    /// click away saves; each ends the editing.
+    #[test]
+    fn layer_renames_end_on_enter_esc_and_click_away() {
+        let mut h = Harness::new();
+        h.session
+            .run("annotation.addStep", &json!({ "at": { "x": 10, "y": 10 } }))
+            .unwrap();
+        h.frame(Vec::new());
+        let id = h.session.active().unwrap().manifest.annotations[0].id;
+        let rename_id = Id::new("layers.rename");
+        let renaming = |h: &Harness| {
+            h.ctx
+                .data(|d| d.get_temp::<(capturecraft_format::NodeId, String)>(rename_id))
+                .is_some()
+        };
+        let name = |h: &Harness| {
+            h.session.active().unwrap().manifest.annotations[0]
+                .name
+                .clone()
+        };
+        let double_click = |h: &mut Harness| {
+            // A fresh pointer: the last double-click must not make this
+            // one a triple click.
+            h.ctx.input_mut(|i| i.pointer = Default::default());
+            let pos = h.rect(Id::new(("layers.eye", id.0))).center() + vec2(120.0, 0.0);
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            h.frame(vec![egui::Event::PointerMoved(pos)]);
+            for _ in 0..2 {
+                h.frame(vec![button(true)]);
+                h.frame(vec![button(false)]);
+            }
+            h.frame(Vec::new());
+            h.frame(Vec::new());
+        };
+        let select_all_key = || egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let type_and = |h: &mut Harness, text: &str, end: Vec<egui::Event>| {
+            h.frame(vec![select_all_key(), egui::Event::Text(text.into())]);
+            let mut out = h.frame(end);
+            out.extend(h.frame(Vec::new()));
+            crate::dispatch(&mut h.session, out);
+            h.frame(Vec::new());
+        };
+
+        double_click(&mut h);
+        assert!(renaming(&h));
+        type_and(&mut h, "Intro", vec![key(egui::Key::Enter)]);
+        assert!(!renaming(&h));
+        assert_eq!(name(&h), "Intro");
+
+        double_click(&mut h);
+        assert!(renaming(&h));
+        type_and(&mut h, "Nope", vec![key(egui::Key::Escape)]);
+        assert!(!renaming(&h));
+        assert_eq!(name(&h), "Intro");
+
+        double_click(&mut h);
+        assert!(renaming(&h));
+        h.frame(vec![select_all_key(), egui::Event::Text("Outro".into())]);
+        h.click_at(h.rect(Id::new("sidebar.upper").with(0)).center());
+        h.frame(Vec::new());
+        assert!(!renaming(&h));
+        assert_eq!(name(&h), "Outro");
+    }
+
+    /// A selected callout shows its text in Properties; typing there and
+    /// clicking away sets it.
+    #[test]
+    fn selected_callouts_edit_their_text_in_properties() {
+        let mut h = Harness::new();
+        let out = h
+            .session
+            .run(
+                "annotation.addCallout",
+                &json!({ "bounds": { "x": 20, "y": 20, "w": 200, "h": 100 } }),
+            )
+            .unwrap();
+        let id = capturecraft_format::NodeId(out["id"].as_u64().unwrap());
+        h.state.editor.canvas.selection = vec![id];
+        h.state.editor.toolbar.active = ToolId::Move;
+        h.frame(Vec::new());
+        let field = Id::new(("sidebar.callout_text", id.0));
+        h.click(field);
+        h.frame(vec![egui::Event::Text("Look here".into())]);
+        let away = h.rect(Id::new("sidebar.upper").with(0)).center();
+        h.click_at(away);
+        let text = match h
+            .session
+            .active()
+            .unwrap()
+            .manifest
+            .node(id)
+            .unwrap()
+            .annotation()
+        {
+            Some(Annotation::Callout(c)) => c.text.text(),
+            _ => unreachable!(),
+        };
+        assert_eq!(text, "Look here");
     }
 }
