@@ -23,5 +23,11 @@ capturecraft-ui-egui = { workspace = true }
 photocraft-geom = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x11", "persistence"] }
+photocraft-codecs = { workspace = true }
+pdfcraft-create = { workspace = true }
+pdfcraft-cos = { workspace = true }
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Copy All (the root package uses the same version).
+arboard = "3.7"
+base64 = "0.22"

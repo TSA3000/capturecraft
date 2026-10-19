@@ -1,17 +1,27 @@
 //! Zone 1: the editor's top toolbar.
 //!
-//! Left to right: the pinned tools (customisable, the rest behind More),
-//! the Frame toggle (the document's rounded shadow frame), Undo and Redo,
-//! Library, Copy and Share, and the orange Capture button. Choosing a tool
-//! is view state; everything else is a [`UiIntent`].
+//! Left: Capture, the Library toggle, Undo and Redo, the zoom combo (Fit,
+//! 100 %, 200 %) and the Cut Out / Simplify / Combine quick triggers.
+//! Middle: the tool strip (pinned tools, the rest behind More) and the
+//! Frame toggle (the document's rounded shadow frame). Right: Copy All
+//! and the Share / Export menu. Choosing a tool or a zoom is view state;
+//! everything else is a [`UiIntent`].
 
 use capturecraft_format::CanvasBackdrop;
 use egui::{Align, Layout, RichText, Ui, vec2};
 
 use crate::UiIntent;
 use crate::panels::gizmo::backdrop_intent;
-use crate::state::{EditorState, ToolId, ToolbarState};
+use crate::state::{EditorState, ImageFormat, ToolId, ToolbarState, Zoom};
 use crate::theme::Tokens;
+use crate::views::editor_window::zoom_label;
+
+/// The zoom combo's presets.
+pub const ZOOM_PRESETS: [Zoom; 3] = [
+    Zoom::Fit,
+    Zoom::Percent { value: 100.0 },
+    Zoom::Percent { value: 200.0 },
+];
 
 /// A glyph per tool (egui's bundled emoji font has all of them).
 pub fn tool_icon(t: ToolId) -> &'static str {
@@ -54,6 +64,19 @@ pub fn select_tool(bar: &mut ToolbarState, tool: ToolId) {
     bar.active = tool;
 }
 
+/// Picks a zoom preset; the view recentres.
+pub fn set_zoom(editor: &mut EditorState, zoom: Zoom) {
+    editor.canvas.zoom = zoom;
+    editor.canvas.scroll = [0.0, 0.0];
+}
+
+/// The Combine trigger: the tray's multi-selection, two or more.
+pub fn combine_intent(editor: &EditorState) -> Option<UiIntent> {
+    (editor.tray.selected.len() >= 2).then(|| UiIntent::CombineImages {
+        doc_ids: editor.tray.selected.clone(),
+    })
+}
+
 /// The Frame toggle: on adds the default rounded shadow frame, off removes
 /// the frame.
 pub fn frame_toggle_intent(current: &CanvasBackdrop) -> UiIntent {
@@ -61,6 +84,15 @@ pub fn frame_toggle_intent(current: &CanvasBackdrop) -> UiIntent {
         CanvasBackdrop::None => CanvasBackdrop::rounded_shadow_frame(),
         CanvasBackdrop::RoundedShadowFrame { .. } => CanvasBackdrop::None,
     })
+}
+
+/// A Share / Export menu entry.
+pub fn export_label(f: ImageFormat) -> String {
+    match f {
+        ImageFormat::Pdf => "PDF (every open capture, one per page)".into(),
+        ImageFormat::Svg => "SVG (image inside)".into(),
+        f => f.label().into(),
+    }
 }
 
 pub struct EditorToolbar<'a> {
@@ -74,8 +106,89 @@ pub struct EditorToolbar<'a> {
 impl EditorToolbar<'_> {
     pub fn show(self, ui: &mut Ui, editor: &mut EditorState, intents: &mut Vec<UiIntent>) {
         let t = self.tokens;
+        let has_doc = self.backdrop.is_some();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = vec2(t.space_sm, t.space_sm);
+            // --- Left ------------------------------------------------------
+            let capture = egui::Button::new(
+                RichText::new("● Capture")
+                    .color(t.accent_capture_text)
+                    .strong(),
+            )
+            .fill(t.accent_capture)
+            .corner_radius(Tokens::corner(t.radius_pill));
+            if ui
+                .add(capture)
+                .on_hover_text("New capture (opens the crosshair)")
+                .clicked()
+            {
+                intents.push(UiIntent::NewCapture);
+            }
+            let lib = &mut editor.library.visible;
+            if ui
+                .selectable_label(*lib, "▤ Library")
+                .on_hover_text("Show past captures instead of the canvas")
+                .clicked()
+            {
+                *lib = !*lib;
+            }
+            ui.separator();
+            ui.add_enabled_ui(self.can_undo, |ui| {
+                if ui.button("↶").on_hover_text("Undo").clicked() {
+                    intents.push(UiIntent::command("edit.undo", serde_json::json!({})));
+                }
+            });
+            ui.add_enabled_ui(self.can_redo, |ui| {
+                if ui.button("↷").on_hover_text("Redo").clicked() {
+                    intents.push(UiIntent::command("edit.redo", serde_json::json!({})));
+                }
+            });
+            egui::ComboBox::from_id_salt("toolbar.zoom")
+                .width(64.0)
+                .selected_text(zoom_label(editor.canvas.zoom))
+                .show_ui(ui, |ui| {
+                    for z in ZOOM_PRESETS {
+                        if ui
+                            .selectable_label(editor.canvas.zoom == z, zoom_label(z))
+                            .clicked()
+                        {
+                            set_zoom(editor, z);
+                        }
+                    }
+                });
+            ui.separator();
+            ui.add_enabled_ui(has_doc, |ui| {
+                for (tool, hint) in [
+                    (ToolId::CutOut, "Cut Out: remove a strip and close the gap"),
+                    (
+                        ToolId::Simplify,
+                        "Simplify: replace text and detail with shapes",
+                    ),
+                ] {
+                    let on = editor.toolbar.active == tool;
+                    if ui
+                        .selectable_label(on, tool_icon(tool))
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        select_tool(&mut editor.toolbar, tool);
+                    }
+                }
+            });
+            let combine = combine_intent(editor);
+            if ui
+                .add_enabled(combine.is_some(), egui::Button::new("⧉"))
+                .on_hover_text("Combine the selected captures into one")
+                .on_disabled_hover_text(
+                    "Combine: Ctrl/Cmd+Click two or more captures in the tray first",
+                )
+                .clicked()
+                && let Some(i) = combine
+            {
+                intents.push(i);
+            }
+            ui.separator();
+            // --- Middle: tools ---------------------------------------------
             for tool in editor.toolbar.pinned.clone() {
                 let on = editor.toolbar.active == tool;
                 let b = ui
@@ -104,7 +217,7 @@ impl EditorToolbar<'_> {
                 self.backdrop,
                 Some(CanvasBackdrop::RoundedShadowFrame { .. })
             );
-            ui.add_enabled_ui(self.backdrop.is_some(), |ui| {
+            ui.add_enabled_ui(has_doc, |ui| {
                 if ui
                     .selectable_label(framed, "▢ Frame")
                     .on_hover_text("Rounded corners, shadow and backdrop")
@@ -114,41 +227,25 @@ impl EditorToolbar<'_> {
                     intents.push(frame_toggle_intent(b));
                 }
             });
-            ui.separator();
-            ui.add_enabled_ui(self.can_undo, |ui| {
-                if ui.button("↶").on_hover_text("Undo").clicked() {
-                    intents.push(UiIntent::command("edit.undo", serde_json::json!({})));
-                }
-            });
-            ui.add_enabled_ui(self.can_redo, |ui| {
-                if ui.button("↷").on_hover_text("Redo").clicked() {
-                    intents.push(UiIntent::command("edit.redo", serde_json::json!({})));
-                }
-            });
+            // --- Right -----------------------------------------------------
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let capture = egui::Button::new(
-                    RichText::new("● Capture")
-                        .color(t.accent_capture_text)
-                        .strong(),
-                )
-                .fill(t.accent_capture)
-                .corner_radius(Tokens::corner(t.radius_pill));
-                if ui.add(capture).clicked() {
-                    intents.push(UiIntent::NewCapture);
-                }
-                let has_doc = self.backdrop.is_some();
                 ui.add_enabled_ui(has_doc, |ui| {
-                    if ui.button("⤴ Share").clicked() {
-                        intents.push(UiIntent::Share);
-                    }
-                    if ui.button("⧉ Copy").clicked() {
+                    ui.menu_button("⤴ Share / Export ▾", |ui| {
+                        for format in ImageFormat::EXPORT {
+                            if ui.button(export_label(format)).clicked() {
+                                intents.push(UiIntent::Export { format });
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui
+                        .button("⧉ Copy All")
+                        .on_hover_text("Copy the image with every annotation")
+                        .clicked()
+                    {
                         intents.push(UiIntent::CopyImage);
                     }
                 });
-                let lib = &mut editor.library.visible;
-                if ui.selectable_label(*lib, "▤ Library").clicked() {
-                    *lib = !*lib;
-                }
             });
         });
     }
@@ -192,5 +289,30 @@ mod tests {
             assert!(!tool_icon(t).is_empty());
         }
         assert!(ToolbarState::default().pinned.contains(&ToolId::Spotlight));
+    }
+
+    #[test]
+    fn zoom_presets_recentre_and_combine_needs_two() {
+        let mut e = EditorState::default();
+        e.canvas.scroll = [40.0, -10.0];
+        set_zoom(&mut e, ZOOM_PRESETS[2]);
+        assert_eq!(e.canvas.zoom, Zoom::Percent { value: 200.0 });
+        assert_eq!(e.canvas.scroll, [0.0, 0.0]);
+        assert_eq!(combine_intent(&e), None);
+        e.tray.selected = vec!["a".into(), "b".into()];
+        assert_eq!(
+            combine_intent(&e),
+            Some(UiIntent::CombineImages {
+                doc_ids: vec!["a".into(), "b".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn export_menu_lists_the_formats_in_order() {
+        let labels: Vec<_> = ImageFormat::EXPORT.map(|f| f.label()).to_vec();
+        assert_eq!(labels, ["PNG", "JPEG", "WebP", "SVG", "PDF"]);
+        assert!(export_label(ImageFormat::Pdf).contains("one per page"));
+        assert_eq!(ImageFormat::Jpeg.extension(), "jpg");
     }
 }

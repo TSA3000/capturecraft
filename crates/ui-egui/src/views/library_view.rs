@@ -74,6 +74,7 @@ pub fn library_items<'a>(
         .filter(|i| f.kind.is_none_or(|k| i.kind == k))
         .filter(|i| f.app.as_ref().is_none_or(|a| &i.app_name == a))
         .filter(|i| !f.favorites_only || i.favorite)
+        .filter(|i| !f.simplified_only || i.simplified)
         .filter(|i| date_matches(&f.date, &i.captured_at, today))
         .collect();
     let key = |i: &TrayItem| -> String {
@@ -88,6 +89,18 @@ pub fn library_items<'a>(
         out.reverse();
     }
     out
+}
+
+/// Every source app in `items`, sorted, once.
+pub fn all_apps(items: &[TrayItem]) -> Vec<String> {
+    let mut apps: Vec<String> = items
+        .iter()
+        .map(|i| i.app_name.clone())
+        .filter(|a| !a.is_empty())
+        .collect();
+    apps.sort();
+    apps.dedup();
+    apps
 }
 
 /// Every tag in `items`, sorted, once.
@@ -155,6 +168,19 @@ impl LibraryPanel<'_> {
                         ui.selectable_value(&mut lib.filters.date, d, label);
                     }
                 });
+            let apps = all_apps(self.items);
+            if !apps.is_empty() {
+                egui::ComboBox::from_id_salt("library.app")
+                    .selected_text(lib.filters.app.as_deref().unwrap_or("All apps"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut lib.filters.app, None, "All apps");
+                        for a in apps {
+                            let label = a.clone();
+                            ui.selectable_value(&mut lib.filters.app, Some(a), label);
+                        }
+                    });
+            }
+            ui.checkbox(&mut lib.filters.simplified_only, "◫ Simplified");
             ui.checkbox(&mut lib.filters.favorites_only, "★ Favorites");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("✖ Close").clicked() {
@@ -419,6 +445,21 @@ mod tests {
 
     fn ids(v: Vec<&TrayItem>) -> Vec<&str> {
         v.into_iter().map(|i| i.doc_id.as_str()).collect()
+    }
+
+    #[test]
+    fn app_and_simplified_filters() {
+        let mut items = items();
+        items[1].app_name = "Explorer".into();
+        items[2].simplified = true;
+        assert_eq!(all_apps(&items), ["Explorer", "Firefox"]);
+        let mut lib = LibraryState::default();
+        lib.filters.app = Some("Firefox".into());
+        let mut got = ids(library_items(&items, &lib, "2026-10-19"));
+        got.sort();
+        assert_eq!(got, ["a", "c"]);
+        lib.filters.simplified_only = true;
+        assert_eq!(ids(library_items(&items, &lib, "2026-10-19")), ["c"]);
     }
 
     #[test]

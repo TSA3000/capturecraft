@@ -234,6 +234,26 @@ pub fn step(
     snap: bool,
     hit: impl FnOnce([i32; 2]) -> Option<HoverTarget>,
 ) -> Option<OverlayAction> {
+    let action = advance(state, event, snap, hit);
+    // A selection that just locked is captured at once when asked to.
+    let locked = matches!(event, OverlayEvent::Click(_) | OverlayEvent::DragEnd(_));
+    match (&state.phase, action) {
+        (OverlayPhase::Selected { rect, source }, None) if locked && state.capture_on_select => {
+            Some(OverlayAction::CaptureImage {
+                rect: *rect,
+                source: source.clone(),
+            })
+        }
+        (_, action) => action,
+    }
+}
+
+fn advance(
+    state: &mut CrosshairOverlayState,
+    event: OverlayEvent,
+    snap: bool,
+    hit: impl FnOnce([i32; 2]) -> Option<HoverTarget>,
+) -> Option<OverlayAction> {
     match (event, &mut state.phase) {
         (OverlayEvent::Cancel, _) => return Some(OverlayAction::Cancel),
         (OverlayEvent::Hover(p), phase) => {
@@ -885,6 +905,46 @@ mod tests {
         let full = screen;
         let r = action_bar_rect(full, bar, screen, 8.0);
         assert_eq!(r.max.y, 792.0);
+    }
+
+    #[test]
+    fn capture_on_select_skips_the_action_bar() {
+        let mut s = CrosshairOverlayState {
+            capture_on_select: true,
+            ..CrosshairOverlayState::default()
+        };
+        let none = |_| None;
+        assert_eq!(
+            step(&mut s, OverlayEvent::DragStart([10, 10]), true, none),
+            None
+        );
+        let got = step(&mut s, OverlayEvent::DragEnd([110, 60]), true, none);
+        assert_eq!(
+            got,
+            Some(OverlayAction::CaptureImage {
+                rect: Rect::new(10, 10, 111, 61),
+                source: SelectionSource::Region,
+            })
+        );
+        // A click on a hovered window captures it too.
+        let mut s = CrosshairOverlayState {
+            capture_on_select: true,
+            ..CrosshairOverlayState::default()
+        };
+        let win = Rect::new(0, 0, 300, 200);
+        step(&mut s, OverlayEvent::Hover([5, 5]), true, |_| target(win));
+        let got = step(&mut s, OverlayEvent::Click([5, 5]), true, none);
+        assert!(matches!(got, Some(OverlayAction::CaptureImage { rect, .. }) if rect == win));
+        // A tiny drag still captures nothing.
+        let mut s = CrosshairOverlayState {
+            capture_on_select: true,
+            ..CrosshairOverlayState::default()
+        };
+        step(&mut s, OverlayEvent::DragStart([10, 10]), true, none);
+        assert_eq!(
+            step(&mut s, OverlayEvent::DragEnd([11, 11]), true, none),
+            None
+        );
     }
 
     #[test]

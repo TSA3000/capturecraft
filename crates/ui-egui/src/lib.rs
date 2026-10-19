@@ -45,10 +45,11 @@ pub enum UiIntent {
     ShowEditor,
     /// Open the preferences window.
     OpenSettings,
-    /// Copy the active document's rendered image to the clipboard.
+    /// Copy the active document's flattened image to the clipboard.
     CopyImage,
-    /// Share/export the active document (file, PDF, upload).
-    Share,
+    /// Export the active document in `format`; a PDF holds every open
+    /// document, one per page.
+    Export { format: state::ImageFormat },
     /// Close these documents and drop them from the library (the app asks
     /// before discarding unsaved ones).
     DeleteDocuments { doc_ids: Vec<String> },

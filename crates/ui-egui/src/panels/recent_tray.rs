@@ -10,6 +10,9 @@ use egui::{
     Align2, Color32, FontId, Id, Pos2, Rect as ERect, Sense, StrokeKind, TextureId, Ui, pos2, vec2,
 };
 
+use capturecraft_engine::{DocState, Session};
+use capturecraft_format::CaptureMode;
+
 use crate::UiIntent;
 use crate::state::{MediaKind, RecentTray as TrayState, TrayItem};
 use crate::theme::{Tokens, stroke};
@@ -19,6 +22,65 @@ use crate::theme::{Tokens, stroke};
 pub struct Thumbnail {
     pub texture: TextureId,
     pub size: [u32; 2],
+}
+
+/// The tray entry of an open document, from its capture metadata.
+pub fn tray_item(doc: &DocState) -> TrayItem {
+    let m = &doc.manifest;
+    let title = if m.title.trim().is_empty() {
+        // `2026-10-19T14:03:11+02:00` → `Capture 14:03`.
+        match m.capture.captured_at.get(11..16) {
+            Some(hm) => format!("Capture {hm}"),
+            None => "Capture".into(),
+        }
+    } else {
+        m.title.clone()
+    };
+    TrayItem {
+        doc_id: m.id.clone(),
+        title,
+        kind: match m.capture.mode {
+            CaptureMode::Scrolling => MediaKind::Panorama,
+            _ => MediaKind::Image,
+        },
+        thumbnail_path: None,
+        file_path: None,
+        captured_at: m.capture.captured_at.clone(),
+        // Documents live in the session until Save exists.
+        unsaved: true,
+        tags: m.library.tags.clone(),
+        app_name: m
+            .capture
+            .source
+            .as_ref()
+            .map(|s| s.app_name.clone())
+            .unwrap_or_default(),
+        favorite: m.library.favorite,
+        simplified: doc.simplify_state().is_some(),
+    }
+}
+
+/// Brings the tray in line with the session: every open document has an
+/// item (new ones in front), items refresh from their document, items that
+/// are neither open nor saved to a file are dropped (a restart empties the
+/// session), and the active document is the highlighted one.
+pub fn sync_tray(tray: &mut TrayState, session: &Session) {
+    let docs = session.documents();
+    let open = |id: &str| docs.iter().any(|d| d.manifest.id == id);
+    tray.items
+        .retain(|i| open(&i.doc_id) || i.file_path.is_some());
+    tray.selected.retain(|id| open(id));
+    for doc in docs {
+        let fresh = tray_item(doc);
+        match tray.items.iter_mut().find(|i| i.doc_id == fresh.doc_id) {
+            Some(item) => {
+                let file_path = item.file_path.take();
+                *item = TrayItem { file_path, ..fresh };
+            }
+            None => tray.push(fresh),
+        }
+    }
+    tray.active = session.active().map(|d| d.manifest.id.clone());
 }
 
 /// Height of the strip's header row, points.
@@ -227,5 +289,50 @@ mod tests {
         let tall = fit_rect([100, 4000], b);
         assert!((tall.height() - 100.0).abs() < 1e-3 && tall.width() < 3.0);
         assert!(fit_rect([0, 0], b).is_finite());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod sync_tests {
+    use super::*;
+    use capturecraft_format::Manifest;
+    use photocraft_geom::Size;
+
+    fn open(s: &mut Session, id: &str, at: &str) {
+        let mut m = Manifest::new(Size::new(4, 4));
+        m.id = id.into();
+        m.capture.captured_at = at.into();
+        s.open(m, None).unwrap();
+    }
+
+    #[test]
+    fn the_tray_follows_the_session() {
+        let mut tray = TrayState::default();
+        // An item left over from an earlier run: not open, never saved.
+        tray.push(TrayItem {
+            doc_id: "stale".into(),
+            ..TrayItem::default()
+        });
+        tray.push(TrayItem {
+            doc_id: "saved".into(),
+            file_path: Some("/tmp/a.capturecraft".into()),
+            ..TrayItem::default()
+        });
+        let mut s = Session::new();
+        open(&mut s, "a", "2026-10-19T09:15:00+02:00");
+        open(&mut s, "b", "2026-10-19T09:20:00+02:00");
+        sync_tray(&mut tray, &s);
+        let ids: Vec<_> = tray.items.iter().map(|i| i.doc_id.as_str()).collect();
+        assert_eq!(ids, ["b", "a", "saved"]);
+        assert_eq!(tray.active.as_deref(), Some("b"));
+        assert_eq!(tray.items[0].title, "Capture 09:20");
+        assert!(tray.items[0].unsaved);
+
+        // Activating another document moves the highlight, not the order.
+        s.activate(0).unwrap();
+        sync_tray(&mut tray, &s);
+        assert_eq!(tray.active.as_deref(), Some("a"));
+        assert_eq!(tray.items.len(), 3);
     }
 }

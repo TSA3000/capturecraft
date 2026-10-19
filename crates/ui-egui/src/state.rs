@@ -174,6 +174,8 @@ pub enum CaptureEffect {
         sides: [bool; 4],
         amplitude_px: f32,
     },
+    /// The rounded shadow frame (`CanvasBackdrop::rounded_shadow_frame`).
+    RoundedFrame,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -200,6 +202,43 @@ pub enum ImageFormat {
     Avif,
     Gif,
     Pdf,
+    /// The flattened capture as an `<image>` in an SVG (raster inside).
+    Svg,
+}
+
+impl ImageFormat {
+    /// What Share / Export offers, in menu order.
+    pub const EXPORT: [ImageFormat; 5] = [
+        ImageFormat::Png,
+        ImageFormat::Jpeg,
+        ImageFormat::Webp,
+        ImageFormat::Svg,
+        ImageFormat::Pdf,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "PNG",
+            ImageFormat::Jpeg => "JPEG",
+            ImageFormat::Webp => "WebP",
+            ImageFormat::Avif => "AVIF",
+            ImageFormat::Gif => "GIF",
+            ImageFormat::Pdf => "PDF",
+            ImageFormat::Svg => "SVG",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpg",
+            ImageFormat::Webp => "webp",
+            ImageFormat::Avif => "avif",
+            ImageFormat::Gif => "gif",
+            ImageFormat::Pdf => "pdf",
+            ImageFormat::Svg => "svg",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -375,6 +414,9 @@ pub struct CrosshairOverlayState {
     pub cursor: Option<[i32; 2]>,
     /// What a click would capture right now.
     pub hover: Option<HoverTarget>,
+    /// Capture as soon as a selection locks (mouse release, window
+    /// click) instead of showing the action bar: the Image tab.
+    pub capture_on_select: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1379,6 +1421,8 @@ pub struct TrayItem {
     /// `SourceInfo::app_name` of the capture.
     pub app_name: String,
     pub favorite: bool,
+    /// Smart Simplify replaced its text and detail.
+    pub simplified: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1442,6 +1486,8 @@ pub struct LibraryFilters {
     pub tags: Vec<String>,
     pub kind: Option<MediaKind>,
     pub favorites_only: bool,
+    /// Only Smart-Simplified captures.
+    pub simplified_only: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
