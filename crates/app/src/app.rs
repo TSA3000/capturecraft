@@ -81,6 +81,8 @@ pub enum ShellAction {
     Duplicate(String),
     CopyDocument(String),
     NewBlank,
+    /// Show a message in the toast.
+    Notice(String),
     /// Not wired up yet; shown as a notice.
     Unavailable(&'static str),
 }
@@ -112,6 +114,9 @@ pub fn shell_action(intent: &UiIntent) -> ShellAction {
         UiIntent::NewBlankImage => ShellAction::NewBlank,
         UiIntent::OpenFile { path } => ShellAction::Open(PathBuf::from(path)),
         UiIntent::Unavailable(what) => ShellAction::Unavailable(what),
+        UiIntent::Notice(text) => ShellAction::Notice(text.clone()),
+        UiIntent::Save { .. } => ShellAction::Unavailable("Saving .capturecraft documents"),
+        UiIntent::OpenDialog => ShellAction::Unavailable("File › Open"),
         UiIntent::Command { .. } | UiIntent::ActivateDocument { .. } => {
             ShellAction::Unavailable("engine intent")
         }
@@ -168,8 +173,19 @@ pub struct CaptureCraftApp {
     library: LibraryFiles,
     /// The tray app's output folder (its config.toml), read at start.
     tray_dir: Option<PathBuf>,
+    /// The toast on screen and when it appeared.
+    toast: Option<(String, Instant)>,
     /// The window title last sent.
     title: String,
+}
+
+/// How long a toast stays, seconds; the last half second fades it out.
+pub const TOAST_SECS: f32 = 3.0;
+const TOAST_FADE: f32 = 0.5;
+
+/// Opacity of a toast `age` seconds old.
+pub fn toast_alpha(age: f32) -> f32 {
+    ((TOAST_SECS - age) / TOAST_FADE).clamp(0.0, 1.0)
 }
 
 /// Blank images start at this size.
@@ -221,6 +237,7 @@ impl CaptureCraftApp {
             thumbnails: HashMap::new(),
             library: LibraryFiles::default(),
             tray_dir: library::tray_output_dir(),
+            toast: None,
             title: String::new(),
         };
         for p in open {
@@ -443,7 +460,7 @@ impl CaptureCraftApp {
             .and_then(|d| flatten(d).map_err(|e| e.to_string()));
         self.notice = Some(
             match flat.and_then(|f| export::copy(&mut self.clipboard, &f).map(|()| f)) {
-                Ok(f) => format!("Copied {} × {} px", f.width, f.height),
+                Ok(_) => "Copied to clipboard!".to_string(),
                 Err(e) => format!("Copy failed: {e}"),
             },
         );
@@ -517,6 +534,7 @@ impl CaptureCraftApp {
                         }
                         Err(e) => self.notice = Some(format!("New image failed: {e}")),
                     },
+                    ShellAction::Notice(text) => self.notice = Some(text),
                     ShellAction::Unavailable(what) => {
                         self.notice = Some(format!("{what} is not available yet"));
                     }
@@ -594,29 +612,53 @@ impl CaptureCraftApp {
                 .map(|(_, th, _)| *th)
                 .or_else(|| files.thumbnail(id))
         };
-        let intents = EditorWindow {
+        EditorWindow {
             session: &self.session,
             image,
             thumbnail: &thumbnail,
             today: &today,
             library_files: &self.library.items,
         }
-        .show(ui, &mut self.state);
-        if let Some(n) = &self.notice {
-            let t = self.tokens();
-            egui::Area::new(egui::Id::new("capturecraft.notice"))
-                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -72.0])
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::new()
-                        .fill(t.badge_bg)
-                        .corner_radius(Tokens::corner(t.radius))
-                        .inner_margin(t.space_md)
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new(n).color(t.badge_text))
-                        });
-                });
+        .show(ui, &mut self.state)
+    }
+
+    /// The latest notice as a toast at the bottom centre that fades out
+    /// after [`TOAST_SECS`]; a new notice restarts it.
+    fn show_toast(&mut self, ctx: &egui::Context) {
+        if let Some(n) = self.notice.take() {
+            self.toast = Some((n, Instant::now()));
         }
-        intents
+        let Some((text, since)) = &self.toast else {
+            return;
+        };
+        let age = since.elapsed().as_secs_f32();
+        let a = toast_alpha(age);
+        if a <= 0.0 {
+            self.toast = None;
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(if a < 1.0 { 16 } else { 200 }));
+        let t = self.tokens();
+        egui::Area::new(egui::Id::new("capturecraft.notice"))
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -72.0])
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(a);
+                egui::Frame::new()
+                    .fill(t.badge_bg)
+                    .corner_radius(Tokens::corner(t.radius))
+                    .inner_margin(t.space_md)
+                    .shadow(egui::Shadow {
+                        offset: [0, 2],
+                        blur: 8,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(80),
+                    })
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(text.as_str()).color(t.badge_text))
+                    });
+            });
     }
 }
 
@@ -633,6 +675,9 @@ impl eframe::App for CaptureCraftApp {
             intents.extend(self.show_editor(ui));
         }
         self.run_intents(&ctx, intents);
+        if !self.flow.hides_windows() {
+            self.show_toast(&ctx);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -651,6 +696,14 @@ mod tests {
     use super::*;
     use capturecraft_ui_egui::state::SelectionType;
     use chrono::TimeZone;
+
+    #[test]
+    fn toasts_stay_then_fade() {
+        assert_eq!(toast_alpha(0.0), 1.0);
+        assert_eq!(toast_alpha(TOAST_SECS - 0.5), 1.0);
+        assert!((toast_alpha(TOAST_SECS - 0.25) - 0.5).abs() < 1e-6);
+        assert_eq!(toast_alpha(TOAST_SECS + 1.0), 0.0);
+    }
 
     #[test]
     fn capture_intents_start_a_capture_with_their_delay() {

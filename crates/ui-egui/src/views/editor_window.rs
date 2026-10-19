@@ -166,6 +166,13 @@ impl EditorWindow<'_> {
         let doc = self.session.active();
         let editor = &mut state.editor;
         editor.toolbar.normalize();
+        // Shortcuts first: they consume their key events, so the canvas
+        // and panels below never see them twice.
+        if !editor.library.visible {
+            for k in crate::shortcuts::read(ui.ctx()) {
+                intents.extend(crate::actions::run(k.into(), editor, doc));
+            }
+        }
         let strip = |fill| Frame::new().fill(fill).inner_margin(Margin::ZERO);
 
         egui::Panel::top("capturecraft.menu")

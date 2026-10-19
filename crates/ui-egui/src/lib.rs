@@ -12,9 +12,11 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod actions;
 pub mod dpi;
 pub mod icons;
 pub mod panels;
+pub mod shortcuts;
 pub mod state;
 pub mod theme;
 pub mod views;
@@ -66,6 +68,13 @@ pub enum UiIntent {
     CopyDocument { doc_id: String },
     /// Save a document under a chosen name; `None` = the active one.
     SaveAs { doc_id: Option<String> },
+    /// Save a document to its `.capturecraft` file (Save As when it has
+    /// none); `None` = the active one.
+    Save { doc_id: Option<String> },
+    /// File › Open: pick `.capturecraft` documents or images.
+    OpenDialog,
+    /// A short message for the toast at the bottom of the window.
+    Notice(String),
     /// A new blank white canvas.
     NewBlankImage,
     /// A control whose feature is not built yet: the app says so.

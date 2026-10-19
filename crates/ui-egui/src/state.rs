@@ -1335,6 +1335,12 @@ pub struct CanvasViewState {
     /// The next canvas click samples a colour into the inspector.
     #[serde(skip)]
     pub eyedropper: Option<ColorTarget>,
+    /// Copied annotations (`manifest.json` nodes) for Paste.
+    #[serde(skip)]
+    pub clipboard: Vec<serde_json::Value>,
+    /// Pastes since the last copy: each lands a little further away.
+    #[serde(skip)]
+    pub pastes: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1478,6 +1484,8 @@ impl Default for CanvasViewState {
             expand_backdrop: ExpandBackdrop::default(),
             gesture: None,
             eyedropper: None,
+            clipboard: Vec::new(),
+            pastes: 0,
         }
     }
 }

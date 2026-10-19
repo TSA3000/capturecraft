@@ -39,6 +39,7 @@
 use capturecraft_compositor::{CpuCompositor, GpuCompositor, GpuError, RenderScene};
 use capturecraft_engine::DocState;
 use capturecraft_engine::edit_commands::{arrow_midpoint, node_at};
+use capturecraft_engine::node_commands::expand_groups;
 use capturecraft_format::{Annotation, Axis, Color, NodeId, RectF};
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{
@@ -1149,8 +1150,12 @@ impl CanvasViewport<'_> {
             } else if tool == ToolId::Move {
                 let shift = ui.input(|i| i.modifiers.shift);
                 match node_at(m, c, slop) {
-                    Some(id) if shift => toggle(&mut editor.canvas.selection, id),
-                    Some(id) => editor.canvas.selection = vec![id],
+                    Some(id) if shift => {
+                        for g in expand_groups(m, &[id]) {
+                            toggle(&mut editor.canvas.selection, g);
+                        }
+                    }
+                    Some(id) => editor.canvas.selection = expand_groups(m, &[id]),
                     None if !shift => editor.canvas.selection.clear(),
                     None => {}
                 }
@@ -1185,7 +1190,7 @@ impl CanvasViewport<'_> {
                     if let Some(id) = hit
                         && !editor.canvas.selection.contains(&id)
                     {
-                        editor.canvas.selection = vec![id];
+                        editor.canvas.selection = expand_groups(m, &[id]);
                     }
                     hit.map(|_| CanvasGesture::MoveSelection { from: c, to: c })
                 }
@@ -1264,20 +1269,9 @@ impl CanvasViewport<'_> {
             {
                 ui.ctx().set_cursor_icon(CursorIcon::Move);
             }
-            let (delete, escape) = ui.input(|i| {
-                (
-                    i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
-                    i.key_pressed(Key::Escape),
-                )
-            });
+            // Delete is a shortcut (`actions::EditAction::Delete`).
+            let escape = ui.input(|i| i.key_pressed(Key::Escape));
             let typing = ui.ctx().memory(|mem| mem.focused().is_some());
-            if !typing
-                && delete
-                && let Some(i) = delete_selection_intent(editor, m)
-            {
-                intents.push(i);
-                editor.canvas.marquee = None;
-            }
             if !typing && escape {
                 editor.canvas.marquee = None;
             }
