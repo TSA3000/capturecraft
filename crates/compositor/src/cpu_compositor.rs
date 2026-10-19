@@ -18,13 +18,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use photocraft_algo::{Ctx, FilterParams, Image};
+use photocraft_color::ColorMode;
 use photocraft_geom::{Affine, Rect};
 use photocraft_raster::Surface;
 use rayon::prelude::*;
 
 use crate::CompositorError;
 use crate::canvas::{Frame, TILE, TileSet, TiledCanvas};
-use crate::effects::backdrop::{block_mean, dim};
+use crate::effects::backdrop::dim;
 use crate::effects::{Kernel, Mask, Px, blur_mask, mix, over, scale};
 use crate::prepare::{FillOp, FrameOp, ImageOp, Op, Prepared, prepare};
 use crate::scene::{DirtyRegion, NodeId, RenderNode, RenderScene, RevisionId};
@@ -442,6 +444,65 @@ fn blur_region(canvas: &TiledCanvas, o: Rect, k: &Kernel) -> Vec<Px> {
     out
 }
 
+/// `photocraft_algo` filter of the canvas over `o`, reading `src` (edge
+/// pixels repeat outside the canvas). The canvas is premultiplied, so the
+/// filter runs without alpha handling. Returns row-major values over `o`.
+fn filter_region(
+    canvas: &TiledCanvas,
+    params: &FilterParams,
+    bounds: Rect,
+    src: Rect,
+    o: Rect,
+) -> Vec<Px> {
+    let c = canvas.rect();
+    let mut img = Image::new(src, 4);
+    if c.is_empty() || src.is_empty() || o.is_empty() {
+        return Vec::new();
+    }
+    let snap = canvas.read_rect(src);
+    img.data
+        .par_chunks_mut(src.width() as usize * 4)
+        .enumerate()
+        .for_each(|(row, out)| {
+            let y = (src.y0 + row as i32).clamp(c.y0, c.y1 - 1);
+            for (i, p) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = (src.x0 + i as i32).clamp(c.x0, c.x1 - 1);
+                *p = snap.get(x, y);
+            }
+        });
+    let ctx = Ctx {
+        bounds,
+        mode: ColorMode::Rgb,
+        alpha: false,
+    };
+    photocraft_algo::kernel(params, &img, o, &ctx)
+        .as_chunks::<4>()
+        .0
+        .to_vec()
+}
+
+/// Mixes `vals` (row-major over `o`) into the canvas by `mask`.
+fn blend_masked(
+    canvas: &mut TiledCanvas,
+    write: &TileSet,
+    w: Rect,
+    mask: &Mask,
+    o: Rect,
+    vals: &[Px],
+) {
+    let ow = o.width() as usize;
+    canvas.par_tiles(write, |tr, px| {
+        each_pixel(tr, w, px, |x, y, p| {
+            let m = mask.at(x, y);
+            if m > 0.0
+                && let Some(v) = vals.get((y - o.y0) as usize * ow + (x - o.x0) as usize)
+            {
+                *p = mix(*p, *v, m);
+            }
+        })
+    });
+}
+
 fn apply_image(o: &ImageOp, canvas: &mut TiledCanvas, write: &TileSet, w: Rect) {
     canvas.par_tiles(write, |tr, px| {
         let r = tr.intersect(&w);
@@ -476,47 +537,18 @@ fn apply(op: &CpuOp, canvas: &mut TiledCanvas, write: &TileSet, w: Rect, size: (
         }
         Op::Blur(b) => {
             let o = write.bounds_within(w);
-            let vals = blur_region(canvas, o, &b.kernel);
-            let ow = o.width() as usize;
-            canvas.par_tiles(write, |tr, px| {
-                each_pixel(tr, w, px, |x, y, p| {
-                    let m = b.mask.at(x, y);
-                    if m > 0.0 {
-                        *p = mix(*p, vals[(y - o.y0) as usize * ow + (x - o.x0) as usize], m);
-                    }
-                })
-            });
+            let src = o.inflate(b.reach());
+            let vals = filter_region(canvas, &b.params(), canvas.rect(), src, o);
+            blend_masked(canvas, write, w, &b.mask, o, &vals);
         }
         Op::Pixelate(pz) => {
             let o = write.bounds_within(w);
-            let (brect, [bx0, by0, nbx, nby]) = pz.blocks(o);
-            let canvas_r = canvas.rect();
-            let snap = canvas.read_rect(brect);
-            let b = pz.block;
-            let means: Vec<Px> = (0..nbx * nby)
-                .into_par_iter()
-                .map(|i| {
-                    let (bx, by) = (bx0 + i % nbx, by0 + i / nbx);
-                    let r = Rect::new(
-                        pz.origin[0] + bx * b,
-                        pz.origin[1] + by * b,
-                        pz.origin[0] + (bx + 1) * b,
-                        pz.origin[1] + (by + 1) * b,
-                    )
-                    .intersect(&canvas_r);
-                    block_mean(&|x, y| snap.get(x, y), r.x0, r.y0, r.x1, r.y1)
-                })
-                .collect();
-            canvas.par_tiles(write, |tr, px| {
-                each_pixel(tr, w, px, |x, y, p| {
-                    let m = pz.mask.at(x, y);
-                    if m > 0.0 {
-                        let bi = ((y - pz.origin[1]).div_euclid(b) - by0) * nbx
-                            + ((x - pz.origin[0]).div_euclid(b) - bx0);
-                        *p = mix(*p, means.get(bi as usize).copied().unwrap_or(*p), m);
-                    }
-                })
-            });
+            let (cells, _) = pz.blocks(o);
+            let params = FilterParams::Mosaic {
+                cell_size: pz.block as f32,
+            };
+            let vals = filter_region(canvas, &params, pz.grid(canvas.rect()), cells, o);
+            blend_masked(canvas, write, w, &pz.mask, o, &vals);
         }
         Op::Lens(l) => {
             let o = write.bounds_within(w);
@@ -645,5 +677,83 @@ mod tests {
             c.update(&s, &DirtyRegion::none()).map(|s| s.tiles).ok(),
             Some(0)
         );
+    }
+
+    /// A blue square under a backdrop filter over `rect`.
+    fn filtered(filter: BackdropFilterKind, rect: RectF32, feather_px: f32) -> Frame {
+        let mut s = scene(20.0);
+        s.nodes[1].node = RenderNode::BackdropFilter(BackdropFilterSpec {
+            shape: ShapeGeometry::Rect(rect),
+            filter,
+            feather_px,
+        });
+        CpuCompositor::render(&s).unwrap_or_else(|e| panic!("render: {e}"))
+    }
+
+    fn px(f: &Frame, x: u32, y: u32) -> Px {
+        f.pixels[(y * f.width + x) as usize]
+    }
+
+    #[test]
+    fn pixelate_averages_whole_blocks_from_the_shape_corner() {
+        let f = filtered(
+            BackdropFilterKind::Pixelate { block_size_px: 10 },
+            RectF32::new(15.0, 35.0, 80.0, 70.0),
+            0.0,
+        );
+        // Block (15..25, 35..45): 5×5 of blue at x 20..25, y 40..45, rest white.
+        let a = px(&f, 15, 35);
+        assert_eq!(a, px(&f, 24, 44), "one colour per block");
+        let blue = [0.1f32, 0.4, 0.9];
+        for c in 0..3 {
+            let want = (25.0 * blue[c] + 75.0) / 100.0;
+            assert!(
+                (a[c] - want).abs() < 1e-4,
+                "channel {c}: {} vs {want}",
+                a[c]
+            );
+        }
+        // Outside the shape the square is untouched.
+        assert_eq!(px(&f, 14, 50), [1.0; 4]);
+    }
+
+    #[test]
+    fn feathered_pixelate_keeps_blocks_before_the_grid_origin_opaque() {
+        // The feather reaches left of and above the grid origin (40, 40).
+        let f = filtered(
+            BackdropFilterKind::Pixelate { block_size_px: 12 },
+            RectF32::new(40.0, 40.0, 60.0, 60.0),
+            8.0,
+        );
+        for (x, y) in [(37, 50), (50, 37), (37, 37)] {
+            let p = px(&f, x, y);
+            assert!((p[3] - 1.0).abs() < 1e-5, "alpha at ({x}, {y}): {p:?}");
+            assert!(p[0] > 0.1, "not darkened at ({x}, {y}): {p:?}");
+        }
+    }
+
+    #[test]
+    fn blur_at_the_canvas_edge_repeats_edge_pixels() {
+        // A blur over a uniform corner stays uniform (no fade to transparent).
+        let f = filtered(
+            BackdropFilterKind::GaussianBlur { sigma: 12.0 },
+            RectF32::new(500.0, 200.0, 200.0, 100.0),
+            0.0,
+        );
+        for (x, y) in [(699, 299), (500, 299), (699, 200)] {
+            let p = px(&f, x, y);
+            assert!(
+                p.iter().all(|v| (v - 1.0).abs() < 1e-4),
+                "({x}, {y}): {p:?}"
+            );
+        }
+        // Over the square's edge it mixes blue and white.
+        let f = filtered(
+            BackdropFilterKind::GaussianBlur { sigma: 6.0 },
+            RectF32::new(0.0, 0.0, 200.0, 200.0),
+            0.0,
+        );
+        let p = px(&f, 20, 60);
+        assert!(p[0] > 0.2 && p[0] < 0.9, "{p:?}");
     }
 }

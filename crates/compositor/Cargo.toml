@@ -19,8 +19,11 @@ photocraft-geom = { workspace = true }
 photocraft-raster = { workspace = true }
 photocraft-doc = { workspace = true }
 photocraft-vector = { workspace = true }
-# Shadow convolution, feather distance fields and raster warps.
+# Shadow convolution, feather distance fields, raster warps and the CPU
+# backdrop blur and mosaic (FilterParams kernels).
 photocraft-algo = { workspace = true }
+# Colour mode of the photocraft-algo filter context.
+photocraft-color = { workspace = true }
 # Shaping, wrapping and glyph outlines of callout text and badge labels.
 photocraft-text = { workspace = true }
 rayon = { workspace = true }
@@ -33,7 +36,6 @@ bytemuck = { version = "1.25", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 
 [dev-dependencies]
-photocraft-color = { workspace = true }
 # Expected bytes of the colour-encoding test (sRGB transfer curve).
 photocraft-cms = { workspace = true }
 

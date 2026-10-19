@@ -63,7 +63,26 @@ impl FillOp {
 #[derive(Clone, Debug)]
 pub struct BlurOp {
     pub mask: Arc<Mask>,
+    /// The GPU's exact kernel.
     pub kernel: Arc<Kernel>,
+    /// The CPU's `photocraft_algo` Gaussian radius (standard deviation).
+    pub sigma: f32,
+}
+
+impl BlurOp {
+    /// Input pixels read around each output pixel, by either compositor.
+    pub fn reach(&self) -> i32 {
+        let algo = match self.params().halo() {
+            photocraft_algo::Halo::Radius(r) => r.max(0),
+            _ => 0,
+        };
+        algo.max(self.kernel.radius as i32)
+    }
+
+    /// The CPU filter.
+    pub fn params(&self) -> photocraft_algo::FilterParams {
+        photocraft_algo::FilterParams::GaussianBlur { radius: self.sigma }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +112,20 @@ impl PixelateOp {
             self.origin[1] + by1 * b,
         );
         (px, [bx0, by0, bx1 - bx0, by1 - by0])
+    }
+
+    /// Cell grid bounds for `photocraft_algo`'s mosaic: aligned to
+    /// `origin`, starting at or before the canvas' top-left so blocks left
+    /// of or above the origin exist, ending at the canvas' bottom-right.
+    pub fn grid(&self, canvas: Rect) -> Rect {
+        let b = self.block.max(1);
+        let back = |o: i32, c0: i32| o - ((o - c0).max(0) + b - 1) / b * b;
+        Rect::new(
+            back(self.origin[0], canvas.x0),
+            back(self.origin[1], canvas.y0),
+            canvas.x1,
+            canvas.y1,
+        )
     }
 }
 
@@ -216,7 +249,7 @@ impl Op {
         let c = canvas_rect(size);
         match self {
             Op::Image(_) | Op::Fill(_) => vec![out],
-            Op::Blur(o) => vec![out.inflate(o.kernel.radius as i32).intersect(&c)],
+            Op::Blur(o) => vec![out.inflate(o.reach()).intersect(&c)],
             Op::Pixelate(o) => vec![o.blocks(out).0.intersect(&c), out],
             Op::Lens(o) => vec![clamp_into(o.sampler.footprint(out), size), out],
             Op::Spotlight(o) => vec![
@@ -234,7 +267,7 @@ impl Op {
         let w = self.write_rect(size);
         let one = match self {
             Op::Image(_) | Op::Fill(_) => r,
-            Op::Blur(o) => r.union(&r.inflate(o.kernel.radius as i32).intersect(&w)),
+            Op::Blur(o) => r.union(&r.inflate(o.reach()).intersect(&w)),
             Op::Pixelate(o) => r.union(&o.blocks(r).0.intersect(&w)),
             // Any change under the lens footprint may show anywhere in the
             // lens, which usually sits elsewhere: two rectangles.
@@ -719,6 +752,7 @@ fn backdrop_ops(b: &BackdropFilterSpec, t: &Affine, size: (u32, u32)) -> Vec<Op>
                 Op::Blur(BlurOp {
                     mask,
                     kernel: Arc::new(k),
+                    sigma: sigma.min(MAX_SIGMA),
                 })
             })
             .into_iter()
