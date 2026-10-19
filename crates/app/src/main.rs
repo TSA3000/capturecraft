@@ -1,4 +1,5 @@
-//! `capturecraft-app`: the CaptureCraft desktop app on eframe + wgpu.
+//! `capturecraft-next`: the CaptureCraft desktop app on eframe + wgpu
+//! (crate `capturecraft-app`), a preview of the layered architecture.
 //!
 //! Follows PhotoCraft's bootstrap: one `NativeOptions` with the wgpu
 //! renderer and a persisted window layout, then `run_native` with an app

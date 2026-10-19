@@ -8,10 +8,11 @@ rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 
-# Runs next to the shipped `capturecraft` binary (the root package) until it
-# reaches parity with it (tray, global hotkey, autostart, installers).
+# A preview next to the shipped binaries of the root package (which already
+# has a `capturecraft-app`) until it reaches parity with them (tray, global
+# hotkey, autostart, installers).
 [[bin]]
-name = "capturecraft-app"
+name = "capturecraft-next"
 path = "src/main.rs"
 
 [dependencies]

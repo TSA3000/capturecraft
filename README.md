@@ -1,6 +1,14 @@
 # CaptureCraft
 
+[![release](https://img.shields.io/github/v/release/TSA3000/capturecraft?label=release)](https://github.com/TSA3000/capturecraft/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/TSA3000/capturecraft/ci.yml?branch=main&label=CI)](https://github.com/TSA3000/capturecraft/actions/workflows/ci.yml)
+[![downloads](https://img.shields.io/github/downloads/TSA3000/capturecraft/total?label=downloads)](https://github.com/TSA3000/capturecraft/releases)
+[![license](https://img.shields.io/github/license/TSA3000/capturecraft?label=license)](LICENSE)
+[![rust](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](https://www.rust-lang.org)
+
 Open-source screen capture and annotation tool written in pure Rust.
+
+Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md) · history: [CHANGELOG.md](CHANGELOG.md)
 
 ## Platforms
 
@@ -187,6 +195,46 @@ min_window = 20        # smaller windows are not snap targets
 ```
 
 Command-line flags (`--hotkey`, `--out-dir`, `--no-clipboard`) override it.
+
+## Next-generation editor (preview)
+
+The workspace also holds the layered architecture that will replace the
+programs above. It is a preview: it is not in the release archives or the
+installers yet, and the programs above are unchanged.
+
+```sh
+cargo run -p capturecraft-app --release   # binary: capturecraft-next
+```
+
+| Crate | Layer | What it is |
+|-------|-------|------------|
+| `capturecraft-format` | L5 | `.capturecraft` document: annotations (callouts, step badges, arrows, blur, magnifier, spotlight, cut outs, shapes, smart objects); rotation, radial/linear gradients and a rounded shadow frame in the schema |
+| `capturecraft-engine` | L5 | Command registry and session: every edit is an undoable command (`annotation.addStep`, `annotation.addCallout`, `canvas.cutOut`, `smart.simplify`, …) |
+| `capturecraft-compositor` | L4 | CPU reference compositor and wgpu compositor with pixel parity (≤ 2/255) |
+| `capturecraft-capture` | L6 | Capture backends, frozen-desktop hit testing, scrolling-capture stitcher |
+| `capturecraft-ocr` | L6 | UI segmentation, inpainting and text recognition for the smart tools |
+| `capturecraft-ui-egui` | L7 | Capture HUD, crosshair overlay and the five-zone editor (PhotoCraft themes) |
+| `capturecraft-app` | app | eframe + wgpu shell hosting the editor, the floating HUD and the overlay on one GPU device |
+
+Everything below the UI is built on the PhotoCraft crates (v0.9.0):
+`photocraft-geom`, `-raster` (256 × 256 copy-on-write tiles), `-algo`,
+`-vector`, `-text`, `-cms` and the `-ui-egui` theme tokens. The UI stack is
+eframe/egui 0.36 with wgpu 30 (Rust 1.95+). Layering is checked by
+`cargo xtask layers`.
+
+Not drawn yet (in progress): text in callouts and step badges, rotation,
+gradients, feathered edges and the shadow frame are in the document format
+but the compositor does not render them yet.
+
+Checks (same as CI):
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test -p capturecraft-compositor --features gpu --tests   # CPU/GPU parity
+cargo xtask layers
+```
 
 ## License
 
