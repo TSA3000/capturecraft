@@ -1,6 +1,6 @@
 //! Generic editing commands the editor's gizmos and Quick Styles drive:
 //! growing the canvas from its outer handles, moving annotations, bending
-//! arrows and applying a style preset.
+//! arrows, applying a style preset and tagging the document.
 //!
 //! Like [`crate::commands`], every command parses into a typed struct
 //! (`deny_unknown_fields`) and never panics on input; the session validates
@@ -86,6 +86,16 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
 Fields an annotation type has no use for are ignored. -> { styled: [ids] }"##,
         enabled: has_doc,
         run: set_style,
+        journal: true,
+    },
+    CommandSpec {
+        id: "document.setTags",
+        label: "Tags",
+        menu_path: &["Edit", "Tags"],
+        shortcut: None,
+        params: r##"{ tags: [string] } (trimmed; empty and repeated tags are dropped) -> { tags }"##,
+        enabled: has_doc,
+        run: set_tags,
         journal: true,
     },
 ];
@@ -545,6 +555,35 @@ fn set_style(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "styled": p.ids }))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TagParams {
+    tags: Vec<String>,
+}
+
+/// Longest tag kept, characters.
+const MAX_TAG_LEN: usize = 64;
+
+fn set_tags(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "document.setTags";
+    let p: TagParams = parse(CMD, p)?;
+    let mut tags: Vec<String> = Vec::with_capacity(p.tags.len());
+    for t in p.tags {
+        let t = t.trim();
+        if t.chars().count() > MAX_TAG_LEN {
+            return Err(bad(
+                CMD,
+                format!("tags are at most {MAX_TAG_LEN} characters"),
+            ));
+        }
+        if !t.is_empty() && !tags.iter().any(|k| k == t) {
+            tags.push(t.to_string());
+        }
+    }
+    s.manifest_mut()?.library.tags = tags.clone();
+    Ok(json!({ "tags": tags }))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -808,5 +847,25 @@ mod tests {
                 .is_err()
         );
         assert_eq!(manifest(&s).node(NodeId(a)).unwrap().opacity, 0.5);
+    }
+
+    #[test]
+    fn tags_are_trimmed_deduplicated_and_undoable() {
+        let mut s = session(4, 4, [9, 9, 9, 255]);
+        let out = s
+            .run(
+                "document.setTags",
+                &json!({ "tags": [" bug ", "", "ui", "bug"] }),
+            )
+            .unwrap();
+        assert_eq!(out["tags"], json!(["bug", "ui"]));
+        assert_eq!(manifest(&s).library.tags, ["bug", "ui"]);
+        let long = "x".repeat(MAX_TAG_LEN + 1);
+        assert!(
+            s.run("document.setTags", &json!({ "tags": [long] }))
+                .is_err()
+        );
+        s.run("edit.undo", &json!({})).unwrap();
+        assert!(manifest(&s).library.tags.is_empty());
     }
 }

@@ -65,8 +65,9 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         shortcut: None,
         params: r##"{ object?: id (from smart.detectObjects) | rect?: {x0, y0, x1, y1} (base px) | node?: id (a smart object),
   to?: {x, y} (canvas top-left) | by?: {x, y} (canvas offset), size?: {w, h} (canvas px),
-  matte?: bool = true (soft alpha against the background), heal?: bool = true }
--> { id, rect, source, healed: [rects] }"##,
+  matte?: bool = true (soft alpha against the background), heal?: bool = true,
+  background?: "heal" | "transparent" | "keep" (what fills the source; default from heal) }
+-> { id, rect, source, healed: [rects], cleared: [rects] }"##,
         enabled: needs_analyzer,
         run: move_object,
         journal: true,
@@ -76,8 +77,9 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         label: "Smart Delete",
         menu_path: &["Image", "Smart Move"],
         shortcut: None,
-        params: r##"{ object?: id | rect?: {x0, y0, x1, y1} (base px) | node?: id (a smart object) }
--> { healed: [rects], removed?: id }"##,
+        params: r##"{ object?: id | rect?: {x0, y0, x1, y1} (base px) | node?: id (a smart object),
+  background?: "heal" | "transparent" = "heal" }
+-> { healed: [rects], cleared: [rects], removed?: id }"##,
         enabled: needs_analyzer,
         run: delete_object,
         journal: true,
@@ -423,6 +425,44 @@ struct MoveParams {
     matte: Option<bool>,
     #[serde(default)]
     heal: Option<bool>,
+    #[serde(default)]
+    background: Option<Vacated>,
+}
+
+/// What fills the pixels a move or delete leaves behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Vacated {
+    /// Inpainted from the surroundings (the analyzer's heal).
+    Heal,
+    /// Cleared to transparent.
+    Transparent,
+    /// Left as it was (a move then copies).
+    Keep,
+}
+
+impl Vacated {
+    fn of_move(p: &MoveParams) -> Self {
+        p.background.unwrap_or(if p.heal.unwrap_or(true) {
+            Vacated::Heal
+        } else {
+            Vacated::Keep
+        })
+    }
+}
+
+/// Clears `hole` of the edited base to transparent.
+fn clear_edited(s: &mut Session, hole: Rect) -> Result<Vec<Rect>> {
+    let mut px = edited(s)?.clone();
+    let hole = hole.intersect(&px.bounds());
+    if hole.is_empty() {
+        return Ok(Vec::new());
+    }
+    let zero = vec![0u8; hole.width() as usize * hole.height() as usize * 4];
+    px.write_rgba8(hole, &zero)
+        .map_err(|e| EngineError::Other(format!("clearing the selection failed: {e}")))?;
+    s.layers_mut()?.edited = Some(px);
+    Ok(vec![hole])
 }
 
 /// What a move or delete acts on.
@@ -529,10 +569,13 @@ fn move_object(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let pixels = Pixels::new(patch.rect.size(), patch.rgba)
         .ok_or_else(|| EngineError::Other("the analyzer returned a malformed object".into()))?;
-    let healed = if p.heal.unwrap_or(true) {
-        heal_edited(s, &[patch.rect], &protect_around(&all, patch.rect, &skip))?
-    } else {
-        Vec::new()
+    let (healed, cleared) = match Vacated::of_move(&p) {
+        Vacated::Heal => (
+            heal_edited(s, &[patch.rect], &protect_around(&all, patch.rect, &skip))?,
+            Vec::new(),
+        ),
+        Vacated::Transparent => (Vec::new(), clear_edited(s, patch.rect)?),
+        Vacated::Keep => (Vec::new(), Vec::new()),
     };
 
     let m = s.manifest_mut()?;
@@ -558,6 +601,7 @@ fn move_object(s: &mut Session, p: &Value) -> Result<Value> {
         "rect": dst,
         "source": rect_json(patch.rect),
         "healed": healed.into_iter().map(rect_json).collect::<Vec<_>>(),
+        "cleared": cleared.into_iter().map(rect_json).collect::<Vec<_>>(),
     }))
 }
 
@@ -570,6 +614,8 @@ struct DeleteParams {
     rect: Option<Rect>,
     #[serde(default)]
     node: Option<u64>,
+    #[serde(default)]
+    background: Option<Vacated>,
 }
 
 fn delete_object(s: &mut Session, p: &Value) -> Result<Value> {
@@ -579,12 +625,24 @@ fn delete_object(s: &mut Session, p: &Value) -> Result<Value> {
         let m = s.manifest_mut()?;
         smart_object_mut(DELETE_ID, m, id)?;
         m.annotations.retain(|n| n.id != NodeId(id));
-        return Ok(json!({ "healed": [], "removed": id }));
+        return Ok(json!({ "healed": [], "cleared": [], "removed": id }));
     }
     let (rect, _, _, skip) = resolve(s, DELETE_ID, &t)?;
-    let all = s.analysis(edited(s)?.bounds())?;
-    let healed = heal_edited(s, &[rect], &protect_around(&all, rect, &skip))?;
-    Ok(json!({ "healed": healed.into_iter().map(rect_json).collect::<Vec<_>>() }))
+    let (healed, cleared) = match p.background.unwrap_or(Vacated::Heal) {
+        Vacated::Heal => {
+            let all = s.analysis(edited(s)?.bounds())?;
+            (
+                heal_edited(s, &[rect], &protect_around(&all, rect, &skip))?,
+                Vec::new(),
+            )
+        }
+        Vacated::Transparent => (Vec::new(), clear_edited(s, rect)?),
+        Vacated::Keep => return Err(bad(DELETE_ID, "a delete cannot keep the pixels")),
+    };
+    Ok(json!({
+        "healed": healed.into_iter().map(rect_json).collect::<Vec<_>>(),
+        "cleared": cleared.into_iter().map(rect_json).collect::<Vec<_>>(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1531,6 +1589,39 @@ mod tests {
         s.run("edit.undo", &Value::Null).unwrap();
         s.run(DETECT_ID, &json!({})).unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_transparent_background_clears_instead_of_healing() {
+        let mut s = session(200, 100);
+        let (a, _) = fake(Vec::new());
+        s.set_analyzer(a);
+        let rect = json!({ "x0": 10, "y0": 10, "x1": 50, "y1": 30 });
+        let r = s
+            .run(
+                MOVE_ID,
+                &json!({ "rect": rect, "by": { "x": 100, "y": 0 }, "matte": false,
+                         "background": "transparent" }),
+            )
+            .unwrap();
+        assert_eq!(r["healed"], json!([]));
+        assert_eq!(r["cleared"].as_array().map(Vec::len), Some(1));
+        let edited = |s: &Session| s.active().unwrap().edited_pixels().unwrap().pixel(20, 20);
+        assert_eq!(edited(&s), [0; 4]);
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert_eq!(edited(&s), [255; 4]);
+        s.run(
+            DELETE_ID,
+            &json!({ "rect": rect, "background": "transparent" }),
+        )
+        .unwrap();
+        assert_eq!(edited(&s), [0; 4]);
+        s.run(DELETE_ID, &json!({ "rect": rect })).unwrap();
+        assert_eq!(edited(&s), [0x80, 0x80, 0x80, 0xFF], "heal is the default");
+        assert!(
+            s.run(DELETE_ID, &json!({ "rect": rect, "background": "keep" }))
+                .is_err()
+        );
     }
 
     #[test]

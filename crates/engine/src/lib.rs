@@ -542,6 +542,42 @@ impl Session {
         Ok(())
     }
 
+    /// Closes the document at `index` (unsaved changes are the caller's
+    /// question). The active document stays active; closing it activates
+    /// its neighbour, the next one if there is one.
+    pub fn close(&mut self, index: usize) -> Result<()> {
+        if index >= self.docs.len() {
+            return Err(EngineError::NoDocument);
+        }
+        self.docs.remove(index);
+        self.active = match self.active {
+            _ if self.docs.is_empty() => None,
+            Some(a) if a > index => Some(a - 1),
+            Some(a) if a == index => Some(index.min(self.docs.len() - 1)),
+            other => other,
+        };
+        Ok(())
+    }
+
+    /// Opens a copy of the document at `index` as `id`, edits included
+    /// but with a fresh undo history, and makes it active.
+    pub fn duplicate(&mut self, index: usize, id: &str) -> Result<usize> {
+        let src = self.docs.get(index).ok_or(EngineError::NoDocument)?;
+        let mut manifest = src.manifest.clone();
+        manifest.id = id.to_string();
+        let copy = DocState {
+            manifest,
+            pixels: src.pixels.clone(),
+            layers: src.layers.clone(),
+            history: History::default(),
+            analysis: Vec::new(),
+        };
+        self.docs.push(copy);
+        let i = self.docs.len() - 1;
+        self.active = Some(i);
+        Ok(i)
+    }
+
     pub fn active(&self) -> Option<&DocState> {
         self.active.and_then(|i| self.docs.get(i))
     }
@@ -692,5 +728,40 @@ mod tests {
         assert_eq!(a, UiElementId::of(UiElementKind::Button, r));
         assert_ne!(a, UiElementId::of(UiElementKind::Text, r));
         assert!(a.0 < 1 << 53);
+    }
+
+    #[test]
+    fn close_keeps_the_active_document_and_duplicate_copies_edits() {
+        let mut s = Session::new();
+        let size = Size::new(8, 8);
+        for id in ["a", "b", "c"] {
+            let mut m = Manifest::new(size);
+            m.id = id.into();
+            s.open(m, Pixels::new(size, vec![200; 8 * 8 * 4])).unwrap();
+        }
+        let ids = |s: &Session| -> Vec<String> {
+            s.documents()
+                .iter()
+                .map(|d| d.manifest.id.clone())
+                .collect()
+        };
+        s.activate(2).unwrap();
+        s.close(0).unwrap();
+        assert_eq!(ids(&s), ["b", "c"]);
+        assert_eq!(s.active().unwrap().manifest.id, "c");
+        s.close(1).unwrap();
+        assert_eq!(s.active().unwrap().manifest.id, "b");
+        assert!(s.close(5).is_err());
+
+        s.run("document.setTags", &serde_json::json!({ "tags": ["x"] }))
+            .unwrap();
+        let i = s.duplicate(0, "b2").unwrap();
+        let d = &s.documents()[i];
+        assert_eq!((d.manifest.id.as_str(), i), ("b2", 1));
+        assert_eq!(d.manifest.library.tags, ["x"]);
+        assert!(!d.can_undo(), "a copy starts a fresh history");
+        s.close(0).unwrap();
+        s.close(0).unwrap();
+        assert!(s.active().is_none());
     }
 }

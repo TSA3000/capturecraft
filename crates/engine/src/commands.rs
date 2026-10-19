@@ -669,6 +669,35 @@ pub fn base_rect_to_canvas(m: &Manifest, r: Rect) -> Option<RectF> {
         .then(|| RectF::new(x0 + f64::from(o.x), y0 + f64::from(o.y), x1 - x0, y1 - y0))
 }
 
+/// Maps a canvas-space rectangle back to the base raster, undoing the cut
+/// outs (newest first), rounded outward and clipped to the base; `None`
+/// when no base pixel is inside. A selection edge on a seam stays on the
+/// visible side of it.
+pub fn canvas_rect_to_base(m: &Manifest, r: RectF) -> Option<Rect> {
+    let o = m.canvas.base_origin;
+    let (mut x0, mut x1) = (r.x - f64::from(o.x), r.x + r.w - f64::from(o.x));
+    let (mut y0, mut y1) = (r.y - f64::from(o.y), r.y + r.h - f64::from(o.y));
+    let cuts: Vec<_> = cut_outs(m).collect();
+    for c in cuts.into_iter().rev() {
+        let lo = |v: f64| if v >= c.start { v + c.removed() } else { v };
+        let hi = |v: f64| if v > c.start { v + c.removed() } else { v };
+        match c.axis {
+            Axis::Horizontal => (y0, y1) = (lo(y0), hi(y1)),
+            Axis::Vertical => (x0, x1) = (lo(x0), hi(x1)),
+        }
+    }
+    let px = |v: f64| {
+        if v.is_finite() {
+            v.clamp(-1e9, 1e9) as i32
+        } else {
+            0
+        }
+    };
+    let b = Rect::new(px(x0.floor()), px(y0.floor()), px(x1.ceil()), px(y1.ceil()))
+        .intersect(&Rect::from_size(m.base.size));
+    (!b.is_empty()).then_some(b)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -685,6 +714,35 @@ mod tests {
 
     fn manifest(s: &Session) -> &Manifest {
         &s.active().unwrap().manifest
+    }
+
+    #[test]
+    fn canvas_rects_map_back_to_the_base() {
+        let mut s = session(100, 80);
+        let r = |x, y, w, h| RectF::new(x, y, w, h);
+        let m = manifest(&s);
+        assert_eq!(
+            canvas_rect_to_base(m, r(10.2, 5.0, 20.0, 9.5)),
+            Some(Rect::new(10, 5, 31, 15))
+        );
+        assert_eq!(canvas_rect_to_base(m, r(200.0, 0.0, 5.0, 5.0)), None);
+        // A 20 px horizontal strip removed at y = 30.
+        s.run(
+            "canvas.cutOut",
+            &serde_json::json!({ "axis": "horizontal", "start": 30, "end": 50 }),
+        )
+        .unwrap();
+        let m = manifest(&s);
+        assert_eq!(
+            canvas_rect_to_base(m, r(0.0, 25.0, 10.0, 10.0)),
+            Some(Rect::new(0, 25, 10, 55))
+        );
+        assert_eq!(
+            canvas_rect_to_base(m, r(0.0, 30.0, 10.0, 5.0)),
+            Some(Rect::new(0, 50, 10, 55))
+        );
+        let back = base_rect_to_canvas(m, Rect::new(0, 50, 10, 55)).unwrap();
+        assert_eq!((back.y, back.h), (30.0, 5.0));
     }
 
     #[test]
