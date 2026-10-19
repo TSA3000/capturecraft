@@ -1428,7 +1428,67 @@ pub enum BackdropEffect {
     },
 }
 
+/// The kind of a [`BackdropEffect`], the Blur tool's Type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterMode {
+    #[default]
+    GaussianBlur,
+    Pixelate,
+}
+
+/// Range of [`BackdropEffect::intensity`].
+pub const INTENSITY_RANGE: std::ops::RangeInclusive<f32> = 1.0..=100.0;
+/// Gaussian sigma at intensity 1 and 100, pixels.
+const SIGMA_SPAN: (f32, f32) = (1.0, 32.0);
+/// Pixelate block size at intensity 1 and 100, pixels.
+const BLOCK_SPAN: (f32, f32) = (2.0, 48.0);
+
+/// `0..=1` along [`INTENSITY_RANGE`].
+fn intensity_t(intensity: f32) -> f32 {
+    let (lo, hi) = (*INTENSITY_RANGE.start(), *INTENSITY_RANGE.end());
+    let i = if intensity.is_finite() { intensity } else { lo };
+    (i.clamp(lo, hi) - lo) / (hi - lo)
+}
+
 impl BackdropEffect {
+    /// The effect of `mode` at `intensity` (clamped to [`INTENSITY_RANGE`]):
+    /// a Gaussian sigma of 1–32 px or pixelate blocks of 2–48 px.
+    pub fn from_intensity(mode: FilterMode, intensity: f32) -> Self {
+        let t = intensity_t(intensity);
+        match mode {
+            FilterMode::GaussianBlur => BackdropEffect::Gaussian {
+                sigma: SIGMA_SPAN.0 + t * (SIGMA_SPAN.1 - SIGMA_SPAN.0),
+            },
+            FilterMode::Pixelate => BackdropEffect::Pixelate {
+                block_size_px: (BLOCK_SPAN.0 + t * (BLOCK_SPAN.1 - BLOCK_SPAN.0)).round() as u32,
+            },
+        }
+    }
+
+    pub fn mode(&self) -> FilterMode {
+        match self {
+            BackdropEffect::Gaussian { .. } => FilterMode::GaussianBlur,
+            BackdropEffect::Pixelate { .. } => FilterMode::Pixelate,
+        }
+    }
+
+    /// Inverse of [`Self::from_intensity`], clamped to [`INTENSITY_RANGE`]
+    /// (stronger effects than the range shows as 100).
+    pub fn intensity(&self) -> f32 {
+        let (v, (lo, hi)) = match *self {
+            BackdropEffect::Gaussian { sigma } => (sigma, SIGMA_SPAN),
+            BackdropEffect::Pixelate { block_size_px } => (block_size_px as f32, BLOCK_SPAN),
+        };
+        let (a, b) = (*INTENSITY_RANGE.start(), *INTENSITY_RANGE.end());
+        let t = if v.is_finite() {
+            ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        a + t * (b - a)
+    }
+
     fn validate(&self, v: &mut V, path: &str) {
         match *self {
             BackdropEffect::Gaussian { sigma } => {
@@ -2426,6 +2486,33 @@ mod tests {
             }),
         ));
         m
+    }
+
+    #[test]
+    fn backdrop_intensity_maps_both_ways() {
+        let blur = |i| BackdropEffect::from_intensity(FilterMode::GaussianBlur, i);
+        let pix = |i| BackdropEffect::from_intensity(FilterMode::Pixelate, i);
+        assert_eq!(blur(1.0), BackdropEffect::Gaussian { sigma: 1.0 });
+        assert_eq!(blur(100.0), BackdropEffect::Gaussian { sigma: 32.0 });
+        assert_eq!(pix(1.0), BackdropEffect::Pixelate { block_size_px: 2 });
+        assert_eq!(pix(100.0), BackdropEffect::Pixelate { block_size_px: 48 });
+        assert_eq!(pix(-5.0), pix(f32::NAN), "out of range clamps");
+        assert_eq!(blur(1e9), blur(100.0));
+        for i in [1.0, 10.0, 37.5, 100.0] {
+            assert!((blur(i).intensity() - i).abs() < 1e-3, "blur {i}");
+            // Whole-pixel blocks: within one block step (99 / 46).
+            assert!((pix(i).intensity() - i).abs() < 1.1, "pixelate {i}");
+            assert_eq!(pix(i).mode(), FilterMode::Pixelate);
+        }
+        let strong = BackdropEffect::Pixelate { block_size_px: 200 };
+        assert_eq!(strong.intensity(), 100.0);
+        let all = Annotation::BlurRegion(BlurRegion {
+            effect: pix(50.0),
+            ..Default::default()
+        });
+        let mut v = V::default();
+        all.validate(&mut v);
+        assert!(v.first.is_none(), "{:?}", v.first);
     }
 
     #[test]

@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use capturecraft_format::{
     Annotation, ArrowCurve, BackdropEffect, Background, BlendMode, BlurRegion, CalloutBody, Color,
-    CurvedArrow, DropShadow, Fill, FontSpec, HeadStyle, MAX_SIDE, Manifest, NodeId, RectF,
-    RegionShape, ShapeNode, Stroke, TextRun,
+    CurvedArrow, DropShadow, Fill, FilterMode, FontSpec, HeadStyle, INTENSITY_RANGE, MAX_SIDE,
+    Manifest, NodeId, RectF, RegionShape, ShapeNode, Stroke, TextRun,
 };
 use photocraft_geom::{Point, Rect, Size};
 use serde::Deserialize;
@@ -56,6 +56,17 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
 -> { id }"##,
         enabled: has_doc,
         run: add_blur,
+        journal: true,
+    },
+    CommandSpec {
+        id: "annotation.setBackdropFilter",
+        label: "Blur Intensity",
+        menu_path: &[],
+        shortcut: None,
+        params: r##"{ ids: [u64], mode?: "gaussian_blur"|"pixelate" (keeps the intensity),
+  intensity?: 1..=100 (sigma 1–32 px, blocks 2–48 px; keeps the mode) } -> { changed: [ids] }"##,
+        enabled: has_doc,
+        run: set_backdrop_filter,
         journal: true,
     },
     CommandSpec {
@@ -316,6 +327,38 @@ fn add_blur(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let id = push_node(s.manifest_mut()?, Annotation::BlurRegion(blur));
     Ok(json!({ "id": id.0 }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackdropFilterParams {
+    pub ids: Vec<u64>,
+    #[serde(default)]
+    pub mode: Option<FilterMode>,
+    #[serde(default)]
+    pub intensity: Option<f32>,
+}
+
+fn set_backdrop_filter(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "annotation.setBackdropFilter";
+    let mut p: BackdropFilterParams = parse(CMD, p)?;
+    if p.intensity.is_some_and(|i| !INTENSITY_RANGE.contains(&i)) {
+        return Err(bad(CMD, "intensity must be within 1..=100"));
+    }
+    p.ids.sort_unstable();
+    p.ids.dedup();
+    let m = s.manifest_mut()?;
+    for &id in &p.ids {
+        let node = node_annotation(m, id)?;
+        let Some(Annotation::BlurRegion(b)) = node.annotation_mut() else {
+            return Err(bad(CMD, format!("annotation {id} is not a blur")));
+        };
+        let mode = p.mode.unwrap_or(b.effect.mode());
+        let intensity = p.intensity.unwrap_or(b.effect.intensity());
+        b.effect = BackdropEffect::from_intensity(mode, intensity);
+        node.touch();
+    }
+    Ok(json!({ "changed": p.ids }))
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +793,53 @@ mod tests {
         .unwrap()["id"]
             .as_u64()
             .unwrap()
+    }
+
+    #[test]
+    fn set_backdrop_filter_changes_mode_and_intensity() {
+        let mut s = session(64, 64, [255, 255, 255, 255]);
+        let bounds = json!({ "x": 4, "y": 4, "w": 30, "h": 20 });
+        let blur = s
+            .run(
+                "annotation.addBlur",
+                &json!({ "bounds": bounds, "effect": { "kind": "gaussian", "sigma": 1 } }),
+            )
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let effect = |s: &Session| match manifest(s).node(NodeId(blur)).unwrap().annotation() {
+            Some(Annotation::BlurRegion(b)) => b.effect,
+            _ => panic!("not a blur"),
+        };
+        s.run(
+            "annotation.setBackdropFilter",
+            &json!({ "ids": [blur], "intensity": 100 }),
+        )
+        .unwrap();
+        assert_eq!(effect(&s), BackdropEffect::Gaussian { sigma: 32.0 });
+        // The type switch keeps the intensity.
+        s.run(
+            "annotation.setBackdropFilter",
+            &json!({ "ids": [blur], "mode": "pixelate" }),
+        )
+        .unwrap();
+        assert_eq!(effect(&s), BackdropEffect::Pixelate { block_size_px: 48 });
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(effect(&s), BackdropEffect::Gaussian { sigma: 32.0 });
+        let arrow = add_arrow(&mut s);
+        for bad in [
+            json!({ "ids": [blur], "intensity": 0 }),
+            json!({ "ids": [blur], "intensity": 101 }),
+            json!({ "ids": [blur], "mode": "mosaic" }),
+            json!({ "ids": [arrow], "intensity": 5 }),
+            json!({ "ids": [999], "intensity": 5 }),
+        ] {
+            assert!(
+                s.run("annotation.setBackdropFilter", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(effect(&s), BackdropEffect::Gaussian { sigma: 32.0 });
     }
 
     #[test]
