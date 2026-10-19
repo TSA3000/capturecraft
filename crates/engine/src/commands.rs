@@ -1,5 +1,6 @@
 //! The command registry and the signature CaptureCraft commands: Step tool,
-//! Callout with tails, Cut Out (straight or torn) and Simplify UI.
+//! Callout with tails and Cut Out (straight or torn). The Smart Move,
+//! Simplify and text commands live in [`crate::smart_commands`].
 //!
 //! Every command validates its parameters into a typed struct
 //! (`deny_unknown_fields`, so an agent's typo is an error, not a silent
@@ -8,19 +9,22 @@
 use capturecraft_format::{
     Annotation, AnnotationNode, Axis, BadgeShape, Callout, CalloutBody, CalloutTail, Color,
     CutOutSeam, DEFAULT_SEQUENCE, DropShadow, Fill, FontSpec, Manifest, NodeId, Numbering, RectF,
-    RegionShape, SeamEdge, ShapeNode, StepBadge, Stroke, TailAnchor, TextBlock,
+    SeamEdge, StepBadge, Stroke, TailAnchor, TextBlock,
 };
 use photocraft_geom::{Point, Rect};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::{EngineError, Result, Session, UiElement, UiElementKind};
+use std::sync::LazyLock;
 
-type Run = fn(&mut Session, &Value) -> Result<Value>;
-type Enabled = fn(&Session) -> std::result::Result<(), String>;
+use crate::{EngineError, Result, Session, smart_commands};
+
+pub(crate) type Run = fn(&mut Session, &Value) -> Result<Value>;
+pub(crate) type Enabled = fn(&Session) -> std::result::Result<(), String>;
 
 /// Metadata + implementation for one command.
+#[derive(Clone, Copy)]
 pub struct CommandSpec {
     /// Stable id: `area.verbObject` (`annotation.addStep`).
     pub id: &'static str,
@@ -139,30 +143,25 @@ Tail = { tip: {x, y}, base_width?: f32, curve_bias?: -1..1, anchor?: {kind: "nea
         run: cut_out,
         journal: true,
     },
-    CommandSpec {
-        id: "smart.simplify",
-        label: "Simplify",
-        menu_path: &["Image", "Simplify"],
-        shortcut: None,
-        params: r##"{ region?: {x0, y0, x1, y1} (base px, default: whole capture), text_style?: "bars"|"blocks" = "bars",
-  palette?: "match"|"mono" = "match", keep_icons?: bool = false, min_confidence?: 0..1 = 0.5,
-  replace?: bool = true (removes the previous Simplify output) }
--> { added: [ids], removed: n, skipped: n }"##,
-        enabled: can_simplify,
-        run: simplify,
-        journal: true,
-    },
 ];
+
+static ALL: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
+    REGISTRY
+        .iter()
+        .chain(smart_commands::REGISTRY)
+        .copied()
+        .collect()
+});
 
 /// Every command, in registry order (menus and the MCP tool list use it).
 pub fn registry() -> &'static [CommandSpec] {
-    REGISTRY
+    &ALL
 }
 
 // ---------------------------------------------------------------------------
 // Enabled checks
 
-fn has_doc(s: &Session) -> std::result::Result<(), String> {
+pub(crate) fn has_doc(s: &Session) -> std::result::Result<(), String> {
     s.active()
         .map(|_| ())
         .ok_or_else(|| "no document open".into())
@@ -182,40 +181,29 @@ fn can_redo(s: &Session) -> std::result::Result<(), String> {
         .ok_or_else(|| "nothing to redo".into())
 }
 
-fn can_simplify(s: &Session) -> std::result::Result<(), String> {
-    let d = s.active().ok_or("no document open")?;
-    if d.pixels.is_none() {
-        return Err("the capture's pixels are not loaded".into());
-    }
-    if s.analyzer().is_none() {
-        return Err("no UI analyzer installed (capturecraft-ocr)".into());
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 
 /// `null` means "no parameters".
-fn parse<T: DeserializeOwned>(cmd: &str, p: &Value) -> Result<T> {
+pub(crate) fn parse<T: DeserializeOwned>(cmd: &str, p: &Value) -> Result<T> {
     let p = if p.is_null() { &json!({}) } else { p };
     T::deserialize(p).map_err(|e| bad(cmd, e))
 }
 
-fn bad(cmd: &str, msg: impl std::fmt::Display) -> EngineError {
+pub(crate) fn bad(cmd: &str, msg: impl std::fmt::Display) -> EngineError {
     EngineError::BadParams {
         cmd: cmd.to_string(),
         msg: msg.to_string(),
     }
 }
 
-fn push_node(m: &mut Manifest, annotation: Annotation) -> NodeId {
+pub(crate) fn push_node(m: &mut Manifest, annotation: Annotation) -> NodeId {
     let id = m.alloc_node_id();
     m.annotations.push(AnnotationNode::new(id, annotation));
     id
 }
 
-fn node_annotation(m: &mut Manifest, id: u64) -> Result<&mut AnnotationNode> {
+pub(crate) fn node_annotation(m: &mut Manifest, id: u64) -> Result<&mut AnnotationNode> {
     let node = m.node_mut(NodeId(id)).ok_or(EngineError::NoNode(id))?;
     if node.locked {
         return Err(EngineError::Other(format!("annotation {id} is locked")));
@@ -674,193 +662,11 @@ pub fn base_rect_to_canvas(m: &Manifest, r: Rect) -> Option<RectF> {
         .then(|| RectF::new(x0 + f64::from(o.x), y0 + f64::from(o.y), x1 - x0, y1 - y0))
 }
 
-// ---------------------------------------------------------------------------
-// Simplify UI
-
-pub const SIMPLIFY_ID: &str = "smart.simplify";
-/// Upper bound on analyzer output we turn into nodes.
-pub const MAX_SIMPLIFY_ELEMENTS: usize = 5_000;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TextStyle {
-    /// One rounded bar per text line, the "wireframe" look.
-    #[default]
-    Bars,
-    /// A solid block over the whole text area.
-    Blocks,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Palette {
-    /// Colours sampled from the screenshot.
-    #[default]
-    Match,
-    /// Greys of the same luminance.
-    Mono,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SimplifyParams {
-    #[serde(default)]
-    pub region: Option<Rect>,
-    #[serde(default)]
-    pub text_style: TextStyle,
-    #[serde(default)]
-    pub palette: Palette,
-    #[serde(default)]
-    pub keep_icons: bool,
-    #[serde(default)]
-    pub min_confidence: Option<f32>,
-    #[serde(default)]
-    pub replace: Option<bool>,
-}
-
-fn simplify(s: &mut Session, p: &Value) -> Result<Value> {
-    let p: SimplifyParams = parse(SIMPLIFY_ID, p)?;
-    let min_conf = p.min_confidence.unwrap_or(0.5);
-    if !(0.0..=1.0).contains(&min_conf) {
-        return Err(bad(SIMPLIFY_ID, "min_confidence must be within 0..=1"));
-    }
-    let (Some(doc), Some(analyzer)) = (s.active(), s.analyzer()) else {
-        return Err(EngineError::Disabled(
-            SIMPLIFY_ID.into(),
-            "needs pixels and an analyzer".into(),
-        ));
-    };
-    let Some(pixels) = &doc.pixels else {
-        return Err(EngineError::NoDocument);
-    };
-    let size = pixels.size();
-    let full = Rect::from_xywh(0, 0, size.width, size.height);
-    let region = p.region.map_or(full, |r| r.intersect(&full));
-    if region.is_empty() {
-        return Err(bad(SIMPLIFY_ID, "region does not overlap the capture"));
-    }
-    let elements = analyzer
-        .analyze(pixels, region)
-        .map_err(|e| EngineError::Other(format!("UI analysis failed: {e}")))?;
-
-    let mut kept: Vec<UiElement> = elements
-        .into_iter()
-        .filter(|e| e.confidence.is_finite() && e.confidence >= min_conf)
-        .filter(|e| !(p.keep_icons && matches!(e.kind, UiElementKind::Icon | UiElementKind::Image)))
-        .filter_map(|mut e| {
-            e.rect = e.rect.intersect(&region);
-            (!e.rect.is_empty()).then_some(e)
-        })
-        .collect();
-    let skipped_cap = kept.len().saturating_sub(MAX_SIMPLIFY_ELEMENTS);
-    kept.truncate(MAX_SIMPLIFY_ELEMENTS);
-    // Containers first, then the largest; text and icons end on top.
-    kept.sort_by_key(|e| (z_rank(e.kind), std::cmp::Reverse(e.rect.size().area())));
-
-    let m = s.manifest_mut()?;
-    let mut removed = 0usize;
-    if p.replace.unwrap_or(true) {
-        let before = m.annotations.len();
-        m.annotations
-            .retain(|n| n.generated_by.as_deref() != Some(SIMPLIFY_ID));
-        removed = before - m.annotations.len();
-    }
-    let mut added = Vec::with_capacity(kept.len());
-    let mut skipped = skipped_cap;
-    for e in &kept {
-        let Some(rect) = base_rect_to_canvas(m, e.rect) else {
-            skipped += 1;
-            continue;
-        };
-        for shape in wireframe(e, rect, p.text_style, p.palette) {
-            let id = m.alloc_node_id();
-            let mut node = AnnotationNode::new(id, Annotation::Shape(shape));
-            node.generated_by = Some(SIMPLIFY_ID.into());
-            node.name = format!("Simplified {:?}", e.kind);
-            m.annotations.push(node);
-            added.push(id.0);
-        }
-    }
-    Ok(json!({ "added": added, "removed": removed, "skipped": skipped }))
-}
-
-fn z_rank(k: UiElementKind) -> u8 {
-    match k {
-        UiElementKind::Panel => 0,
-        UiElementKind::Image => 1,
-        UiElementKind::Input | UiElementKind::Button => 2,
-        UiElementKind::Icon => 3,
-        UiElementKind::Text => 4,
-    }
-}
-
-fn mono(c: Color) -> Color {
-    // Rec. 709 luma, integer.
-    let y = (2126 * u32::from(c.r) + 7152 * u32::from(c.g) + 722 * u32::from(c.b)) / 10_000;
-    let y = y.min(255) as u8;
-    Color::rgba(y, y, y, c.a)
-}
-
-fn with_alpha(c: Color, a: u8) -> Color {
-    Color::rgba(c.r, c.g, c.b, a)
-}
-
-/// The low-fidelity blocks for one element.
-fn wireframe(e: &UiElement, r: RectF, text: TextStyle, palette: Palette) -> Vec<ShapeNode> {
-    let pick = |c: Color| match palette {
-        Palette::Match => c,
-        Palette::Mono => mono(c),
-    };
-    let (fg, bg) = (pick(e.fg), pick(e.bg));
-    let block = |rect: RectF, radius: f32, fill: Color, stroke: Option<Stroke>| ShapeNode {
-        shape: if radius > 0.0 {
-            RegionShape::RoundedRect { rect, radius }
-        } else {
-            RegionShape::Rect { rect }
-        },
-        fill: Fill::Solid { color: fill },
-        stroke,
-        shadow: None,
-        ..ShapeNode::default()
-    };
-    match e.kind {
-        UiElementKind::Text => match text {
-            TextStyle::Bars => {
-                // A bar of x-height thickness, centred on the line.
-                let h = (r.h * 0.55).max(2.0);
-                let bar = RectF::new(r.x, r.y + (r.h - h) / 2.0, r.w, h);
-                vec![block(bar, (h / 2.0) as f32, with_alpha(fg, 0x99), None)]
-            }
-            TextStyle::Blocks => vec![block(r, 2.0, with_alpha(fg, 0x66), None)],
-        },
-        UiElementKind::Button | UiElementKind::Input => {
-            let edge = Stroke {
-                color: with_alpha(fg, 0x80),
-                width: 1.0,
-                ..Stroke::default()
-            };
-            vec![block(r, 4.0, bg, Some(edge))]
-        }
-        UiElementKind::Icon => {
-            let side = r.w.min(r.h);
-            let sq = RectF::new(
-                r.x + (r.w - side) / 2.0,
-                r.y + (r.h - side) / 2.0,
-                side,
-                side,
-            );
-            vec![block(sq, (side * 0.2) as f32, with_alpha(fg, 0xB3), None)]
-        }
-        UiElementKind::Panel => vec![block(r, 0.0, bg, None)],
-        UiElementKind::Image => vec![block(r, 0.0, pick(Color::rgb(0xC8, 0xC8, 0xC8)), None)],
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::{Pixels, UiAnalyzer};
+    use crate::Pixels;
     use photocraft_geom::Size;
 
     fn session(w: u32, h: u32) -> Session {
@@ -1086,53 +892,5 @@ mod tests {
         let r = base_rect_to_canvas(manifest(&s), Rect::new(0, 330, 10, 350)).unwrap();
         assert_eq!((r.y, r.h), (230.0, 20.0));
         assert!(base_rect_to_canvas(manifest(&s), Rect::new(0, 120, 10, 180)).is_none());
-    }
-
-    struct FakeAnalyzer(Vec<UiElement>);
-
-    impl UiAnalyzer for FakeAnalyzer {
-        fn analyze(&self, _: &Pixels, _: Rect) -> std::result::Result<Vec<UiElement>, String> {
-            Ok(self.0.clone())
-        }
-    }
-
-    fn el(kind: UiElementKind, rect: Rect, confidence: f32) -> UiElement {
-        UiElement {
-            kind,
-            rect,
-            fg: Color::rgb(0x20, 0x20, 0x20),
-            bg: Color::rgb(0xF0, 0xF0, 0xF8),
-            confidence,
-            text: None,
-        }
-    }
-
-    #[test]
-    fn simplify_needs_an_analyzer() {
-        let mut s = session(100, 100);
-        assert!(matches!(
-            s.run(SIMPLIFY_ID, &json!({})),
-            Err(EngineError::Disabled(..))
-        ));
-    }
-
-    #[test]
-    fn simplify_builds_and_replaces_wireframes() {
-        let mut s = session(300, 200);
-        s.set_analyzer(Box::new(FakeAnalyzer(vec![
-            el(UiElementKind::Text, Rect::new(10, 10, 120, 24), 0.9),
-            el(UiElementKind::Panel, Rect::new(0, 0, 300, 200), 0.8),
-            el(UiElementKind::Button, Rect::new(200, 150, 280, 180), 0.95),
-            el(UiElementKind::Icon, Rect::new(250, 10, 270, 30), 0.2),
-            el(UiElementKind::Text, Rect::new(500, 500, 600, 520), 0.9),
-            el(UiElementKind::Text, Rect::new(10, 40, 90, 54), f32::NAN),
-        ])));
-        let r = s.run(SIMPLIFY_ID, &json!({})).unwrap();
-        assert_eq!(r["added"].as_array().map(Vec::len), Some(3));
-        let first = &manifest(&s).annotations[0];
-        assert_eq!(first.name, "Simplified Panel");
-        let r = s.run(SIMPLIFY_ID, &json!({ "palette": "mono" })).unwrap();
-        assert_eq!(r["removed"], 3);
-        assert_eq!(manifest(&s).annotations.len(), 3);
     }
 }
