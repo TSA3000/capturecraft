@@ -1,3 +1,40 @@
+# v0.20.0
+
+## Changes
+
+- **New editor**: `capturecraft-editor` is now the studio editor built on the layered crates
+  (eframe + wgpu). The old editor with its row of text buttons is gone. The tray's
+  **Open editor** and **Open in editor** start the new one.
+  - Menu strip (File, Edit, Image, Video, Share, View, Help) and the document name.
+  - 58 px toolbar of icon-over-label buttons: Library, Assets, Capture, Create ▾ │ Favorites,
+    Arrow, Text, Callout, Shape, Stamp, Fill, Move, Selection, More ▾ │ Undo, Redo │ Copy All
+    and the blue Share / Save split button. Tools in More can be pinned to the toolbar.
+  - Right drawer: Tool Properties (Quick Style tiles and controls; the Selection tool's
+    Rectangle mode with a Transparent or Auto Fill background) or Effects (Border, Drop Shadow,
+    Rounded Drop-Shadow Frame).
+  - Utility bar: Hide/Show Recent, Tag, zoom, canvas size (Resize / Trim Canvas), Effects /
+    Properties tabs.
+  - Recent Captures filmstrip with real thumbnails, a × to close, and Duplicate / Copy /
+    Delete in the context menu.
+  - Vector icons for every button, and the dark studio palette in the Studio theme.
+  - Opens image files given on the command line; New Blank Image.
+- **Engine**: new `document.setTags` command; Smart Move/Delete take
+  `background: "transparent"`; `Session::close` and `Session::duplicate`; canvas-to-base
+  rectangle mapping.
+- **The app installs the UI analyzer**, so Simplify, Smart Move and Auto Fill work there.
+- Fix: every capture opened in the new app gets its own document id, so captures no longer
+  collide in the Recent Captures strip.
+- Not available yet in the new editor: drawing with Text, Shape, Stamp, Fill, Blur, Pixelate,
+  Highlight, Pen, Eraser, Magnify, Spotlight and Crop; the Save As dialog; saving
+  `.capturecraft` files. The controls for these say so.
+
+## Upgrading
+
+- The old editor's Box, Highlight, Pixelate, Blur and Crop tools are not in the new editor
+  yet. Use v0.19.0's `capturecraft-editor` if you need them.
+- Release archives and installers ship the new `capturecraft-editor` under the same name and
+  path.
+
 # v0.19.0
 
 ## Changes

@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.20.0 (2026-10-19)
+
+- `capturecraft-editor` is the new studio editor (menu strip, icon-over-label toolbar,
+  Tool Properties / Effects drawer, utility bar, Recent Captures filmstrip, vector icons);
+  the old 7-button editor is removed.
+- Selection tool (rectangle) with Transparent / Auto Fill background; Effects tiles for
+  border, drop shadow and rounded shadow frame; tags; canvas resize and trim.
+- Engine: `document.setTags`, transparent background for Smart Move/Delete,
+  `Session::close` / `Session::duplicate`.
+- The app installs the UI analyzer; captures get unique document ids.
+
 ## v0.19.0 (2026-10-19)
 
 - Preview editor (`capturecraft-next`) usable end to end: HUD, crosshair overlay, five-zone

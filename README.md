@@ -37,7 +37,7 @@ sudo apt-get install pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1
 | Binary | What it is |
 |--------|-----------|
 | `capturecraft-app` | Main window (own title bar): Capture button, hotkey, clipboard, autostart, save folder |
-| `capturecraft-editor` | Standalone annotation editor: `capturecraft-editor [image.png]` (no path = newest capture) |
+| `capturecraft-editor` | Studio editor (eframe + wgpu): `capturecraft-editor [image.png …]` |
 | `capturecraft-tray` | Background tray + global hotkey (no console; used by autostart) |
 | `capturecraft` | Command line: overlay, `--full`, `--region`, `--tray` |
 
@@ -96,36 +96,50 @@ capturecraft-tray         # windowless (used by autostart)
 
 ### Editor
 
-The editor is its own program. Turn on **Open in editor** (or `editor = true`)
-and every capture is saved and then opened in it; **Save** writes back to the
-same file. It can also be started on its own:
+`capturecraft-editor` is the studio editor (crate `capturecraft-app`, eframe +
+wgpu). Turn on **Open in editor** (or `editor = true`) and every capture is
+saved and then opened in it; the tray's **Open editor** opens the newest
+capture. It also takes image files:
 
 ```sh
-capturecraft-editor               # newest capture
-capturecraft-editor shot.png
+capturecraft-editor shot.png other.jpg
 ```
 
+Layout, top to bottom:
 
-| Tool | What it does |
-|------|--------------|
-| Arrow | Arrow with a filled head |
-| Box | Rectangle outline |
-| Highlight | Translucent marker |
-| Pixelate | Blocks out faces, names, keys |
-| Blur | Gaussian blur (PhotoCraft's kernel and two-pass convolution) |
-| Step | Numbered badge, counts up by itself |
-| Crop | Trims the image; annotations move with it |
+- **Menu strip**: File, Edit, Image, Video, Share, View, Help and, in the
+  middle, the document name (`2026-10-19_18-43-26.capturecraft ▾`) to switch
+  between open captures.
+- **Toolbar** (icon over label): Library, Assets │ Capture, Create ▾ on the
+  left; Favorites, Arrow, Text, Callout, Shape, Stamp, Fill, Move, Selection,
+  More ▾ │ Undo, Redo centred; Copy All and the blue **Share / Save** split
+  button (PNG to the captures folder; the chevron offers JPG, WebP, SVG, PDF
+  and Clipboard) on the right. More holds Step, Blur, Pixelate, Highlight,
+  Pen, Eraser, Magnify, Spotlight, Cut Out, Smart Move, Simplify and Crop;
+  the pin next to each puts it on the toolbar (right-click to unpin).
+- **Tool Properties** drawer: Quick Style tiles and the property controls of
+  the active tool (colour, outline, width, arrowheads, shadow direction,
+  corner radius, tail, numbering). Right-click a Quick Style to add it to
+  Favorites. The Selection tool shows Rectangle / Ellipse / Polygon / Lasso
+  tiles and **Background Fill**: Transparent, or Auto Fill (inpainted by
+  `capturecraft-ocr`) when the selection is moved or deleted.
+- **Effects** drawer: Border, Drop Shadow and Rounded Drop-Shadow Frame for
+  the whole canvas, with the frame's settings.
+- **Canvas**: the capture on a dark surround, with eight resize squares on
+  its border to add padding.
+- **Utility bar**: Hide/Show Recent, Tag, zoom (Fit, 25–400 %), canvas size
+  (Resize / Trim Canvas) and the Effects / Properties tabs.
+- **Recent Captures**: 130 × 85 thumbnails of the open captures; click to
+  switch, × to close, right-click for Duplicate, Combine Images, Save As,
+  Copy and Delete.
 
-Colour swatches, a size slider, undo/redo (Ctrl+Z / Ctrl+Y), **Save** (Ctrl+S),
-**Copy** (Ctrl+C) and Esc to close.
-
-Built on PhotoCraft v0.9.0 (storytold/photocraft), the sibling craft app:
-`photocraft-geom` is a real dependency, so coordinates are their types; the
-history is their `photocraft-ops` model (labelled snapshots per step, capped
-by state count, redo cleared on the next edit — the Edit menu shows
-"Undo Arrow", "Redo Crop"); the blur is their `photocraft-algo` Gaussian
-kernel and separable two-pass convolution; and the themes are their design
-tokens. The engine/UI split is theirs too: `editor.rs` has no egui in it.
+Not available yet (the buttons say so): drawing with Text, Shape, Stamp,
+Fill, Blur, Pixelate, Highlight, Pen, Eraser, Magnify, Spotlight and Crop
+(the engine has no commands for them yet), the Ellipse, Polygon and Lasso
+selections, Snap to Object, Assets, Create from template, video, the Save
+As dialog, Combine Images, and Torn Edge, Perspective, Spotlight and Color
+Filter effects. Documents live in the session until `.capturecraft` saving
+exists; use Share to keep an image.
 
 ### Menus and preferences
 
@@ -198,12 +212,11 @@ Command-line flags (`--hotkey`, `--out-dir`, `--no-clipboard`) override it.
 
 ## Next-generation editor (preview)
 
-The workspace also holds the layered architecture that will replace the
-programs above. It is a preview: it is not in the release archives or the
-installers yet, and the programs above are unchanged.
+The workspace holds the layered architecture that is replacing the
+programs above; `capturecraft-editor` already runs on it.
 
 ```sh
-cargo run -p capturecraft-app --release   # binary: capturecraft-next
+cargo run -p capturecraft-app --release   # binary: capturecraft-editor
 ```
 
 | Crate | Layer | What it is |
@@ -213,7 +226,7 @@ cargo run -p capturecraft-app --release   # binary: capturecraft-next
 | `capturecraft-compositor` | L4 | CPU reference compositor and wgpu compositor with pixel parity (≤ 2/255) |
 | `capturecraft-capture` | L6 | Capture backends, frozen-desktop hit testing, scrolling-capture stitcher |
 | `capturecraft-ocr` | L6 | UI segmentation, inpainting and text recognition for the smart tools |
-| `capturecraft-ui-egui` | L7 | Capture HUD, crosshair overlay and the five-zone editor (PhotoCraft themes) |
+| `capturecraft-ui-egui` | L7 | Capture HUD, crosshair overlay and the studio editor: toolbar, drawer, canvas, utility bar, filmstrip, vector icons (PhotoCraft themes) |
 | `capturecraft-app` | app | eframe + wgpu shell hosting the editor, the floating HUD and the overlay on one GPU device |
 
 Everything below the UI is built on the PhotoCraft crates (v0.9.0):
@@ -227,8 +240,7 @@ What the preview does today:
 - Capture HUD (borderless, always on top) → the windows hide → crosshair
   overlay over the frozen desktop (physical-pixel size badge, loupe) →
   the capture opens in the editor.
-- Five-zone editor: toolbar, canvas, Quick Styles sidebar, Recent Tray and
-  the Library view.
+- The studio editor described under [Editor](#editor).
 - Canvas gizmo: 8 resize handles, a rotation handle (Shift snaps to 15°),
   yellow diamonds for callout tails and corner radius.
 - Rendered on CPU and GPU alike: callout text and step badge numbers
@@ -236,8 +248,8 @@ What the preview does today:
   and spotlight edges, and the rounded drop-shadow frame with margin
   handles.
 
-Not yet: tray, global hotkey and autostart (use the programs above), copy,
-share, preferences, thumbnails, video and scrolling capture.
+Not yet in the new app: tray, global hotkey and autostart (the programs
+above provide them), preferences, video and scrolling capture.
 
 Checks (same as CI):
 
