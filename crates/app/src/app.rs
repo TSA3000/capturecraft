@@ -52,6 +52,7 @@ use egui::{ViewportCommand, ViewportId};
 use crate::capture_flow::{CaptureFlow, open_capture};
 use crate::documents::{self, index_of, open_blank, open_image};
 use crate::export;
+use crate::library::{self, LibraryFiles};
 
 /// eframe storage key of [`AppState`].
 pub const STATE_KEY: &str = "capturecraft.ui";
@@ -75,6 +76,8 @@ pub enum ShellAction {
     Export(ImageFormat),
     /// Close documents (the tray's ×, Delete: nothing is on disk yet).
     Close(Vec<String>),
+    /// Open an image file (the Library's captures folder entries).
+    Open(PathBuf),
     Duplicate(String),
     CopyDocument(String),
     NewBlank,
@@ -107,6 +110,7 @@ pub fn shell_action(intent: &UiIntent) -> ShellAction {
         UiIntent::CopyDocument { doc_id } => ShellAction::CopyDocument(doc_id.clone()),
         UiIntent::SaveAs { .. } => ShellAction::Unavailable("The Save As dialog"),
         UiIntent::NewBlankImage => ShellAction::NewBlank,
+        UiIntent::OpenFile { path } => ShellAction::Open(PathBuf::from(path)),
         UiIntent::Unavailable(what) => ShellAction::Unavailable(what),
         UiIntent::Command { .. } | UiIntent::ActivateDocument { .. } => {
             ShellAction::Unavailable("engine intent")
@@ -160,6 +164,10 @@ pub struct CaptureCraftApp {
     /// Recent Captures thumbnails by document id, with the content key
     /// they were drawn from.
     thumbnails: HashMap<String, (u64, Thumbnail, egui::TextureHandle)>,
+    /// The captures folders' image files the Library lists.
+    library: LibraryFiles,
+    /// The tray app's output folder (its config.toml), read at start.
+    tray_dir: Option<PathBuf>,
     /// The window title last sent.
     title: String,
 }
@@ -211,6 +219,8 @@ impl CaptureCraftApp {
             hud_open: open.is_empty(),
             notice,
             thumbnails: HashMap::new(),
+            library: LibraryFiles::default(),
+            tray_dir: library::tray_output_dir(),
             title: String::new(),
         };
         for p in open {
@@ -486,6 +496,7 @@ impl CaptureCraftApp {
                     ShellAction::Copy => self.copy_active(),
                     ShellAction::Export(format) => self.export(format, None, None),
                     ShellAction::Close(ids) => self.close_documents(&ids),
+                    ShellAction::Open(path) => self.open_file(&path),
                     ShellAction::Duplicate(id) => {
                         let new_id = documents::unique_doc_id(&self.session);
                         match index_of(&self.session, &id)
@@ -572,14 +583,23 @@ impl CaptureCraftApp {
                 .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Title(title.clone()));
             self.title = title;
         }
+        let dirs = library::library_dirs(&self.state, self.tray_dir.clone());
+        self.library
+            .refresh(ui.ctx(), &dirs, self.state.editor.library.visible);
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let thumbs = &self.thumbnails;
-        let thumbnail = |id: &str| thumbs.get(id).map(|(_, th, _)| *th);
+        let (thumbs, files) = (&self.thumbnails, &self.library);
+        let thumbnail = |id: &str| {
+            thumbs
+                .get(id)
+                .map(|(_, th, _)| *th)
+                .or_else(|| files.thumbnail(id))
+        };
         let intents = EditorWindow {
             session: &self.session,
             image,
             thumbnail: &thumbnail,
             today: &today,
+            library_files: &self.library.items,
         }
         .show(ui, &mut self.state);
         if let Some(n) = &self.notice {

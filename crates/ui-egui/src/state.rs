@@ -492,6 +492,61 @@ pub struct ToolOptions {
     pub callout: CalloutOptions,
     pub cut_out: CutOutOptions,
     pub simplify: SimplifyOptions,
+    pub shape: ShapeOptions,
+    pub blur: BlurOptions,
+    pub pixelate: PixelateOptions,
+}
+
+/// The Shape tool's outline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShapeOptions {
+    pub ellipse: bool,
+}
+
+impl ShapeOptions {
+    /// `annotation.addShape`'s `kind`.
+    pub fn kind(self) -> &'static str {
+        if self.ellipse { "ellipse" } else { "rect" }
+    }
+}
+
+/// The Blur tool's strength.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlurOptions {
+    /// Gaussian sigma, canvas pixels.
+    pub sigma: f32,
+}
+
+impl BlurOptions {
+    /// The Light / Medium / Strong cards.
+    pub const PRESETS: [(&'static str, f32); 3] =
+        [("Light", 4.0), ("Medium", 8.0), ("Strong", 16.0)];
+}
+
+impl Default for BlurOptions {
+    fn default() -> Self {
+        Self { sigma: 8.0 }
+    }
+}
+
+/// The Pixelate tool's block size.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PixelateOptions {
+    pub block_size_px: u32,
+}
+
+impl PixelateOptions {
+    /// The Fine / Medium / Coarse cards.
+    pub const PRESETS: [(&'static str, u32); 3] = [("Fine", 6), ("Medium", 12), ("Coarse", 24)];
+}
+
+impl Default for PixelateOptions {
+    fn default() -> Self {
+        Self { block_size_px: 12 }
+    }
 }
 
 /// The Selection tool's mode tiles and options.
@@ -767,13 +822,16 @@ impl ToolId {
             ToolId::Arrow => Some("annotation.addArrow"),
             ToolId::Step => Some("annotation.addStep"),
             ToolId::Callout => Some("annotation.addCallout"),
+            ToolId::Shape | ToolId::Highlighter => Some("annotation.addShape"),
+            ToolId::Blur | ToolId::Pixelate => Some("annotation.addBlur"),
             ToolId::CutOut => Some("canvas.cutOut"),
             ToolId::Simplify => Some("smart.simplify"),
             _ => None,
         }
     }
 
-    /// Tools whose Quick Styles grid the sidebar shows.
+    /// Tools whose Quick Styles grid the sidebar shows (Blur and
+    /// Pixelate show strength cards instead).
     pub fn has_quick_styles(self) -> bool {
         matches!(
             self,
@@ -784,7 +842,6 @@ impl ToolId {
                 | ToolId::Step
                 | ToolId::Pen
                 | ToolId::Highlighter
-                | ToolId::Blur
                 | ToolId::Magnify
         )
     }
@@ -1014,15 +1071,26 @@ impl Default for QuickStyles {
             ("Blue", Color::rgb(0x2D, 0x7F, 0xF9)),
             ("Black", Color::rgb(0x20, 0x20, 0x20)),
         ];
+        // Highlighter pens rather than ink colours.
+        let marker = [
+            ("Yellow", Color::rgb(0xFF, 0xE6, 0x00)),
+            ("Green", Color::rgb(0x5C, 0xE6, 0x5C)),
+            ("Pink", Color::rgb(0xFF, 0x6E, 0xC7)),
+            ("Blue", Color::rgb(0x4D, 0xC3, 0xFF)),
+        ];
         let tools = ToolId::ALL
             .into_iter()
             .filter(|t| t.has_quick_styles())
             .map(|tool| ToolStyles {
                 tool,
-                styles: palette
-                    .iter()
-                    .map(|(name, c)| QuickStyle::builtin(tool, name, *c))
-                    .collect(),
+                styles: if tool == ToolId::Highlighter {
+                    &marker
+                } else {
+                    &palette
+                }
+                .iter()
+                .map(|(name, c)| QuickStyle::builtin(tool, name, *c))
+                .collect(),
                 selected: Some(0),
             })
             .collect();

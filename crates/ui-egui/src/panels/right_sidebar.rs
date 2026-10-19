@@ -42,8 +42,8 @@ use serde_json::{Value, json};
 use crate::UiIntent;
 use crate::icons::{self, Icon};
 use crate::state::{
-    ColorTarget, EditorState, ExpandBackdrop, InspectorMode, QuickStyle, SelectionFill,
-    SelectionMode, StylePreset, ToolId,
+    BlurOptions, ColorTarget, EditorState, ExpandBackdrop, InspectorMode, PixelateOptions,
+    QuickStyle, SelectionFill, SelectionMode, StylePreset, ToolId,
 };
 use crate::theme::{Tokens, stroke};
 use crate::widgets::{self, icon_style, tile};
@@ -238,7 +238,27 @@ impl RightSidebar<'_> {
                         );
                         ui.add_space(t.space_sm);
                     }
-                    ui.label(egui::RichText::new("Quick Styles").strong());
+                    if tool == ToolId::Shape {
+                        let o = &mut editor.tools.shape;
+                        if let Some(i) = widgets::segmented(
+                            ui,
+                            Id::new("sidebar.shape_kind"),
+                            &[
+                                (Some(Icon::RectangleSelect), "Rectangle"),
+                                (Some(Icon::EllipseSelect), "Ellipse"),
+                            ],
+                            usize::from(o.ellipse),
+                            t,
+                        ) {
+                            o.ellipse = i == 1;
+                        }
+                        ui.add_space(t.space_md);
+                    }
+                    let heading = match tool {
+                        ToolId::Blur | ToolId::Pixelate => "Strength",
+                        _ => "Quick Styles",
+                    };
+                    ui.label(egui::RichText::new(heading).strong());
                     ui.add_space(t.space_sm);
                     let changed = self.quick_styles(ui, editor, intents);
                     ui.add_space(t.space_md);
@@ -312,6 +332,42 @@ impl RightSidebar<'_> {
                         "Straight seam"
                     })
                     .clicked()
+                });
+            }
+            ToolId::Blur => {
+                let current = editor.tools.blur.sigma;
+                grid(ui, BlurOptions::PRESETS.len(), &mut |ui, i, rect| {
+                    let Some((label, sigma)) = BlurOptions::PRESETS.get(i).copied() else {
+                        return false;
+                    };
+                    let r = card_frame(ui, rect, current == sigma, t, ("blur", i));
+                    paint_strength(ui.painter(), r.rect.shrink(t.space_md), None, i, label, t);
+                    if r.clicked() {
+                        editor.tools.blur.sigma = sigma;
+                    }
+                    r.on_hover_text(format!("Gaussian blur, radius {sigma} px"))
+                        .clicked()
+                });
+            }
+            ToolId::Pixelate => {
+                let current = editor.tools.pixelate.block_size_px;
+                grid(ui, PixelateOptions::PRESETS.len(), &mut |ui, i, rect| {
+                    let Some((label, block)) = PixelateOptions::PRESETS.get(i).copied() else {
+                        return false;
+                    };
+                    let r = card_frame(ui, rect, current == block, t, ("pixelate", i));
+                    paint_strength(
+                        ui.painter(),
+                        r.rect.shrink(t.space_md),
+                        Some(block),
+                        i,
+                        label,
+                        t,
+                    );
+                    if r.clicked() {
+                        editor.tools.pixelate.block_size_px = block;
+                    }
+                    r.on_hover_text(format!("{block} px blocks")).clicked()
                 });
             }
             ToolId::Simplify => {
@@ -1185,6 +1241,12 @@ pub fn tool_help(tool: ToolId) -> &'static str {
         }
         ToolId::CutOut => "Drag across the capture to remove a strip and close the gap.",
         ToolId::Simplify => "Replace text and detail with clean shapes in the chosen palette.",
+        ToolId::Shape => "Drag to draw a rectangle or ellipse in the selected style.",
+        ToolId::Highlighter => "Drag over text to mark it with a translucent highlighter band.",
+        ToolId::Blur => "Drag over private details to blur them; pick the strength below.",
+        ToolId::Pixelate => {
+            "Drag over private details to pixelate them; pick the block size below."
+        }
         _ => "Pick a Quick Style, then adjust it below. + Add Quick Style saves it.",
     }
 }
@@ -1526,6 +1588,62 @@ pub fn paint_thumbnail(
     }
 }
 
+/// Blur / Pixelate strength card: a mosaic of `block` (Pixelate) or a
+/// stack of fading rings (Blur, `level` 0..=2), with the preset's name.
+fn paint_strength(
+    p: &egui::Painter,
+    r: ERect,
+    block: Option<u32>,
+    level: usize,
+    label: &str,
+    t: &Tokens,
+) {
+    let art = ERect::from_min_max(r.min, pos2(r.max.x, r.max.y - 14.0));
+    match block {
+        Some(b) => {
+            let cell = (b as f32 / 2.0).clamp(3.0, art.height() / 2.0);
+            let (cols, rows) = (
+                (art.width() / cell).floor() as i32,
+                (art.height() / cell).floor() as i32,
+            );
+            for i in 0..cols {
+                for j in 0..rows {
+                    let shade = if (i * 7 + j * 3) % 3 == 0 {
+                        t.field_border
+                    } else if (i + j) % 2 == 0 {
+                        t.card_hover
+                    } else {
+                        t.text_faint
+                    };
+                    let c = ERect::from_min_size(
+                        art.min + vec2(i as f32 * cell, j as f32 * cell),
+                        Vec2::splat(cell),
+                    );
+                    p.rect_filled(c, 0.0, shade);
+                }
+            }
+        }
+        None => {
+            let rad = art.height() * 0.3;
+            for k in 0..=(level + 1) * 2 {
+                let a = 0.5 / (k as f32 + 1.0);
+                p.circle_filled(
+                    art.center(),
+                    rad + k as f32 * 2.0,
+                    t.text_dim.gamma_multiply(a),
+                );
+            }
+        }
+    }
+    p.text(
+        pos2(r.center().x, r.max.y),
+        Align2::CENTER_BOTTOM,
+        label,
+        FontId::proportional(11.0),
+        t.text_dim,
+    );
+}
+
 /// Cut Out card: two image halves joined straight or along a torn edge.
 fn paint_seam(p: &egui::Painter, r: ERect, torn: bool, t: &Tokens) {
     let mid = r.center().y;
@@ -1631,9 +1749,7 @@ mod tests {
     #[test]
     fn every_quick_style_tool_has_inspector_fields() {
         for tool in ToolId::ALL.into_iter().filter(|t| t.has_quick_styles()) {
-            if tool != ToolId::Blur {
-                assert!(Fields::of(tool).any(), "{tool:?}");
-            }
+            assert!(Fields::of(tool).any(), "{tool:?}");
         }
     }
 

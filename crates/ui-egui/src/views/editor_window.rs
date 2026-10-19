@@ -29,7 +29,7 @@ use crate::panels::editor_toolbar::{
 };
 use crate::panels::recent_tray::{RecentTray, Thumbnail};
 use crate::panels::right_sidebar::RightSidebar;
-use crate::state::{AppState, EditorState, InspectorMode, ToolId, Zoom};
+use crate::state::{AppState, EditorState, InspectorMode, ToolId, TrayItem, Zoom};
 use crate::theme::{ThemeKind, Tokens};
 use crate::views::library_view::LibraryPanel;
 use crate::widgets::{self, icon_style, pill, segmented};
@@ -152,6 +152,9 @@ pub struct EditorWindow<'a> {
     pub thumbnail: &'a dyn Fn(&str) -> Option<Thumbnail>,
     /// Local date `YYYY-MM-DD`, for the Library's date filters.
     pub today: &'a str,
+    /// Image files in the captures folders, listed by the Library after
+    /// the open documents (`library_view::file_item`).
+    pub library_files: &'a [TrayItem],
 }
 
 impl EditorWindow<'_> {
@@ -232,8 +235,15 @@ impl EditorWindow<'_> {
                     Frame::new()
                         .inner_margin(Margin::same(t.space_md as i8))
                         .show(ui, |ui| {
+                            let items: Vec<TrayItem> = editor
+                                .tray
+                                .items
+                                .iter()
+                                .chain(self.library_files)
+                                .cloned()
+                                .collect();
                             LibraryPanel {
-                                items: &editor.tray.items,
+                                items: &items,
                                 thumbnail: self.thumbnail,
                                 today: self.today,
                                 tokens: t,
@@ -789,6 +799,7 @@ mod tests {
                     image: None,
                     thumbnail: &|_| None,
                     today: "2026-10-19",
+                    library_files: &[],
                 }
                 .show(ui, &mut state);
             });
@@ -842,6 +853,7 @@ mod tests {
                     image: None,
                     thumbnail: &|_| None,
                     today: "2026-10-19",
+                    library_files: &[],
                 }
                 .show(ui, state);
             });

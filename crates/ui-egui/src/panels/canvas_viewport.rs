@@ -434,6 +434,8 @@ fn creation_params(tool: ToolId, style: &StylePreset) -> serde_json::Map<String,
         ToolId::Arrow => &["stroke", "shadow"],
         ToolId::Callout => &["fill", "stroke", "shadow", "text_color", "font"],
         ToolId::Step => &["text_color", "shadow"],
+        ToolId::Shape => &["fill", "stroke", "shadow"],
+        ToolId::Highlighter => &["fill"],
         _ => &[],
     };
     let mut p: serde_json::Map<String, Value> = all
@@ -465,10 +467,27 @@ fn creation_params(tool: ToolId, style: &StylePreset) -> serde_json::Map<String,
                 );
             }
         }
+        ToolId::Shape => {
+            if let Some(r) = style.corner_radius {
+                p.insert("corner_radius".into(), json!(r));
+            }
+            // A preset without a stroke draws a filled shape only.
+            if style.stroke.is_none() {
+                p.insert("stroke".into(), Value::Null);
+            }
+        }
+        ToolId::Highlighter => {
+            p.insert("stroke".into(), Value::Null);
+            p.insert("blend".into(), json!("multiply"));
+        }
         _ => {}
     }
     p
 }
+
+/// Smallest side a region tool's drag must span, canvas pixels; shorter
+/// drags (and clicks) add nothing.
+const MIN_REGION: f64 = 3.0;
 
 fn normalized(a: Point, b: Point) -> RectF {
     RectF::new(
@@ -515,6 +534,38 @@ pub fn draw_intent(editor: &EditorState, from: Point, to: Point) -> Option<UiInt
             p.insert("sequence".into(), json!(o.sequence));
             p.insert("numbering".into(), json!(o.numbering));
             Some(UiIntent::command("annotation.addStep", Value::Object(p)))
+        }
+        ToolId::Shape | ToolId::Highlighter | ToolId::Blur | ToolId::Pixelate => {
+            let b = normalized(from, to);
+            if b.w < MIN_REGION || b.h < MIN_REGION {
+                return None;
+            }
+            p.insert(
+                "bounds".into(),
+                json!({ "x": b.x, "y": b.y, "w": b.w, "h": b.h }),
+            );
+            let id = match tool {
+                ToolId::Shape => {
+                    p.insert("kind".into(), json!(editor.tools.shape.kind()));
+                    "annotation.addShape"
+                }
+                ToolId::Highlighter => "annotation.addShape",
+                ToolId::Blur => {
+                    p.insert(
+                        "effect".into(),
+                        json!({ "kind": "gaussian", "sigma": editor.tools.blur.sigma }),
+                    );
+                    "annotation.addBlur"
+                }
+                _ => {
+                    p.insert(
+                        "effect".into(),
+                        json!({ "kind": "pixelate", "block_size_px": editor.tools.pixelate.block_size_px }),
+                    );
+                    "annotation.addBlur"
+                }
+            };
+            Some(UiIntent::command(id, Value::Object(p)))
         }
         _ => None,
     }
@@ -1178,7 +1229,8 @@ impl CanvasViewport<'_> {
             }
         }
         if let Some(CanvasGesture::Draw { from, to }) = &editor.canvas.gesture {
-            draw_preview(&painter, &xf, tool, *from, *to, t);
+            let ellipse = tool == ToolId::Shape && editor.tools.shape.ellipse;
+            draw_preview(&painter, &xf, tool, *from, *to, ellipse, t);
         }
         if tool == ToolId::Selection {
             let shown = match &editor.canvas.gesture {
@@ -1286,8 +1338,46 @@ impl CanvasViewport<'_> {
         {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
+        if let Some(p) = resp.hover_pos()
+            && editor.canvas.eyedropper.is_none()
+            && tool != ToolId::Move
+        {
+            pointer_badge(&painter, p, tool, t);
+        }
         resp
     }
+}
+
+/// Side of the tool badge that follows the pointer, points.
+pub const POINTER_BADGE: f32 = 20.0;
+
+/// Where the pointer's tool badge sits: below right of the hotspot, clear
+/// of the crosshair's arms.
+pub fn pointer_badge_rect(pointer: Pos2) -> ERect {
+    ERect::from_min_size(pointer + vec2(12.0, 12.0), Vec2::splat(POINTER_BADGE))
+}
+
+/// The active tool's icon on a small chip next to the pointer, so the
+/// crosshair says which tool it draws with.
+fn pointer_badge(painter: &egui::Painter, pointer: Pos2, tool: ToolId, t: &Tokens) {
+    let r = pointer_badge_rect(pointer);
+    painter.rect(
+        r,
+        Tokens::corner(t.radius),
+        t.badge_bg,
+        stroke(1.0, t.badge_text.gamma_multiply(0.35)),
+        StrokeKind::Inside,
+    );
+    let style = crate::icons::IconStyle {
+        fg: t.badge_text,
+        accent: t.record,
+    };
+    crate::icons::paint(
+        painter,
+        r.shrink(3.0),
+        crate::widgets::tool_icon(tool),
+        style,
+    );
 }
 
 /// The command a finished gizmo drag runs, `None` when nothing changed.
@@ -1671,18 +1761,24 @@ fn draw_preview(
     tool: ToolId,
     a: Point,
     b: Point,
+    ellipse: bool,
     t: &Tokens,
 ) {
     let (pa, pb) = (xf.to_screen(a), xf.to_screen(b));
     let s = stroke(2.0, t.gizmo_stroke);
+    let r = ERect::from_two_pos(pa, pb);
     match tool {
         ToolId::Arrow => painter.arrow(pa, pb - pa, s),
+        ToolId::Shape if ellipse => {
+            painter.add(Shape::ellipse_stroke(r.center(), r.size() / 2.0, s));
+        }
         ToolId::Callout
         | ToolId::Shape
         | ToolId::Blur
+        | ToolId::Pixelate
         | ToolId::Magnify
         | ToolId::Spotlight
-        | ToolId::Highlighter => dashed_rect(painter, ERect::from_two_pos(pa, pb), t.gizmo_stroke),
+        | ToolId::Highlighter => dashed_rect(painter, r, t.gizmo_stroke),
         _ => {}
     }
 }
@@ -1821,6 +1917,44 @@ mod tests {
         assert_eq!(params["end_head"], "triangle");
         assert!(params.get("stroke").is_some());
         assert!(draw_intent(&e, Point::new(0.0, 0.0), Point::new(1.0, 1.0)).is_none());
+        for tool in [
+            ToolId::Shape,
+            ToolId::Highlighter,
+            ToolId::Blur,
+            ToolId::Pixelate,
+        ] {
+            e.toolbar.active = tool;
+            let click = Point::new(5.0, 5.0);
+            assert!(draw_intent(&e, click, click).is_none(), "{tool:?}");
+        }
+        e.toolbar.active = ToolId::Highlighter;
+        let UiIntent::Command { id, params } =
+            draw_intent(&e, Point::new(40.0, 30.0), Point::new(10.0, 20.0)).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "annotation.addShape");
+        assert_eq!(
+            params["bounds"],
+            json!({ "x": 10.0, "y": 20.0, "w": 30.0, "h": 10.0 })
+        );
+        assert_eq!(
+            (&params["blend"], &params["stroke"]),
+            (&json!("multiply"), &Value::Null)
+        );
+        assert_eq!(params["fill"]["color"], "#ffe60066");
+        e.toolbar.active = ToolId::Pixelate;
+        e.tools.pixelate.block_size_px = 24;
+        let UiIntent::Command { id, params } =
+            draw_intent(&e, Point::new(0.0, 0.0), Point::new(50.0, 20.0)).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "annotation.addBlur");
+        assert_eq!(
+            params["effect"],
+            json!({ "kind": "pixelate", "block_size_px": 24 })
+        );
 
         e.toolbar.active = ToolId::Step;
         let UiIntent::Command { params, .. } =
@@ -1905,14 +2039,32 @@ mod tests {
         )
         .unwrap();
         let mut e = EditorState::default();
-        for tool in [ToolId::Arrow, ToolId::Callout, ToolId::Step] {
+        e.tools.shape.ellipse = true;
+        for tool in [
+            ToolId::Arrow,
+            ToolId::Callout,
+            ToolId::Step,
+            ToolId::Shape,
+            ToolId::Highlighter,
+            ToolId::Blur,
+            ToolId::Pixelate,
+        ] {
             e.toolbar.active = tool;
-            let i = draw_intent(&e, Point::new(20.0, 20.0), Point::new(120.0, 80.0)).unwrap();
-            let out = crate::dispatch(&mut s, vec![i]);
-            assert!(
-                matches!(out[0], crate::Dispatched::Ran { .. }),
-                "{tool:?}: {out:?}"
-            );
+            // Every built-in Quick Style of the tool draws.
+            let n = e
+                .sidebar
+                .quick_styles
+                .for_tool(tool)
+                .map_or(1, |t| t.styles.len());
+            for k in 0..n {
+                e.sidebar.quick_styles.select(tool, k);
+                let i = draw_intent(&e, Point::new(20.0, 20.0), Point::new(120.0, 80.0)).unwrap();
+                let out = crate::dispatch(&mut s, vec![i]);
+                assert!(
+                    matches!(out[0], crate::Dispatched::Ran { .. }),
+                    "{tool:?} style {k}: {out:?}"
+                );
+            }
         }
         let cut = e.tools.cut_out.params(150.0, 120.0);
         let d = ResizeDrag {

@@ -30,6 +30,9 @@ pub enum UiIntent {
     Command { id: &'static str, params: Value },
     /// Show another open document (Recent Tray click): no save prompt.
     ActivateDocument { doc_id: String },
+    /// Open an image file from the captures folder (Library) as a new
+    /// document.
+    OpenFile { path: String },
     /// Open the Combine Images wizard with these documents.
     CombineImages { doc_ids: Vec<String> },
     /// Start a new capture (toolbar, tray).
@@ -131,6 +134,8 @@ pub const COMMANDS_USED: &[&str] = &[
     "edit.undo",
     "edit.redo",
     "annotation.addArrow",
+    "annotation.addShape",
+    "annotation.addBlur",
     "annotation.addStep",
     "annotation.renumberSteps",
     "annotation.addCallout",

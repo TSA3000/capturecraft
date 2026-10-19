@@ -1,12 +1,17 @@
 //! Zone 5: the Library, a searchable grid (or list) of past captures shown
 //! over the canvas.
 //!
-//! Items come from the Recent Tray's documents (`TrayItem`, which carries
-//! the capture's tags and source app). The search box matches title, tags
-//! and app; tag chips, the media kind, the date range and Favorites narrow
-//! the grid. A click selects (Ctrl/Cmd toggles), a double-click opens the
-//! capture in the editor, Delete removes the selection. The filtering is
-//! the pure [`library_items`], unit-tested without a display.
+//! Items are the Recent Tray's documents (`TrayItem`, which carries the
+//! capture's tags and source app) followed by the image files in the
+//! captures folders, which the app lists as [`file_item`]s. The search box
+//! matches title, tags and app; tag chips, the media kind, the date range
+//! and Favorites narrow the grid. A click selects (Ctrl/Cmd toggles), a
+//! double-click opens the capture in the editor (a file opens as a new
+//! document), Delete closes the selected documents (files on disk are
+//! never deleted from here). The filtering is the pure [`library_items`],
+//! unit-tested without a display.
+
+use std::path::Path;
 
 use egui::{Align2, FontId, Rect as ERect, Sense, StrokeKind, Ui, pos2, vec2};
 
@@ -91,6 +96,30 @@ pub fn library_items<'a>(
     out
 }
 
+/// `TrayItem::doc_id` prefix of an image file in a captures folder.
+pub const FILE_PREFIX: &str = "file:";
+
+/// The path of a [`file_item`], `None` for an open document.
+pub fn file_path_of(doc_id: &str) -> Option<&str> {
+    doc_id.strip_prefix(FILE_PREFIX)
+}
+
+/// A Library entry for the image file `path`, modified at `modified`
+/// (ISO 8601, local time).
+pub fn file_item(path: &Path, modified: String) -> TrayItem {
+    let path_str = path.to_string_lossy().into_owned();
+    TrayItem {
+        doc_id: format!("{FILE_PREFIX}{path_str}"),
+        title: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        captured_at: modified,
+        file_path: Some(path_str),
+        ..TrayItem::default()
+    }
+}
+
 /// Every source app in `items`, sorted, once.
 pub fn all_apps(items: &[TrayItem]) -> Vec<String> {
     let mut apps: Vec<String> = items
@@ -125,6 +154,7 @@ pub fn click(selected: &mut Vec<String>, doc_id: &str, toggle: bool) {
 }
 
 pub struct LibraryPanel<'a> {
+    /// Open documents, then the captures folders' image files.
     pub items: &'a [TrayItem],
     pub thumbnail: &'a dyn Fn(&str) -> Option<Thumbnail>,
     /// Local date, `YYYY-MM-DD`.
@@ -226,10 +256,14 @@ impl LibraryPanel<'_> {
             });
             return;
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !lib.selected.is_empty() {
-            intents.push(UiIntent::DeleteDocuments {
-                doc_ids: lib.selected.clone(),
-            });
+        let open: Vec<String> = lib
+            .selected
+            .iter()
+            .filter(|d| file_path_of(d).is_none())
+            .cloned()
+            .collect();
+        if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !open.is_empty() {
+            intents.push(UiIntent::DeleteDocuments { doc_ids: open });
         }
         let toggle = ui.input(|i| i.modifiers.command);
         egui::ScrollArea::vertical()
@@ -363,32 +397,39 @@ impl LibraryPanel<'_> {
         intents: &mut Vec<UiIntent>,
     ) {
         if resp.double_clicked() {
-            intents.push(UiIntent::ActivateDocument {
-                doc_id: item.doc_id.clone(),
-            });
+            intents.push(open_intent(item));
             lib.visible = false;
         } else if resp.clicked() {
             click(&mut lib.selected, &item.doc_id, toggle);
         }
-        resp.on_hover_text(item.app_name.as_str())
-            .context_menu(|ui| {
-                if ui.button("Open in editor").clicked() {
-                    intents.push(UiIntent::ActivateDocument {
-                        doc_id: item.doc_id.clone(),
-                    });
-                    lib.visible = false;
-                    ui.close();
-                }
-                if ui.button("Delete").clicked() {
-                    let ids = if lib.selected.contains(&item.doc_id) {
-                        lib.selected.clone()
-                    } else {
-                        vec![item.doc_id.clone()]
-                    };
-                    intents.push(UiIntent::DeleteDocuments { doc_ids: ids });
-                    ui.close();
-                }
-            });
+        let file = file_path_of(&item.doc_id);
+        let hover = file.unwrap_or(item.app_name.as_str());
+        resp.on_hover_text(hover).context_menu(|ui| {
+            if ui.button("Open in editor").clicked() {
+                intents.push(open_intent(item));
+                lib.visible = false;
+                ui.close();
+            }
+            if file.is_none() && ui.button("Delete").clicked() {
+                let ids = if lib.selected.contains(&item.doc_id) {
+                    lib.selected.clone()
+                } else {
+                    vec![item.doc_id.clone()]
+                };
+                intents.push(UiIntent::DeleteDocuments { doc_ids: ids });
+                ui.close();
+            }
+        });
+    }
+}
+
+/// Shows an open document, or opens a file as a new one.
+pub fn open_intent(item: &TrayItem) -> UiIntent {
+    match file_path_of(&item.doc_id) {
+        Some(path) => UiIntent::OpenFile { path: path.into() },
+        None => UiIntent::ActivateDocument {
+            doc_id: item.doc_id.clone(),
+        },
     }
 }
 
@@ -516,6 +557,25 @@ mod tests {
             Some(1)
         );
         assert_eq!(day_number("garbage"), None);
+    }
+
+    #[test]
+    fn files_are_entries_that_open_by_path() {
+        let path = Path::new("/pics/CaptureCraft/Capture 2026-10-19 101500.png");
+        let f = file_item(path, "2026-10-19T10:15:00+02:00".into());
+        assert_eq!(f.title, "Capture 2026-10-19 101500");
+        assert_eq!(file_path_of(&f.doc_id), path.to_str());
+        assert!(file_path_of("doc-1-2").is_none());
+        assert!(matches!(open_intent(&f), UiIntent::OpenFile { path: p } if Path::new(&p) == path));
+        let doc = item("a", "Login form", "2026-10-19T09:00:00", &[]);
+        assert!(matches!(
+            open_intent(&doc),
+            UiIntent::ActivateDocument { .. }
+        ));
+        // Files sort and filter with the documents.
+        let all = [doc, f];
+        let lib = LibraryState::default();
+        assert_eq!(library_items(&all, &lib, "2026-10-19").len(), 2);
     }
 
     #[test]
