@@ -405,13 +405,15 @@ fn add_callout(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(CMD, "bounds must be at least 1×1"));
     }
     let d = Callout::default();
+    // Without text, a font or colour still lands in an empty run: the
+    // style the callout's text gets once it is typed.
     let text = match p.text {
-        Some(t) => TextBlock::plain(
-            &t,
+        None if p.font.is_none() && p.text_color.is_none() => d.text,
+        t => TextBlock::plain(
+            &t.unwrap_or_default(),
             p.font.unwrap_or_default(),
             p.text_color.unwrap_or(Color::BLACK),
         ),
-        None => d.text,
     };
     let callout = Callout {
         bounds: p.bounds,

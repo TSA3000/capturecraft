@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use capturecraft_format::{
     Annotation, ArrowCurve, BackdropEffect, Background, BlendMode, BlurRegion, CalloutBody, Color,
     CurvedArrow, DropShadow, Fill, FontSpec, HeadStyle, MAX_SIDE, Manifest, NodeId, RectF,
-    RegionShape, ShapeNode, Stroke,
+    RegionShape, ShapeNode, Stroke, TextRun,
 };
 use photocraft_geom::{Point, Rect, Size};
 use serde::Deserialize;
@@ -583,6 +583,10 @@ fn apply_style(a: &mut Annotation, p: &StyleParams) {
             }
             if let Some(s) = p.shadow {
                 c.shadow = s;
+            }
+            // An empty callout keeps the text style in an empty run.
+            if c.text.runs.is_empty() && (p.text_color.is_some() || p.font.is_some()) {
+                c.text.runs.push(TextRun::default());
             }
             for run in &mut c.text.runs {
                 if let Some(col) = p.text_color {

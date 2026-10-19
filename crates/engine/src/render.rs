@@ -1181,6 +1181,50 @@ mod tests {
     }
 
     #[test]
+    fn a_callout_drawn_empty_keeps_its_text_style_for_the_text_typed_later() {
+        let mut s = session(300, 200);
+        // As the Callout tool draws it: the style's font and colour, no text.
+        let c = id(s
+            .run(
+                "annotation.addCallout",
+                &json!({ "bounds": { "x": 20, "y": 30, "w": 160, "h": 80 },
+                    "font": { "family": "Inter", "size": 28 }, "text_color": "#ff0000" }),
+            )
+            .unwrap());
+        let RenderNode::Callout(spec) = &scene(&s).nodes[1].node else {
+            panic!("callout expected");
+        };
+        assert_eq!(spec.text, None);
+        s.run("annotation.setText", &json!({ "id": c, "text": "Hi" }))
+            .unwrap();
+        s.run("annotation.setText", &json!({ "id": c, "align": "right" }))
+            .unwrap();
+        let RenderNode::Callout(spec) = &scene(&s).nodes[1].node else {
+            panic!("callout expected");
+        };
+        let t = spec.text.as_ref().unwrap();
+        assert_eq!((t.runs[0].text.as_str(), t.runs[0].size_px), ("Hi", 28.0));
+        assert_eq!(t.runs[0].color, rgba(Color::rgba(255, 0, 0, 255), 1.0));
+        assert_eq!(t.align, STextAlign::Right);
+        // Emptying it keeps the style; setStyle reaches an empty callout too.
+        s.run("annotation.setText", &json!({ "id": c, "text": "" }))
+            .unwrap();
+        s.run(
+            "annotation.setStyle",
+            &json!({ "ids": [c], "font": { "family": "Inter", "size": 40 } }),
+        )
+        .unwrap();
+        s.run("annotation.setText", &json!({ "id": c, "text": "Big" }))
+            .unwrap();
+        let RenderNode::Callout(spec) = &scene(&s).nodes[1].node else {
+            panic!("callout expected");
+        };
+        let t = spec.text.as_ref().unwrap();
+        assert_eq!((t.runs[0].text.as_str(), t.runs[0].size_px), ("Big", 40.0));
+        assert!(s.run("annotation.setText", &json!({ "id": c })).is_err());
+    }
+
+    #[test]
     fn step_badges_draw_their_label() {
         let mut s = session(200, 200);
         s.run(

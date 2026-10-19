@@ -119,7 +119,8 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         label: "Edit Text",
         menu_path: &[],
         shortcut: None,
-        params: r##"{ id: u64 (a text box or callout), text: string } (keeps the first run's font and colour) -> {}"##,
+        params: r##"{ id: u64 (a text box or callout), text?: string, align?: "left"|"center"|"right" }
+  (keeps the first run's font and colour) -> {}"##,
         enabled: has_doc,
         run: set_text,
         journal: true,
@@ -601,21 +602,31 @@ fn add_text(s: &mut Session, p: &Value) -> Result<Value> {
 #[serde(deny_unknown_fields)]
 struct SetTextParams {
     id: u64,
-    text: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    align: Option<TextAlign>,
 }
 
 fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "annotation.setText";
     let p: SetTextParams = parse(CMD, p)?;
+    if p.text.is_none() && p.align.is_none() {
+        return Err(bad(CMD, "nothing to change: give text or align"));
+    }
     let node = node_annotation(s.manifest_mut()?, p.id)?;
     let Some(Annotation::Callout(c)) = node.annotation_mut() else {
         return Err(bad(CMD, format!("annotation {} has no text", p.id)));
     };
-    let first = c.text.runs.first().cloned().unwrap_or_default();
-    c.text.runs = vec![capturecraft_format::TextRun {
-        text: p.text,
-        ..first
-    }];
+    if let Some(text) = p.text {
+        // An emptied callout keeps its (empty) run: the font and colour
+        // its next text gets.
+        let first = c.text.runs.first().cloned().unwrap_or_default();
+        c.text.runs = vec![capturecraft_format::TextRun { text, ..first }];
+    }
+    if let Some(align) = p.align {
+        c.text.align = align;
+    }
     node.touch();
     Ok(json!({}))
 }
