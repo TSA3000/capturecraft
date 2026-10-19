@@ -83,6 +83,9 @@ pub enum ShellAction {
     NewBlank,
     /// Show a message in the toast.
     Notice(String),
+    /// Run `ocr.grabText` and open the Grab Text modal.
+    GrabText(Option<serde_json::Value>),
+    CopyText(String),
     /// Not wired up yet; shown as a notice.
     Unavailable(&'static str),
 }
@@ -115,6 +118,8 @@ pub fn shell_action(intent: &UiIntent) -> ShellAction {
         UiIntent::OpenFile { path } => ShellAction::Open(PathBuf::from(path)),
         UiIntent::Unavailable(what) => ShellAction::Unavailable(what),
         UiIntent::Notice(text) => ShellAction::Notice(text.clone()),
+        UiIntent::GrabText { region } => ShellAction::GrabText(region.clone()),
+        UiIntent::CopyText(text) => ShellAction::CopyText(text.clone()),
         UiIntent::Save { .. } => ShellAction::Unavailable("Saving .capturecraft documents"),
         UiIntent::OpenDialog => ShellAction::Unavailable("File › Open"),
         UiIntent::Command { .. } | UiIntent::ActivateDocument { .. } => {
@@ -445,6 +450,21 @@ impl CaptureCraftApp {
         flatten(doc).map_err(|e| e.to_string())
     }
 
+    /// Reads the text in `region` and shows it in the Grab Text modal.
+    fn grab_text(&mut self, region: Option<serde_json::Value>) {
+        let params = match region {
+            Some(r) => serde_json::json!({ "region": r }),
+            None => serde_json::json!({}),
+        };
+        match self.session.run("ocr.grabText", &params) {
+            Ok(v) => {
+                self.state.editor.grab =
+                    Some(capturecraft_ui_egui::views::ocr_modal::GrabResult::from_value(&v));
+            }
+            Err(e) => self.notice = Some(format!("Grab Text: {e}")),
+        }
+    }
+
     fn copy_active(&mut self) {
         let id = self.session.active().map(|d| d.manifest.id.clone());
         match id {
@@ -535,6 +555,13 @@ impl CaptureCraftApp {
                         Err(e) => self.notice = Some(format!("New image failed: {e}")),
                     },
                     ShellAction::Notice(text) => self.notice = Some(text),
+                    ShellAction::GrabText(region) => self.grab_text(region),
+                    ShellAction::CopyText(text) => {
+                        self.notice = Some(match export::copy_text(&mut self.clipboard, &text) {
+                            Ok(()) => "Text copied to clipboard!".into(),
+                            Err(e) => format!("Copy failed: {e}"),
+                        });
+                    }
                     ShellAction::Unavailable(what) => {
                         self.notice = Some(format!("{what} is not available yet"));
                     }

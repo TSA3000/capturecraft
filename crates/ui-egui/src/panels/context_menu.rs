@@ -92,6 +92,21 @@ pub fn select_for_menu(editor: &mut EditorState, doc: &DocState, hit: Option<Nod
     }
 }
 
+/// Grab Text over the selected annotations' area or the Selection
+/// marquee; `None` when neither is there.
+fn grab_area(editor: &EditorState, doc: Option<&DocState>) -> Option<UiIntent> {
+    let m = &doc?.manifest;
+    let area = editor.canvas.marquee.or_else(|| {
+        editor
+            .canvas
+            .selection
+            .iter()
+            .filter_map(|id| m.node(*id)?.annotation()?.bounds())
+            .reduce(capturecraft_format::RectF::union)
+    })?;
+    Some(super::canvas_viewport::grab_text_intent(m, Some(area)))
+}
+
 /// Draws the open menu; returns the intents of a chosen row.
 pub fn show(
     ctx: &Context,
@@ -138,7 +153,10 @@ pub fn show(
                         done = true;
                         match what {
                             Row::Edit(a) => out.extend(actions::run(*a, editor, doc)),
-                            Row::GrabText => editor.toolbar.active = ToolId::GrabText,
+                            Row::GrabText => match grab_area(editor, doc) {
+                                Some(i) => out.push(i),
+                                None => editor.toolbar.active = ToolId::GrabText,
+                            },
                         }
                     }
                 }

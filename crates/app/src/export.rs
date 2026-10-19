@@ -160,6 +160,17 @@ pub fn copy(clipboard: &mut Option<arboard::Clipboard>, flat: &Flattened) -> Res
     .map_err(|e| e.to_string())
 }
 
+/// Puts `text` on the clipboard (Grab Text's Copy Text).
+pub fn copy_text(clipboard: &mut Option<arboard::Clipboard>, text: &str) -> Result<(), String> {
+    if clipboard.is_none() {
+        *clipboard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
+    }
+    let Some(cb) = clipboard.as_mut() else {
+        return Err("no clipboard".into());
+    };
+    cb.set_text(text).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

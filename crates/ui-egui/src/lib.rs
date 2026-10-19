@@ -75,6 +75,11 @@ pub enum UiIntent {
     OpenDialog,
     /// A short message for the toast at the bottom of the window.
     Notice(String),
+    /// Read the text in `region` (base px `{x0, y0, x1, y1}`; `None`: the
+    /// whole capture) and show it in the Grab Text modal.
+    GrabText { region: Option<Value> },
+    /// Put text on the clipboard (Grab Text's Copy Text).
+    CopyText(String),
     /// A new blank white canvas.
     NewBlankImage,
     /// A control whose feature is not built yet: the app says so.
@@ -184,6 +189,8 @@ pub const COMMANDS_USED: &[&str] = &[
     "annotation.addMagnifier",
     "annotation.addSpotlight",
     "canvas.crop",
+    // The Grab Text modal (the app runs ocr.grabText itself).
+    "ocr.replaceLines",
 ];
 
 #[cfg(test)]

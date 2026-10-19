@@ -168,7 +168,8 @@ impl EditorWindow<'_> {
         editor.toolbar.normalize();
         // Shortcuts first: they consume their key events, so the canvas
         // and panels below never see them twice.
-        if !editor.library.visible {
+        crate::views::ocr_modal::show(ui.ctx(), &mut editor.grab, &mut intents, t);
+        if !editor.library.visible && editor.grab.is_none() {
             for k in crate::shortcuts::read(ui.ctx()) {
                 intents.extend(crate::actions::run(k.into(), editor, doc));
             }

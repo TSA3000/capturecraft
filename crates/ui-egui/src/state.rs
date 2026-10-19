@@ -795,6 +795,9 @@ pub struct EditorState {
     pub library: LibraryState,
     /// Per-tool options that are not style (numbering, cut-out edge, ...).
     pub tools: ToolOptions,
+    /// The Grab Text result the modal shows.
+    #[serde(skip)]
+    pub grab: Option<crate::views::ocr_modal::GrabResult>,
 }
 
 /// Editor tools: the default pinned ones in toolbar order, then the ones

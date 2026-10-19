@@ -1230,6 +1230,9 @@ impl CanvasViewport<'_> {
                     intents.push(i);
                     editor.canvas.crop = None;
                 }
+            } else if tool == ToolId::GrabText {
+                // A click reads the whole capture.
+                intents.push(grab_text_intent(m, None));
             } else if tool == ToolId::Pen {
             } else if tool == ToolId::Move {
                 let shift = ui.input(|i| i.modifiers.shift);
@@ -1428,6 +1431,9 @@ impl CanvasViewport<'_> {
         }
         if resp.drag_stopped() {
             match editor.canvas.gesture.take() {
+                Some(CanvasGesture::Draw { from, to }) if tool == ToolId::GrabText => {
+                    intents.push(grab_text_intent(m, Some(normalized(from, to))));
+                }
                 Some(CanvasGesture::Draw { from, to }) if tool == ToolId::Text => {
                     editor.canvas.text_edit = Some(canvas_tools::begin_new_text(
                         editor,
@@ -1535,6 +1541,14 @@ impl CanvasViewport<'_> {
         }
         resp
     }
+}
+
+/// Grab Text over canvas rect `r` (`None`: the whole capture).
+pub fn grab_text_intent(m: &capturecraft_format::Manifest, r: Option<RectF>) -> UiIntent {
+    let region = r
+        .filter(|r| r.w >= 2.0 && r.h >= 2.0)
+        .and_then(|r| marquee_base(m, r));
+    UiIntent::GrabText { region }
 }
 
 /// Reach of the crop frame's handles, points.

@@ -1384,6 +1384,9 @@ pub fn tool_help(tool: ToolId) -> &'static str {
         }
         ToolId::Spotlight => "Drag around what matters; everything else is dimmed.",
         ToolId::Crop => "Adjust the frame, then press Enter to crop.",
+        ToolId::GrabText => {
+            "Drag over text in the capture to read it (click for the whole capture), then copy it or replace it with editable text."
+        }
         _ => "Pick a Quick Style, then adjust it below. + Add Quick Style saves it.",
     }
 }

@@ -5,3 +5,4 @@ pub mod capture_hud;
 pub mod crosshair_overlay;
 pub mod editor_window;
 pub mod library_view;
+pub mod ocr_modal;

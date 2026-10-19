@@ -36,6 +36,7 @@ pub const SET_SIMPLIFIED_ID: &str = "smart.setSimplified";
 pub const SET_PALETTE_ID: &str = "smart.setPalette";
 pub const GRAB_TEXT_ID: &str = "ocr.grabText";
 pub const REPLACE_TEXT_ID: &str = "ocr.replaceText";
+pub const REPLACE_LINES_ID: &str = "ocr.replaceLines";
 
 /// Upper bound on analyzer output we keep (and turn into nodes).
 pub const MAX_SIMPLIFY_ELEMENTS: usize = 5_000;
@@ -142,6 +143,17 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
 -> { id, rect, font, color, healed: [rects], original }"##,
         enabled: needs_analyzer,
         run: replace_text,
+        journal: true,
+    },
+    CommandSpec {
+        id: REPLACE_LINES_ID,
+        label: "Replace as Editable Text",
+        menu_path: &[],
+        shortcut: None,
+        params: r##"{ lines: [{ rect: {x0, y0, x1, y1} (base px), text: string }] (as ocr.grabText returns them) }
+-> { replaced: [{ id, rect }], skipped: [rects] } (one undo step; lines without text are skipped)"##,
+        enabled: needs_analyzer,
+        run: replace_lines,
         journal: true,
     },
 ];
@@ -1342,6 +1354,50 @@ fn grab_text(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LineParam {
+    /// The analyzer's id from `ocr.grabText`; lines are matched by rect,
+    /// since each replacement heals pixels and changes later ids.
+    #[serde(default, rename = "id")]
+    _id: Option<UiElementId>,
+    rect: Rect,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Grab Text's Replace as Editable Text: every line becomes a live text
+/// box over its healed background ([`replace_text`] by rect), all in one
+/// undo step. Lines whose pixels no longer hold text are skipped.
+fn replace_lines(s: &mut Session, p: &Value) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        lines: Vec<LineParam>,
+    }
+    let p: P = parse(REPLACE_LINES_ID, p)?;
+    if p.lines.len() > MAX_SIMPLIFY_ELEMENTS {
+        return Err(bad(REPLACE_LINES_ID, "too many lines"));
+    }
+    let mut replaced = Vec::new();
+    let mut skipped = Vec::new();
+    for l in p.lines {
+        let Some(text) = l.text.filter(|t| !t.trim().is_empty()) else {
+            skipped.push(rect_json(l.rect));
+            continue;
+        };
+        match replace_text(s, &json!({ "rect": rect_json(l.rect), "text": text })) {
+            Ok(v) => replaced.push(json!({ "id": v["id"], "rect": v["rect"] })),
+            Err(EngineError::BadParams { .. }) => skipped.push(rect_json(l.rect)),
+            Err(e) => return Err(e),
+        }
+    }
+    if replaced.is_empty() {
+        return Err(bad(REPLACE_LINES_ID, "no line could be replaced"));
+    }
+    Ok(json!({ "replaced": replaced, "skipped": skipped }))
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FontOverride {
@@ -1748,6 +1804,30 @@ mod tests {
             s.active().unwrap().edited_pixels().unwrap().pixel(9, 9),
             [0x80, 0x80, 0x80, 0xFF]
         );
+    }
+
+    #[test]
+    fn grabbed_lines_become_text_boxes_in_one_step() {
+        let mut s = session(400, 200);
+        let line = |r: Rect, t: &str| UiElement {
+            text: Some(t.into()),
+            font_px: 14.0,
+            ..el(UiElementKind::Text, r, 0.9)
+        };
+        let (a, _) = fake(vec![
+            line(Rect::new(10, 10, 180, 26), "one"),
+            line(Rect::new(10, 40, 180, 56), "two"),
+        ]);
+        s.set_analyzer(a);
+        let g = s.run(GRAB_TEXT_ID, &json!({})).unwrap();
+        let mut lines = g["lines"].clone();
+        lines[1]["text"] = Value::Null;
+        let r = s.run(REPLACE_LINES_ID, &json!({ "lines": lines })).unwrap();
+        assert_eq!(r["replaced"].as_array().unwrap().len(), 1);
+        assert_eq!(r["skipped"].as_array().unwrap().len(), 1);
+        let undo = s.active().unwrap().history_labels().0;
+        assert_eq!(undo, ["Replace as Editable Text"]);
+        assert!(s.run(REPLACE_LINES_ID, &json!({ "lines": [] })).is_err());
     }
 
     #[test]
