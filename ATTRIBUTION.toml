@@ -1,0 +1,32 @@
+# Material CaptureCraft downloads at build time (never committed).
+# `cargo xtask models` fetches every `kind = "model"` entry into
+# assets/models/ and checks it against `sha256` (and its licence text
+# against `licence_sha256`). The SHA-256 sums are repeated in
+# crates/ocr/src/models.rs, which refuses other files at load time; an
+# xtask test keeps the two in step.
+
+[[fetched]]
+file = "text-detection.rten"
+url = "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten"
+title = "Ocrs text detection model"
+author = "Robert Knight (ocrs-models; trained on HierText, CC-BY-SA-4.0)"
+source = "https://github.com/robertknight/ocrs-models (the models ocrs downloads; model card: https://huggingface.co/robertknight/ocrs, cc-by-sa-4.0)"
+licence = "CC-BY-SA-4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt"
+licence_sha256 = "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
+kind = "model"
+usage = "Grab Text / Edit Text: finds the words in a capture (cargo xtask models)"
+sha256 = "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca"
+
+[[fetched]]
+file = "text-recognition.rten"
+url = "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten"
+title = "Ocrs text recognition model"
+author = "Robert Knight (ocrs-models; trained on HierText, CC-BY-SA-4.0)"
+source = "https://github.com/robertknight/ocrs-models (the models ocrs downloads; model card: https://huggingface.co/robertknight/ocrs, cc-by-sa-4.0)"
+licence = "CC-BY-SA-4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt"
+licence_sha256 = "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
+kind = "model"
+usage = "Grab Text / Edit Text: reads the words it finds (cargo xtask models)"
+sha256 = "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e"

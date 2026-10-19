@@ -1,6 +1,7 @@
 //! Workspace tooling: `cargo xtask <task>`.
 
 mod layers;
+mod models;
 
 use std::process::{Command, ExitCode};
 
@@ -8,7 +9,8 @@ fn main() -> ExitCode {
     let task = std::env::args().nth(1);
     let result = match task.as_deref() {
         Some("layers") => check_layers(),
-        _ => Err("usage: cargo xtask layers".to_string()),
+        Some("models") => models::run(&std::env::args().skip(2).collect::<Vec<_>>()),
+        _ => Err("usage: cargo xtask layers | models [DIR]".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

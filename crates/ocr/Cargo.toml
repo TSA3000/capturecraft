@@ -1,0 +1,32 @@
+[package]
+name = "capturecraft-ocr"
+version = "0.1.0"
+description = "CaptureCraft on-device UI analysis: UI segmentation, background healing, palettes and text recognition (Smart Move, Simplify, Grab Text)"
+edition.workspace = true
+# photocraft-algo and photocraft-cms (via photocraft-color) declare 1.95.
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["neural"]
+# Text recognition with the ocrs models (`cargo xtask models`). Without the
+# feature, or without the models, the morphological detector still finds
+# text lines, buttons, icons and panels; only the words are not read.
+neural = ["dep:ocrs", "dep:rten"]
+
+[dependencies]
+capturecraft-engine = { workspace = true }
+capturecraft-format = { workspace = true }
+photocraft-geom = { workspace = true }
+photocraft-color = { workspace = true }
+photocraft-raster = { workspace = true }
+photocraft-algo = { workspace = true }
+rayon = { workspace = true }
+sha2 = "0.10.9"
+thiserror = { workspace = true }
+ocrs = { version = "0.13.1", default-features = false, features = ["rten"], optional = true }
+rten = { version = "0.26.0", default-features = false, features = ["rten_format"], optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
