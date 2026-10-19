@@ -21,13 +21,17 @@ const TILE_PX: u32 = 65536u;
 @group(0) @binding(6) var<storage, read> weights: array<f32>;
 @group(0) @binding(7) var<storage, read_write> mask_out: array<f32>;
 @group(0) @binding(8) var<storage, read> image: array<vec4<f32>>;
+// Gradient stops: (offset, _, _, _), (r, g, b, a) straight, per stop.
+@group(0) @binding(9) var<storage, read> stops: array<vec4<f32>>;
+@group(0) @binding(22) var<storage, read> mask2: array<f32>;
 
 // size = (width, height, tiles_x, _); rectangles are (x0, y0, x1, y1)
 // unless named *_rect with (x0, y0, w, h).
 
 struct ClearParams { size: vec4<u32>, color: vec4<f32> }
 struct ImageParams { size: vec4<u32>, rect: vec4<i32>, src: vec4<i32>, opacity: vec4<f32> }
-struct FillParams { size: vec4<u32>, rect: vec4<i32>, mask_rect: vec4<i32>, clip_rect: vec4<i32>, flags: vec4<u32>, color: vec4<f32> }
+// paint = (kind: 0 solid, 1 linear, 2 radial; stop count; _, _)
+struct FillParams { size: vec4<u32>, rect: vec4<i32>, mask_rect: vec4<i32>, clip_rect: vec4<i32>, flags: vec4<u32>, color: vec4<f32>, paint: vec4<u32>, geo: vec4<f32> }
 struct MaskBlurParams { dims: vec4<i32> }
 struct BlurParams { size: vec4<u32>, rect: vec4<i32>, src_rect: vec4<i32>, radius: vec4<i32> }
 struct MixParams { size: vec4<u32>, rect: vec4<i32>, mask_rect: vec4<i32> }
@@ -45,6 +49,18 @@ struct CutParams {
     gap_fill: vec4<f32>,
 }
 struct PresentParams { size: vec4<u32> }
+struct FrameParams {
+    src: vec4<u32>,      // w, h, tiles_x, margin
+    dst: vec4<u32>,      // w, h, tiles_x, flags (1 shadow, 2 border)
+    shadow_rect: vec4<i32>,
+    clip_rect: vec4<i32>,
+    border_rect: vec4<i32>,
+    shadow_color: vec4<f32>,
+    border_color: vec4<f32>,
+    color: vec4<f32>,    // solid backdrop
+    paint: vec4<u32>,
+    geo: vec4<f32>,
+}
 
 @group(0) @binding(10) var<uniform> clear_p: ClearParams;
 @group(0) @binding(11) var<uniform> image_p: ImageParams;
@@ -58,6 +74,7 @@ struct PresentParams { size: vec4<u32> }
 @group(0) @binding(19) var<uniform> cut_p: CutParams;
 @group(0) @binding(20) var<uniform> present_p: PresentParams;
 @group(0) @binding(21) var present_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(23) var<uniform> frame_p: FrameParams;
 
 fn cidx(x: i32, y: i32, tiles_x: u32) -> u32 {
     let ux = u32(x);
@@ -78,6 +95,15 @@ fn mask_at(x: i32, y: i32, r: vec4<i32>) -> f32 {
     return mask[u32(ly * r.z + lx)];
 }
 
+fn mask2_at(x: i32, y: i32, r: vec4<i32>) -> f32 {
+    let lx = x - r.x;
+    let ly = y - r.y;
+    if (lx < 0 || ly < 0 || lx >= r.z || ly >= r.w) {
+        return 0.0;
+    }
+    return mask2[u32(ly * r.z + lx)];
+}
+
 fn clip_at(x: i32, y: i32, r: vec4<i32>) -> f32 {
     let lx = x - r.x;
     let ly = y - r.y;
@@ -85,6 +111,44 @@ fn clip_at(x: i32, y: i32, r: vec4<i32>) -> f32 {
         return 0.0;
     }
     return clip[u32(ly * r.z + lx)];
+}
+
+// Premultiplied paint at pixel (x, y): the solid colour, or the gradient
+// sampled at the pixel centre (CPU: PaintPx::at).
+fn paint_at(x: i32, y: i32, paint: vec4<u32>, geo: vec4<f32>, solid: vec4<f32>) -> vec4<f32> {
+    if (paint.x == 0u) {
+        return solid;
+    }
+    let px = f32(x) + 0.5;
+    let py = f32(y) + 0.5;
+    var t: f32;
+    if (paint.x == 2u) {
+        let dx = px - geo.x;
+        let dy = py - geo.y;
+        t = sqrt(dx * dx + dy * dy) * geo.z;
+    } else {
+        t = (px - geo.x) * geo.z + (py - geo.y) * geo.w;
+    }
+    t = clamp(t, 0.0, 1.0);
+    let n = paint.y;
+    var c = stops[1];
+    if (t > stops[0].x) {
+        c = stops[2u * (n - 1u) + 1u];
+        for (var i = 1u; i < n; i++) {
+            let o0 = stops[2u * (i - 1u)].x;
+            let o1 = stops[2u * i].x;
+            if (t <= o1) {
+                let span = o1 - o0;
+                var f = 1.0;
+                if (span > 0.0) {
+                    f = (t - o0) / span;
+                }
+                c = stops[2u * (i - 1u) + 1u] * (1.0 - f) + stops[2u * i + 1u] * f;
+                break;
+            }
+        }
+    }
+    return vec4<f32>(c.rgb * c.a, c.a);
 }
 
 // ---------------------------------------------------------------- basics
@@ -138,7 +202,7 @@ fn fill(@builtin(global_invocation_id) g: vec3<u32>) {
         return;
     }
     let i = cidx(x, y, fill_p.size.z);
-    canvas[i] = over(fill_p.color * m, canvas[i]);
+    canvas[i] = over(paint_at(x, y, fill_p.paint, fill_p.geo, fill_p.color) * m, canvas[i]);
 }
 
 // ------------------------------------------------------- mask blur (zero pad)
@@ -563,6 +627,45 @@ fn cutout(@builtin(global_invocation_id) g: vec3<u32>) {
     }
     out = over(cut_src(a, cu_src) * cu, out);
     canvas[cidx(i32(g.x), i32(g.y), cut_p.dst.z)] = out;
+}
+
+// ---------------------------------------------------------- shadow frame
+
+// canvas_ro = source canvas, canvas = destination (frame size); mask =
+// blurred shadow, clip = rounded-rect coverage, mask2 = border (CPU:
+// FrameOp::compose).
+@compute @workgroup_size(16, 16)
+fn frame(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (g.x >= frame_p.dst.x || g.y >= frame_p.dst.y) {
+        return;
+    }
+    let x = i32(g.x);
+    let y = i32(g.y);
+    var out = paint_at(x, y, frame_p.paint, frame_p.geo, frame_p.color);
+    if ((frame_p.dst.w & 1u) != 0u) {
+        let s = mask_at(x, y, frame_p.shadow_rect);
+        if (s > 0.0) {
+            out = over(frame_p.shadow_color * s, out);
+        }
+    }
+    let k = clip_at(x, y, frame_p.clip_rect);
+    if (k > 0.0) {
+        let m = i32(frame_p.src.w);
+        let sx = x - m;
+        let sy = y - m;
+        var src = vec4<f32>(0.0);
+        if (sx >= 0 && sy >= 0 && sx < i32(frame_p.src.x) && sy < i32(frame_p.src.y)) {
+            src = canvas_ro[cidx(sx, sy, frame_p.src.z)];
+        }
+        out = over(src * k, out);
+    }
+    if ((frame_p.dst.w & 2u) != 0u) {
+        let b = mask2_at(x, y, frame_p.border_rect);
+        if (b > 0.0) {
+            out = over(frame_p.border_color * b, out);
+        }
+    }
+    canvas[cidx(x, y, frame_p.dst.z)] = out;
 }
 
 // ---------------------------------------------------------------- present

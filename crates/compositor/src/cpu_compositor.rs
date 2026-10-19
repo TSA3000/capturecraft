@@ -12,12 +12,13 @@
 //! spreads it by its radius, a magnifier spreads damage under its source
 //! over the whole lens, a Cut Out moves it). Then the tiles each op must
 //! produce are pulled backwards (a blurred tile needs its neighbours as
-//! input), and only those tiles are computed, op by op.
+//! input), and only those tiles are computed, op by op. Cut outs and the
+//! shadow frame start a new canvas of their output size.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use photocraft_geom::Rect;
+use photocraft_geom::{Affine, Rect};
 use photocraft_raster::Surface;
 use rayon::prelude::*;
 
@@ -25,11 +26,11 @@ use crate::CompositorError;
 use crate::canvas::{Frame, TILE, TileSet, TiledCanvas};
 use crate::effects::backdrop::{block_mean, dim};
 use crate::effects::{Kernel, Mask, Px, blur_mask, mix, over, scale};
-use crate::prepare::{FillOp, ImageOp, Op, Prepared, prepare};
+use crate::prepare::{FillOp, FrameOp, ImageOp, Op, Prepared, prepare};
 use crate::scene::{DirtyRegion, NodeId, RenderNode, RenderScene, RevisionId};
 
 /// An op with its coverage resolved for the CPU (fill masks blurred,
-/// inverted and clipped; spotlight masks feathered).
+/// inverted and clipped).
 #[derive(Clone, Debug)]
 pub struct CpuOp {
     pub op: Op,
@@ -73,11 +74,7 @@ pub fn resolve(p: &Prepared) -> Vec<CpuOp> {
         .map(|op| {
             let coverage = match op {
                 Op::Fill(f) => Some(resolve_fill(f)),
-                Op::Spotlight(s) => match (&s.mask, &s.feather) {
-                    (Some(m), Some(k)) => Some(Arc::new(blur_mask(m, k))),
-                    (Some(m), None) => Some(m.clone()),
-                    _ => None,
-                },
+                Op::Spotlight(s) => s.mask.clone(),
                 _ => None,
             };
             CpuOp {
@@ -90,6 +87,7 @@ pub fn resolve(p: &Prepared) -> Vec<CpuOp> {
 
 struct CachedNode {
     revision: RevisionId,
+    transform: Option<Affine>,
     stage: (u32, u32),
     ops: Arc<Vec<CpuOp>>,
     bounds: Rect,
@@ -187,17 +185,18 @@ impl CpuCompositor {
         let mut size = size0;
         for n in &scene.nodes {
             stages.push(size);
-            let fresh = self
-                .cache
-                .get(&n.id)
-                .is_some_and(|c| c.revision == n.revision && c.stage == size);
+            let fresh = self.cache.get(&n.id).is_some_and(|c| {
+                c.revision == n.revision && c.transform == n.transform && c.stage == size
+            });
             let mut damage = Vec::new();
             if !fresh {
-                let prepared = prepare(&n.node, size);
+                let prepared = prepare(&n.node, n.transform.as_ref(), size);
                 let bounds = prepared.bounds(size);
                 let out_size = prepared.out_size(size);
                 let raster = match &n.node {
-                    RenderNode::Raster(r) => Some((r.surface.clone(), r.origin)),
+                    RenderNode::Raster(r) if n.transform.is_none() => {
+                        Some((r.surface.clone(), r.origin))
+                    }
                     _ => None,
                 };
                 match self.cache.get(&n.id) {
@@ -227,6 +226,7 @@ impl CpuCompositor {
                     n.id,
                     CachedNode {
                         revision: n.revision,
+                        transform: n.transform,
                         stage: size,
                         ops,
                         bounds,
@@ -314,7 +314,7 @@ impl CpuCompositor {
             let w = op.op.write_rect(*in_size);
             let mut s = TileSet::empty(in_size.0, in_size.1);
             for r in out.rects() {
-                if !matches!(op.op, Op::Cut(_)) {
+                if !op.op.resizes() {
                     s.insert_rect(r);
                 }
                 let rw = r.intersect(&w);
@@ -340,6 +340,12 @@ impl CpuCompositor {
             if let Op::Cut(p) = &op.op {
                 let mut out = TiledCanvas::new(p.dst_w, p.dst_h)?;
                 apply_cut(p, &canvas, &mut out, targets);
+                canvas = out;
+                continue;
+            }
+            if let Op::Frame(f) = &op.op {
+                let mut out = TiledCanvas::new(f.dst.0, f.dst.1)?;
+                apply_frame(f, &canvas, &mut out, targets);
                 canvas = out;
                 continue;
             }
@@ -463,7 +469,7 @@ fn apply(op: &CpuOp, canvas: &mut TiledCanvas, write: &TileSet, w: Rect, size: (
                 each_pixel(tr, w, px, |x, y, p| {
                     let m = cov.at(x, y);
                     if m > 0.0 {
-                        *p = over(scale(f.color, m), *p);
+                        *p = over(scale(f.paint.at(x, y), m), *p);
                     }
                 })
             });
@@ -543,8 +549,17 @@ fn apply(op: &CpuOp, canvas: &mut TiledCanvas, write: &TileSet, w: Rect, size: (
                 })
             });
         }
-        Op::Cut(_) => {}
+        Op::Cut(_) | Op::Frame(_) => {}
     }
+}
+
+fn apply_frame(f: &FrameOp, src: &TiledCanvas, out: &mut TiledCanvas, targets: &TileSet) {
+    let w = out.rect();
+    out.par_tiles(targets, |tr, px| {
+        each_pixel(tr, w, px, |x, y, v| {
+            *v = f.compose(&|sx, sy| src.get(sx, sy), x, y);
+        });
+    });
 }
 
 fn apply_cut(

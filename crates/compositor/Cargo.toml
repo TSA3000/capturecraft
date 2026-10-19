@@ -19,6 +19,10 @@ photocraft-geom = { workspace = true }
 photocraft-raster = { workspace = true }
 photocraft-doc = { workspace = true }
 photocraft-vector = { workspace = true }
+# Shadow convolution, feather distance fields and raster warps.
+photocraft-algo = { workspace = true }
+# Shaping, wrapping and glyph outlines of callout text and badge labels.
+photocraft-text = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 # Same major version as eframe 0.36's egui-wgpu, so the app's device can be
@@ -30,7 +34,13 @@ pollster = { version = "0.4", optional = true }
 
 [dev-dependencies]
 photocraft-color = { workspace = true }
+# Expected bytes of the colour-encoding test (sRGB transfer curve).
+photocraft-cms = { workspace = true }
 
 [[test]]
 name = "parity_tests"
+required-features = ["gpu"]
+
+[[test]]
+name = "color_encoding"
 required-features = ["gpu"]
