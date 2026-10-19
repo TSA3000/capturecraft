@@ -8,6 +8,7 @@
 - Compositor draws text (photocraft-text), rotation, gradients, feathered edges and the
   shadow frame on CPU and GPU; GPU colour readback test against photocraft-cms.
 - HiDPI: physical pixels vs logical points in the crosshair overlay.
+- Release workflow: robust NSIS install (runner copy, Chocolatey retries, direct download).
 - Shipped programs unchanged.
 
 ## v0.18.0 (2026-10-19)

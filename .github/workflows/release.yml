@@ -69,10 +69,21 @@ jobs:
           $out = (Get-Location).Path
           Get-ChildItem $stage | Select-Object Name
 
-          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+          # NSIS: the runner's own install if it has one, else Chocolatey (with
+          # retries: its feed has outages, 503s), else the release zip.
+          $env:PATH = "$env:PATH;${env:ProgramFiles(x86)}\NSIS;${env:ProgramFiles}\NSIS"
+          for ($i = 1; $i -le 3 -and -not (Get-Command makensis -ErrorAction SilentlyContinue); $i++) {
             choco install nsis --no-progress -y
-            $env:PATH = "$env:PATH;${env:ProgramFiles(x86)}\NSIS;${env:ProgramFiles}\NSIS"
+            if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds (20 * $i) }
           }
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $zip = Join-Path $env:RUNNER_TEMP 'nsis.zip'
+            Invoke-WebRequest -Uri 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip' `
+              -OutFile $zip -UserAgent 'curl' -MaximumRetryCount 3 -RetryIntervalSec 10
+            Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP -Force
+            $env:PATH = "$env:PATH;$(Join-Path $env:RUNNER_TEMP 'nsis-3.11')"
+          }
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { throw "NSIS is not available" }
           makensis /DVERSION=$version /DARCH=$arch /DSOURCE=$stage /DOUTDIR=$out `
             packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed" }

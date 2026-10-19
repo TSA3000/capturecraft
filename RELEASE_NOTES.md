@@ -24,6 +24,9 @@
 - **Colour**: a GPU readback test checks #FF5733, #1E293B and #F8FAFC within 1/255 against
   photocraft-cms; the canvas texture stays `Rgba8Unorm` (no double gamma in egui).
 - Fix: PhotoCraft's fonts are installed before its theme is applied (headings could panic).
+- Release builds: the Windows installer step no longer fails when Chocolatey's feed is down
+  (it uses the runner's NSIS, retries Chocolatey, then downloads NSIS directly). This is what
+  left v0.18.0 without its x64 Windows files.
 
 ## Upgrading
 
