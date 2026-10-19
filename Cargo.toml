@@ -65,6 +65,15 @@ photocraft-raster = { git = "https://github.com/storytold/photocraft", tag = "v0
 photocraft-algo = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
 photocraft-doc = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
 photocraft-vector = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
+photocraft-text = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
+photocraft-cms = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
+# Theme tokens (`theme::Tokens`) shared with PhotoCraft's editor.
+photocraft-ui-egui = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
+# The UI stack of photocraft v0.9.0; the compositor's wgpu is the major
+# version egui-wgpu 0.36 is built on, so the app's device is shared.
+egui = { version = "0.36.2", default-features = false }
+eframe = { version = "0.36.2", default-features = false }
+wgpu = "30"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

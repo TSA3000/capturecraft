@@ -235,7 +235,7 @@ pub struct GpuCompositor {
 impl GpuCompositor {
     /// Builds the pipelines on an existing device (e.g. eframe's).
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuError> {
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("capturecraft effects"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -266,7 +266,7 @@ impl GpuCompositor {
             cutout: p("cutout"),
             present: p("present"),
         };
-        if let Some(e) = pollster::block_on(device.pop_error_scope()) {
+        if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Validation(e.to_string()));
         }
         let dummy = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -290,18 +290,19 @@ impl GpuCompositor {
     /// Own device for headless rendering: the best hardware adapter, else
     /// the software fallback (llvmpipe/lavapipe, WARP, …).
     pub fn headless() -> Result<Self, GpuError> {
-        let mut desc = wgpu::InstanceDescriptor::from_env_or_default();
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         // GL lacks storage buffers in places; use it only when asked for
         // (WGPU_BACKEND=gl).
         if std::env::var_os("WGPU_BACKEND").is_none() {
             desc.backends = wgpu::Backends::PRIMARY;
         }
-        let instance = wgpu::Instance::new(&desc);
+        let instance = wgpu::Instance::new(desc);
         let request = |fallback| {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: fallback,
                 compatible_surface: None,
+                ..Default::default()
             }))
         };
         let adapter = request(false)
@@ -341,7 +342,7 @@ impl GpuCompositor {
 
     fn check(&self, bytes: u64) -> Result<(), GpuError> {
         let l = self.device.limits();
-        let limit = u64::from(l.max_storage_buffer_binding_size).min(l.max_buffer_size);
+        let limit = l.max_storage_buffer_binding_size.min(l.max_buffer_size);
         if bytes > limit {
             Err(GpuError::TooLarge { bytes, limit })
         } else {
@@ -976,7 +977,7 @@ impl GpuCompositor {
 
     /// Renders and reads the frame back (exports, tests).
     pub fn render(&mut self, scene: &RenderScene) -> Result<Frame, GpuError> {
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -993,7 +994,7 @@ impl GpuCompositor {
             (staging, *size)
         });
         self.queue.submit([enc.finish()]);
-        if let Some(e) = pollster::block_on(self.device.pop_error_scope()) {
+        if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Validation(e.to_string()));
         }
         let (_, size) = encoded?;
@@ -1010,8 +1011,12 @@ impl GpuCompositor {
         rx.recv()
             .map_err(|e| GpuError::Readback(e.to_string()))?
             .map_err(|e| GpuError::Readback(e.to_string()))?;
-        let data: Vec<[f32; 4]> =
-            bytemuck::pod_collect_to_vec(&staging.slice(..).get_mapped_range());
+        let data: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(
+            &staging
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| GpuError::Readback(e.to_string()))?,
+        );
         staging.unmap();
         Ok(TiledCanvas::from_tile_data(size.0, size.1, data)?.to_frame())
     }
@@ -1024,7 +1029,7 @@ impl GpuCompositor {
         scene: &RenderScene,
         target: &wgpu::TextureView,
     ) -> Result<(u32, u32), GpuError> {
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1068,7 +1073,7 @@ impl GpuCompositor {
             pass.dispatch_workgroups(size.0.div_ceil(WG), size.1.div_ceil(WG), 1);
         }
         self.queue.submit([enc.finish()]);
-        if let Some(e) = pollster::block_on(self.device.pop_error_scope()) {
+        if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Validation(e.to_string()));
         }
         encoded.map(|(_, s)| s)

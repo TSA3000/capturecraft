@@ -350,17 +350,22 @@ impl CrosshairOverlay<'_> {
         ctx: &Context,
         state: &mut CrosshairOverlayState,
     ) -> Option<OverlayAction> {
-        ctx.show_viewport_immediate(viewport_id(), self.mapping.viewport(), |ctx, _| {
-            let action = self.show(ctx, state);
-            if ctx.input(|i| i.viewport().close_requested()) {
+        ctx.show_viewport_immediate(viewport_id(), self.mapping.viewport(), |ui, _| {
+            let action = self.show(ui, state);
+            if ui.input(|i| i.viewport().close_requested()) {
                 return Some(OverlayAction::Cancel);
             }
             action
         })
     }
 
-    /// Draws the overlay into `ctx` (the overlay viewport's context).
-    pub fn show(&self, ctx: &Context, state: &mut CrosshairOverlayState) -> Option<OverlayAction> {
+    /// Draws the overlay into `root` (the overlay viewport's root `Ui`).
+    pub fn show(
+        &self,
+        root: &mut egui::Ui,
+        state: &mut CrosshairOverlayState,
+    ) -> Option<OverlayAction> {
+        let ctx = &root.ctx().clone();
         let t = self.tokens;
         let mut action = None;
         let snap = self.prefs.snap_to_windows;
@@ -369,7 +374,7 @@ impl CrosshairOverlay<'_> {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::BLACK))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 let screen = ui.max_rect();
                 let resp = ui.interact(screen, ui.id().with("crosshair"), Sense::click_and_drag());
                 let m = self.mapping;

@@ -21,9 +21,9 @@ photocraft-doc = { workspace = true }
 photocraft-vector = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
-# Same major version as eframe 0.33's egui-wgpu, so the app's device can be
+# Same major version as eframe 0.36's egui-wgpu, so the app's device can be
 # shared with the editor canvas.
-wgpu = { version = "27", optional = true }
+wgpu = { workspace = true, optional = true }
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
 # Blocks on adapter/device requests and buffer maps in the headless path.
 pollster = { version = "0.4", optional = true }

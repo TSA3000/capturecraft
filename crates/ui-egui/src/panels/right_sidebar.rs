@@ -729,7 +729,7 @@ fn card_frame(
     rect: ERect,
     selected: bool,
     t: &Tokens,
-    salt: impl std::hash::Hash,
+    salt: impl std::hash::Hash + std::fmt::Debug,
 ) -> egui::Response {
     let resp = ui.interact(rect, Id::new(("sidebar.card", salt)), Sense::click());
     let hot = resp.hovered();

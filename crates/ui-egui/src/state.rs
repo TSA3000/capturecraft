@@ -688,7 +688,7 @@ pub struct SidebarState {
     pub quick_styles: QuickStyles,
     /// Expanded property sections below the Quick Styles grid.
     pub expanded: Vec<PropertySection>,
-    /// `theme::ThemeKind` name.
+    /// `theme::ThemeKind` id (PhotoCraft's theme names).
     pub theme: String,
     /// Property Inspector edits not yet saved as a Quick Style; `None`
     /// shows the selected Quick Style.
@@ -783,7 +783,7 @@ impl Default for SidebarState {
             width_px: 280.0,
             quick_styles: QuickStyles::default(),
             expanded: vec![PropertySection::Style, PropertySection::Shadow],
-            theme: "dark".into(),
+            theme: "studio".into(),
             draft: None,
         }
     }

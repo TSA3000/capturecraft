@@ -7,7 +7,8 @@
 //! [`INTRA_LAYER_ORDER`] chain).
 //!
 //! ```text
-//!  L7  ui-egui ─┬─ automation (MCP + JSON control channel)      capturecraft (app), cli, xtask: exempt
+//!  L7  ui-egui ─┬─ automation (MCP + JSON control channel)      capturecraft, capturecraft-app, cli, xtask: exempt
+//!   (photocraft-ui-egui: theme tokens, below ui-egui)
 //!               │         │
 //!  L6  capture ─┴─ ocr    │        OS capture (own CaptureBackend trait) / OCR (implements engine UiAnalyzer)
 //!         │        │      │
@@ -90,11 +91,14 @@ pub const TABLE: &[(&str, Class)] = &[
     // L6 OS capture and on-device analysis
     ("capturecraft-capture", Class::Layer(6)),
     ("capturecraft-ocr", Class::Layer(6)),
-    // L7 thin UI and agent surfaces
+    // L7 thin UI and agent surfaces. photocraft-ui-egui supplies the
+    // theme tokens shared with PhotoCraft's editor.
+    ("photocraft-ui-egui", Class::Layer(7)),
     ("capturecraft-ui-egui", Class::Layer(7)),
     ("capturecraft-automation", Class::Layer(7)),
     // Apps and tooling
     ("capturecraft", Class::Exempt),
+    ("capturecraft-app", Class::Exempt),
     ("capturecraft-cli", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
@@ -106,6 +110,7 @@ pub const INTRA_LAYER_ORDER: &[&[&str]] = &[
     &["photocraft-doc", "photocraft-algo"],
     &["photocraft-vector", "photocraft-text"],
     &["capturecraft-format", "capturecraft-engine"],
+    &["photocraft-ui-egui", "capturecraft-ui-egui"],
 ];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
