@@ -448,6 +448,7 @@ pub struct MonitorInfo {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScrollInfo {
+    /// Scroll direction: `Vertical` for a page scrolled down (a tall result).
     pub axis: Axis,
     /// Frames stitched into the result.
     pub frames: u32,

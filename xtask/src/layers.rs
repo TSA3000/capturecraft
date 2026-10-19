@@ -9,7 +9,7 @@
 //! ```text
 //!  L7  ui-egui ─┬─ automation (MCP + JSON control channel)      capturecraft (app), cli, xtask: exempt
 //!               │         │
-//!  L6  capture ─┴─ ocr    │        OS backends: implement engine traits (CaptureBackend, UiAnalyzer)
+//!  L6  capture ─┴─ ocr    │        OS capture (own CaptureBackend trait) / OCR (implements engine UiAnalyzer)
 //!         │        │      │
 //!  L5  format ───▶ engine ◀┘       .capturecraft archive + document model ▶ command registry, Session
 //!         │        │
@@ -29,9 +29,10 @@
 //! `algo`/`text`/`vector` at L2); this table only spreads them over more
 //! layers, so every edge their workspace allows is allowed here too.
 //!
-//! `capture` and `ocr` sit above `engine` although the engine runs their
-//! commands: the engine owns the traits, the L6 crates implement them and
-//! the app wires them in (photocraft does the same with its `platform`
+//! `capture` and `ocr` sit above `engine`. `capture` defines its own
+//! `CaptureBackend` trait and produces documents (format, L5) that the app
+//! opens in the engine; `ocr` implements the engine's `UiAnalyzer` trait,
+//! which the app installs (photocraft does the same with its `platform`
 //! crate). That keeps the engine, and everything it tests, free of OS code.
 //!
 //! The rule engine works on a small, metadata-independent model so it can be

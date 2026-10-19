@@ -1,0 +1,27 @@
+[package]
+name = "capturecraft-capture"
+version = "0.1.0"
+description = "CaptureCraft OS capture: displays, windows, detached cursor, frozen-desktop hit testing, scrolling panorama stitcher"
+edition.workspace = true
+# photocraft-algo and photocraft-cms (via photocraft-color) declare 1.95.
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["xcap"]
+# Portable backend for every desktop OS (Windows, macOS, X11, Wayland portal).
+xcap = ["dep:xcap"]
+
+[dependencies]
+capturecraft-format = { workspace = true }
+photocraft-geom = { workspace = true }
+photocraft-color = { workspace = true }
+photocraft-raster = { workspace = true }
+photocraft-algo = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+xcap = { version = "0.9.8", optional = true }
+
+[dev-dependencies]
+proptest = "1"
