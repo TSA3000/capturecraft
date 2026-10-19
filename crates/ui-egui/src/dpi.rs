@@ -96,6 +96,32 @@ impl LogicalPt {
     }
 }
 
+/// The physical pixel containing the egui position `pt`.
+pub fn to_physical(pt: Pos2, ppp: f32) -> PhysicalPx {
+    LogicalPt::from_pos2(pt).to_physical(ppp)
+}
+
+/// The top-left corner of physical pixel `px` as an egui position.
+pub fn to_logical(px: PhysicalPx, ppp: f32) -> Pos2 {
+    px.to_logical(ppp).to_pos2()
+}
+
+/// `v` points moved to the nearest physical pixel boundary, so a shape
+/// drawn there is not smeared over two hardware pixels.
+pub fn snap_to_pixel(v: f32, ppp: f32) -> f32 {
+    let s = sane_ppp(ppp);
+    let g = (v * s).round() / s;
+    if g.is_finite() { g } else { 0.0 }
+}
+
+/// Edge of one loupe cell in points: `zoom` points rounded to whole
+/// physical pixels (at least one), so every cell covers the same number
+/// of hardware pixels at 125 % or 150 %.
+pub fn loupe_cell_pt(zoom: u8, ppp: f32) -> f32 {
+    let s = sane_ppp(ppp);
+    (f32::from(zoom.max(1)) * s).round().max(1.0) / s
+}
+
 /// `W × H px` of a selection, physical pixels.
 pub fn dimension_badge(w: u32, h: u32) -> String {
     format!("{w} × {h} px")
@@ -169,6 +195,35 @@ mod tests {
             LogicalPt::new(f32::NAN, 3.0).to_physical(f32::INFINITY),
             PhysicalPx::new(0, 3)
         );
+    }
+
+    #[test]
+    fn free_conversions_match_the_typed_ones() {
+        for ppp in SCALES {
+            let p = PhysicalPx::new(-37, 1201);
+            assert_eq!(to_physical(to_logical(p, ppp), ppp), p, "@ {ppp}");
+        }
+        assert_eq!(
+            to_logical(PhysicalPx::new(300, 150), 1.5),
+            pos2(200.0, 100.0)
+        );
+        assert_eq!(to_physical(pos2(10.2, 10.9), 2.0), PhysicalPx::new(20, 21));
+    }
+
+    #[test]
+    fn loupe_cells_cover_whole_hardware_pixels() {
+        for ppp in SCALES {
+            for zoom in [1u8, 7, 10, 12] {
+                let cell = loupe_cell_pt(zoom, ppp) * ppp;
+                assert!((cell - cell.round()).abs() < 1e-4, "{zoom} @ {ppp}: {cell}");
+                assert!(cell >= 1.0);
+            }
+            let v = snap_to_pixel(10.3, ppp) * ppp;
+            assert!((v - v.round()).abs() < 1e-4, "{ppp}");
+        }
+        // 10 points at 125 % = 12.5 px → 13 px cells.
+        assert_eq!(loupe_cell_pt(10, 1.25), 13.0 / 1.25);
+        assert_eq!(snap_to_pixel(f32::NAN, 1.0), 0.0);
     }
 
     #[test]

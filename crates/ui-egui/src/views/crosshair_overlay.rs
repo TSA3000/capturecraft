@@ -28,7 +28,9 @@ use egui::{
 };
 use photocraft_geom::Rect;
 
-use crate::dpi::{LogicalPt, PhysicalPx, dimension_badge, physical_size, sane_ppp};
+use crate::dpi::{
+    LogicalPt, PhysicalPx, dimension_badge, loupe_cell_pt, physical_size, sane_ppp, snap_to_pixel,
+};
 use crate::state::{
     ColorCode, CrosshairOverlayState, CrosshairPrefs, HoverTarget, OverlayPhase, SelectionSource,
 };
@@ -322,6 +324,18 @@ fn clamp_into(r: ERect, screen: ERect) -> ERect {
     r.translate(vec2(dx, dy))
 }
 
+/// The loupe's colour line: both codes, the preferred one first.
+pub fn loupe_readout(px: [u8; 4], code: ColorCode) -> String {
+    let (hex, rgb) = (
+        color_code(px, ColorCode::Hex),
+        color_code(px, ColorCode::Rgb),
+    );
+    match code {
+        ColorCode::Hex => format!("{hex}  {rgb}"),
+        ColorCode::Rgb => format!("{rgb}  {hex}"),
+    }
+}
+
 /// `#RRGGBB` or `rgb(r, g, b)` of a pixel.
 pub fn color_code(px: [u8; 4], code: ColorCode) -> String {
     let [r, g, b, _] = px;
@@ -533,12 +547,19 @@ impl CrosshairOverlay<'_> {
         let loupe = self
             .desktop
             .loupe(PointI32::new(at[0], at[1]), self.prefs.loupe_radius);
+        // Every desktop pixel becomes a square of whole hardware pixels,
+        // placed on hardware pixel boundaries: crisp at 125 % and 150 %.
+        let ppp = painter.ctx().pixels_per_point();
         let cells = loupe.size.max(1) as usize;
-        let cell = f32::from(self.prefs.loupe_zoom.max(1));
+        let cell = loupe_cell_pt(self.prefs.loupe_zoom, ppp);
         let side = cells as f32 * cell;
-        let info_h = 22.0;
+        let info_h = 36.0;
         let size = vec2(side, side + info_h);
         let r = loupe_rect(cursor_pt, size, screen, 20.0);
+        let r = ERect::from_min_size(
+            pos2(snap_to_pixel(r.min.x, ppp), snap_to_pixel(r.min.y, ppp)),
+            r.size(),
+        );
         let corner = Tokens::corner(t.radius_sm);
         painter.add(t.popup_elevation.as_shape(r, corner));
         painter.rect_filled(r, corner, t.badge_bg);
@@ -562,6 +583,17 @@ impl CrosshairOverlay<'_> {
         }
         let mid = (cells / 2) as f32 * cell;
         let center = ERect::from_min_size(grid.min + vec2(mid, mid), Vec2::splat(cell));
+        // A one-hardware-pixel crosshair up to the centre pixel, which is
+        // boxed so its own colour stays visible.
+        let hair = stroke(1.0 / sane_ppp(ppp), t.loupe_reticle);
+        let (cx, cy) = (
+            snap_to_pixel(center.center().x, ppp),
+            snap_to_pixel(center.center().y, ppp),
+        );
+        painter.vline(cx, grid.min.y..=center.min.y, hair);
+        painter.vline(cx, center.max.y..=grid.max.y, hair);
+        painter.hline(grid.min.x..=center.min.x, cy, hair);
+        painter.hline(center.max.x..=grid.max.x, cy, hair);
         painter.rect_stroke(
             center,
             0.0,
@@ -570,28 +602,27 @@ impl CrosshairOverlay<'_> {
         );
         painter.rect_stroke(r, corner, stroke(1.0, t.loupe_border), StrokeKind::Inside);
 
+        // Two rows: position and swatch, then the exact colour.
         let info = ERect::from_min_max(pos2(r.min.x, grid.max.y), r.max).shrink(t.space_sm);
+        let (top, bottom) = info.split_top_bottom_at_fraction(0.5);
         let font = FontId::monospace(11.0);
         painter.text(
-            info.left_center(),
+            top.left_center(),
             Align2::LEFT_CENTER,
-            format!("({}, {})", at[0], at[1]),
+            format!("{}, {} px", at[0], at[1]),
             font.clone(),
             t.badge_text,
         );
         if let Some(px) = loupe.center {
-            let code = color_code(px, self.prefs.color_code);
-            let text_r = painter.text(
-                info.right_center(),
-                Align2::RIGHT_CENTER,
-                code,
+            painter.text(
+                bottom.left_center(),
+                Align2::LEFT_CENTER,
+                loupe_readout(px, self.prefs.color_code),
                 font,
                 t.badge_text,
             );
-            let sw = ERect::from_center_size(
-                pos2(text_r.min.x - t.space_md, info.center().y),
-                Vec2::splat(10.0),
-            );
+            let sw =
+                ERect::from_center_size(top.right_center() - vec2(6.0, 0.0), Vec2::splat(10.0));
             painter.rect_filled(sw, 2.0, Color32::from_rgb(px[0], px[1], px[2]));
             painter.rect_stroke(sw, 2.0, stroke(1.0, t.loupe_border), StrokeKind::Outside);
         }
@@ -854,6 +885,19 @@ mod tests {
         let full = screen;
         let r = action_bar_rect(full, bar, screen, 8.0);
         assert_eq!(r.max.y, 792.0);
+    }
+
+    #[test]
+    fn loupe_reads_out_both_colour_codes() {
+        let px = [255, 128, 0, 255];
+        assert_eq!(
+            loupe_readout(px, ColorCode::Hex),
+            "#FF8000  rgb(255, 128, 0)"
+        );
+        assert_eq!(
+            loupe_readout(px, ColorCode::Rgb),
+            "rgb(255, 128, 0)  #FF8000"
+        );
     }
 
     #[test]

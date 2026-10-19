@@ -352,9 +352,9 @@ impl CrosshairPrefs {
         2 * self.loupe_radius.min(64) + 1
     }
 
-    /// Loupe edge in points.
-    pub fn loupe_side(&self) -> f32 {
-        self.loupe_cells() as f32 * f32::from(self.loupe_zoom.max(1))
+    /// Loupe edge in points at `ppp` (cells snap to whole hardware pixels).
+    pub fn loupe_side(&self, ppp: f32) -> f32 {
+        self.loupe_cells() as f32 * crate::dpi::loupe_cell_pt(self.loupe_zoom, ppp)
     }
 }
 
