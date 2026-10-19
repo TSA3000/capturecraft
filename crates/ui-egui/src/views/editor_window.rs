@@ -302,8 +302,15 @@ impl EditorWindow<'_> {
             ui.menu_button("File", |ui| {
                 item(ui, "New Capture", true, UiIntent::NewCapture);
                 item(ui, "New Blank Image", true, UiIntent::NewBlankImage);
+                item(ui, "Open…  Ctrl+O", true, UiIntent::OpenDialog);
                 ui.separator();
-                item(ui, "Save As…", has_doc, UiIntent::SaveAs { doc_id: None });
+                item(ui, "Save  Ctrl+S", has_doc, UiIntent::Save { doc_id: None });
+                item(
+                    ui,
+                    "Save As…  Ctrl+Shift+S",
+                    has_doc,
+                    UiIntent::SaveAs { doc_id: None },
+                );
                 item(ui, "Copy All", has_doc, UiIntent::CopyImage);
                 ui.separator();
                 if let Some(d) = doc {

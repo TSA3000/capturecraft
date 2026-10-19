@@ -36,3 +36,7 @@ base64 = "0.22"
 # The tray app's config.toml (its output folder, for the Library).
 toml = "1"
 serde_json = { workspace = true }
+# Native Open / Save dialogs, as photocraft (async API on a thread).
+rfd = "0.17"
+# The editor window as the dialogs' parent (eframe::Frame implements it).
+raw-window-handle = "0.6"

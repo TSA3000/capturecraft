@@ -12,3 +12,8 @@ photocraft-geom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# The archive: CRC-32 for the ZIP container (as photocraft-format), PNG
+# tiles, SHA-256 for deduplicated tiles.
+crc32fast = "1.5"
+photocraft-codecs = { workspace = true }
+sha2 = "0.10.9"

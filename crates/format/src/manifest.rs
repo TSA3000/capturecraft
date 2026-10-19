@@ -72,6 +72,11 @@ pub struct Manifest {
     pub title: String,
     pub canvas: Canvas,
     pub base: RasterLayer,
+    /// The capture as edited: Smart Move / Delete and Edit Text heals,
+    /// the Eraser, Simplify's heals (`tiles/edited/…`); `None` when the
+    /// pixels are the capture's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<RasterLayer>,
     /// The OS cursor at capture time, detached from the pixels.
     pub cursor: Option<CursorLayer>,
     pub annotations: Vec<AnnotationNode>,
@@ -90,6 +95,7 @@ impl Default for Manifest {
             title: String::new(),
             canvas: Canvas::default(),
             base: RasterLayer::default(),
+            edited: None,
             cursor: None,
             annotations: Vec::new(),
             capture: CaptureMetadata::default(),
@@ -160,6 +166,12 @@ impl Manifest {
         );
         check_size(v, "base.size", self.base.size);
         self.base.validate(v);
+        if let Some(e) = &self.edited {
+            if e.size != self.base.size {
+                v.err("edited.size", "must equal base.size");
+            }
+            e.validate(v);
+        }
         if let Some(c) = &self.cursor {
             c.validate(v);
         }

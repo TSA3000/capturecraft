@@ -17,7 +17,16 @@ use crate::{app::share_dir, documents, export};
 
 /// Extensions the Library lists (lower case).
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff", "qoi",
+    "capturecraft",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "bmp",
+    "gif",
+    "tif",
+    "tiff",
+    "qoi",
 ];
 
 /// Files kept per scan, newest first.
@@ -96,9 +105,19 @@ pub fn scan(dirs: &[PathBuf]) -> Vec<TrayItem> {
         .collect()
 }
 
-/// A thumbnail of the image at `path`: width, height, straight RGBA8.
+/// A thumbnail of the image or `.capturecraft` document at `path`:
+/// width, height, straight RGBA8.
 pub fn file_thumbnail(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = std::fs::read(path).ok()?;
+    let is_doc = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(crate::file_dialog::DOC_EXT));
+    if is_doc {
+        let mut s = capturecraft_engine::Session::new();
+        s.open_archive(&bytes).ok()?;
+        let flat = capturecraft_engine::render::flatten(s.active()?).ok()?;
+        return documents::thumbnail(&flat);
+    }
     let img = photocraft_codecs::decode(&bytes).ok()?;
     let flat = Flattened {
         width: img.width(),
@@ -236,6 +255,24 @@ mod tests {
         assert_eq!((w, h), (4, 3));
         assert_eq!(&rgba[..4], &[10, 20, 30, 255]);
         assert!(file_thumbnail(&dir.join("notes.txt")).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saved_documents_are_listed_with_thumbnails() {
+        let dir = std::env::temp_dir().join(format!("capturecraft-libdoc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = capturecraft_engine::Session::new();
+        documents::open_blank(&mut s, photocraft_geom::Size::new(40, 30)).unwrap();
+        let bytes = s.save_archive(0, "test").unwrap();
+        let path = dir.join("Report.capturecraft");
+        crate::file_dialog::atomic_write(&path, &bytes).unwrap();
+        let items = scan(std::slice::from_ref(&dir));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Report");
+        let (w, h, px) = file_thumbnail(&path).unwrap();
+        assert_eq!((w, h), (40, 30));
+        assert_eq!(&px[..4], &[255; 4]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

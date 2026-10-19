@@ -18,6 +18,7 @@ mod app;
 mod capture_flow;
 mod documents;
 mod export;
+mod file_dialog;
 mod library;
 
 use std::sync::Arc;

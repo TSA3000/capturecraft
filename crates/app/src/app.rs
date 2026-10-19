@@ -44,7 +44,7 @@ use capturecraft_ui_egui::views::capture_hud::{
 use capturecraft_ui_egui::views::crosshair_overlay::{
     CrosshairOverlay, DesktopMapping, DesktopTextures, OverlayAction,
 };
-use capturecraft_ui_egui::views::editor_window::{EditorWindow, window_title};
+use capturecraft_ui_egui::views::editor_window::{EditorWindow, document_file_name, window_title};
 use capturecraft_ui_egui::{Dispatched, UiIntent, dispatch};
 use eframe::egui_wgpu;
 use egui::{ViewportCommand, ViewportId};
@@ -52,6 +52,7 @@ use egui::{ViewportCommand, ViewportId};
 use crate::capture_flow::{CaptureFlow, open_capture};
 use crate::documents::{self, index_of, open_blank, open_image};
 use crate::export;
+use crate::file_dialog::{self, Answer, FileDialogs, Request};
 use crate::library::{self, LibraryFiles};
 
 /// eframe storage key of [`AppState`].
@@ -83,6 +84,11 @@ pub enum ShellAction {
     NewBlank,
     /// Show a message in the toast.
     Notice(String),
+    /// Save to the document's file (Save As when it has none); `None` =
+    /// the active document.
+    Save(Option<String>),
+    SaveAs(Option<String>),
+    OpenDialog,
     /// Run `ocr.grabText` and open the Grab Text modal.
     GrabText(Option<serde_json::Value>),
     CopyText(String),
@@ -113,15 +119,15 @@ pub fn shell_action(intent: &UiIntent) -> ShellAction {
         }
         UiIntent::DuplicateDocument { doc_id } => ShellAction::Duplicate(doc_id.clone()),
         UiIntent::CopyDocument { doc_id } => ShellAction::CopyDocument(doc_id.clone()),
-        UiIntent::SaveAs { .. } => ShellAction::Unavailable("The Save As dialog"),
+        UiIntent::SaveAs { doc_id } => ShellAction::SaveAs(doc_id.clone()),
         UiIntent::NewBlankImage => ShellAction::NewBlank,
         UiIntent::OpenFile { path } => ShellAction::Open(PathBuf::from(path)),
         UiIntent::Unavailable(what) => ShellAction::Unavailable(what),
         UiIntent::Notice(text) => ShellAction::Notice(text.clone()),
         UiIntent::GrabText { region } => ShellAction::GrabText(region.clone()),
         UiIntent::CopyText(text) => ShellAction::CopyText(text.clone()),
-        UiIntent::Save { .. } => ShellAction::Unavailable("Saving .capturecraft documents"),
-        UiIntent::OpenDialog => ShellAction::Unavailable("File › Open"),
+        UiIntent::Save { doc_id } => ShellAction::Save(doc_id.clone()),
+        UiIntent::OpenDialog => ShellAction::OpenDialog,
         UiIntent::Command { .. } | UiIntent::ActivateDocument { .. } => {
             ShellAction::Unavailable("engine intent")
         }
@@ -178,11 +184,24 @@ pub struct CaptureCraftApp {
     library: LibraryFiles,
     /// The tray app's output folder (its config.toml), read at start.
     tray_dir: Option<PathBuf>,
+    /// Content key of each document when it was last saved or opened.
+    saved: HashMap<String, u64>,
+    /// Whether each document changed since then (checked while active).
+    dirty: HashMap<String, bool>,
+    /// Native Open / Save dialogs.
+    dialogs: FileDialogs,
+    /// The `.capturecraft` file of each saved or opened document, by id.
+    paths: HashMap<String, PathBuf>,
+    /// Folder of the last file opened or saved (where dialogs start).
+    last_dir: Option<PathBuf>,
     /// The toast on screen and when it appeared.
     toast: Option<(String, Instant)>,
     /// The window title last sent.
     title: String,
 }
+
+/// What saved documents name as their generator.
+const GENERATOR: &str = concat!("capturecraft-editor ", env!("CARGO_PKG_VERSION"));
 
 /// How long a toast stays, seconds; the last half second fades it out.
 pub const TOAST_SECS: f32 = 3.0;
@@ -243,6 +262,11 @@ impl CaptureCraftApp {
             library: LibraryFiles::default(),
             tray_dir: library::tray_output_dir(),
             toast: None,
+            dialogs: FileDialogs::default(),
+            paths: HashMap::new(),
+            saved: HashMap::new(),
+            dirty: HashMap::new(),
+            last_dir: None,
             title: String::new(),
         };
         for p in open {
@@ -251,13 +275,165 @@ impl CaptureCraftApp {
         app
     }
 
+    /// Opens a `.capturecraft` document (with its history) or an image.
+    /// A document that is already open is brought to the front instead.
     fn open_file(&mut self, path: &Path) {
-        match open_image(&mut self.session, path) {
-            Ok(_) => {
+        self.last_dir = path.parent().map(Path::to_path_buf);
+        let is_doc = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(file_dialog::DOC_EXT));
+        let opened = if is_doc {
+            self.open_document(path)
+        } else {
+            open_image(&mut self.session, path).map(|_| ())
+        };
+        match opened {
+            Ok(()) => {
                 sync_tray(&mut self.state.editor.tray, &self.session);
                 self.state.editor.library.visible = false;
+                self.state.editor.canvas.selection.clear();
             }
             Err(e) => self.notice = Some(format!("Could not open {e}")),
+        }
+    }
+
+    fn open_document(&mut self, path: &Path) -> Result<(), String> {
+        if let Some(id) = self
+            .paths
+            .iter()
+            .find(|(_, p)| p.as_path() == path)
+            .map(|(id, _)| id.clone())
+            && let Some(i) = index_of(&self.session, &id)
+        {
+            return self.session.activate(i).map_err(|e| e.to_string());
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let i = self
+            .session
+            .open_archive(&bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // Two copies of one document get their own ids.
+        let id = self.session.documents()[i].manifest.id.clone();
+        let taken = self
+            .session
+            .documents()
+            .iter()
+            .filter(|d| d.manifest.id == id)
+            .count()
+            > 1;
+        if taken || id.is_empty() {
+            let fresh = documents::unique_doc_id(&self.session);
+            if let Some(d) = self.session.active_mut() {
+                d.manifest.id = fresh;
+            }
+        }
+        if let Some(d) = self.session.active() {
+            self.paths.insert(d.manifest.id.clone(), path.to_path_buf());
+            self.saved.insert(d.manifest.id.clone(), content_key(d));
+        }
+        Ok(())
+    }
+
+    /// Save (to the document's file, or Save As when it has none) or
+    /// Save As.
+    fn save(&mut self, id: Option<String>, ask: bool) {
+        let Some(id) = id.or_else(|| self.session.active().map(|d| d.manifest.id.clone())) else {
+            self.notice = Some("Nothing to save: no capture open".into());
+            return;
+        };
+        match self.paths.get(&id).cloned() {
+            Some(path) if !ask => self.write_document(&id, &path),
+            known => {
+                let Some(doc) =
+                    index_of(&self.session, &id).and_then(|i| self.session.documents().get(i))
+                else {
+                    return;
+                };
+                let suggested = known.unwrap_or_else(|| {
+                    let dir = self.last_dir.clone().unwrap_or_else(export::default_dir);
+                    dir.join(document_file_name(&doc.manifest))
+                });
+                if !self.dialogs.ask(Request::Save {
+                    doc_id: id,
+                    suggested,
+                }) {
+                    self.notice = Some("A file dialog is already open".into());
+                }
+            }
+        }
+    }
+
+    /// Writes document `id` to `path`: a `.capturecraft` archive, or a
+    /// flattened PNG / JPEG / WebP for those extensions.
+    fn write_document(&mut self, id: &str, path: &Path) {
+        let Some(i) = index_of(&self.session, id) else {
+            self.notice = Some("Save failed: the capture is closed".into());
+            return;
+        };
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let image = match ext.as_str() {
+            "png" => Some(ImageFormat::Png),
+            "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+            "webp" => Some(ImageFormat::Webp),
+            _ => None,
+        };
+        let bytes = match image {
+            Some(format) => flatten(&self.session.documents()[i])
+                .map_err(|e| e.to_string())
+                .and_then(|f| export::encode(&f, format)),
+            None => self
+                .session
+                .save_archive(i, GENERATOR)
+                .map_err(|e| e.to_string()),
+        };
+        let result = bytes.and_then(|b| file_dialog::atomic_write(path, &b));
+        self.last_dir = path.parent().map(Path::to_path_buf);
+        self.notice = Some(match result {
+            Ok(()) => {
+                if image.is_none() {
+                    self.paths.insert(id.to_string(), path.to_path_buf());
+                    if let Some(d) = self.session.documents().get(i) {
+                        self.saved.insert(id.to_string(), content_key(d));
+                    }
+                }
+                format!("Saved {}", path.display())
+            }
+            Err(e) => format!("Save failed: {e}"),
+        });
+    }
+
+    /// Handles a finished Open or Save As dialog.
+    fn on_dialog(&mut self, a: Answer) {
+        match a {
+            Answer::Open(paths) => {
+                for p in paths {
+                    self.open_file(&p);
+                }
+            }
+            Answer::Save { doc_id, path } => self.write_document(&doc_id, &path),
+        }
+    }
+
+    /// The tray's file paths and unsaved dots follow the saved files
+    /// (only the active document can have changed since last frame).
+    fn sync_files(&mut self) {
+        if let Some(d) = self.session.active() {
+            let id = &d.manifest.id;
+            let dirty = self.saved.get(id).is_none_or(|k| *k != content_key(d));
+            self.dirty.insert(id.clone(), dirty);
+        }
+        for item in &mut self.state.editor.tray.items {
+            if let Some(p) = self.paths.get(&item.doc_id) {
+                item.file_path = Some(p.to_string_lossy().into_owned());
+            }
+            item.unsaved = self
+                .dirty
+                .get(&item.doc_id)
+                .copied()
+                .unwrap_or(!self.saved.contains_key(&item.doc_id));
         }
     }
 
@@ -556,6 +732,17 @@ impl CaptureCraftApp {
                     },
                     ShellAction::Notice(text) => self.notice = Some(text),
                     ShellAction::GrabText(region) => self.grab_text(region),
+                    ShellAction::Save(id) => self.save(id, false),
+                    ShellAction::SaveAs(id) => self.save(id, true),
+                    ShellAction::OpenDialog => {
+                        let dir = self
+                            .last_dir
+                            .clone()
+                            .or_else(|| Some(export::default_dir()));
+                        if !self.dialogs.ask(Request::Open { dir }) {
+                            self.notice = Some("A file dialog is already open".into());
+                        }
+                    }
                     ShellAction::CopyText(text) => {
                         self.notice = Some(match export::copy_text(&mut self.clipboard, &text) {
                             Ok(()) => "Text copied to clipboard!".into(),
@@ -621,6 +808,7 @@ impl CaptureCraftApp {
     fn show_editor(&mut self, ui: &mut egui::Ui) -> Vec<UiIntent> {
         let image = self.render_canvas(ui.ctx());
         sync_tray(&mut self.state.editor.tray, &self.session);
+        self.sync_files();
         self.refresh_thumbnails(ui.ctx());
         let title = window_title(self.session.active());
         if title != self.title {
@@ -694,8 +882,11 @@ impl eframe::App for CaptureCraftApp {
         self.advance_capture(ctx);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(a) = self.dialogs.poll(&ctx, Some(&*frame)) {
+            self.on_dialog(a);
+        }
         let mut intents = self.show_hud(&ctx);
         self.show_overlay(&ctx);
         if !self.flow.hides_windows() {
