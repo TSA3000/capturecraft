@@ -1,3 +1,17 @@
+# v0.24.4
+
+## Changes
+
+- **Fix: Replace as Editable Text no longer freezes the editor.** After grabbing text from
+  a dragged area, Replace read the whole capture again, which could take long enough for
+  Windows to show "Not Responding". It now reuses what Grab Text already read, so the text
+  boxes appear straight away.
+- **Fix: Grab Text shows the area you drag** as a dashed rectangle, like the other tools.
+
+## Upgrading
+
+- Install over v0.24.3; nothing else to do.
+
 # v0.24.3
 
 ## Changes

@@ -2390,7 +2390,8 @@ fn draw_preview(
         | ToolId::Blur
         | ToolId::Magnify
         | ToolId::Spotlight
-        | ToolId::Highlighter => dashed_rect(painter, r, t.gizmo_stroke),
+        | ToolId::Highlighter
+        | ToolId::GrabText => dashed_rect(painter, r, t.gizmo_stroke),
         _ => {}
     }
 }

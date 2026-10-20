@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "anyhow",
  "arboard",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-app"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-capture"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "capturecraft-format",
  "photocraft-algo",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-compositor"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "bytemuck",
  "photocraft-algo",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-engine"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "capturecraft-compositor",
  "capturecraft-format",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-format"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "crc32fast",
  "photocraft-codecs",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-ocr"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "capturecraft-engine",
  "capturecraft-format",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "capturecraft-ui-egui"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "capturecraft-capture",
  "capturecraft-compositor",
@@ -9027,7 +9027,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "serde",
  "serde_json",

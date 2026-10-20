@@ -46,8 +46,10 @@ pub struct GrabResult {
     pub recognized: bool,
     pub analyzer: String,
     pub lines: Vec<GrabLine>,
-    /// The raw lines, handed back to `ocr.replaceLines`.
+    /// The raw lines and the region read, handed back to `ocr.replaceLines`
+    /// (the region lets it reuse Grab Text's analysis).
     pub raw_lines: Vec<Value>,
+    pub region: Value,
     /// What the text box shows (the user may edit it before copying).
     pub text: String,
     pub layout: GrabLayout,
@@ -65,6 +67,7 @@ impl GrabResult {
             analyzer: v["analyzer"].as_str().unwrap_or_default().to_string(),
             lines,
             raw_lines,
+            region: v["region"].clone(),
             text: String::new(),
             layout: GrabLayout::Reading,
         };
@@ -185,7 +188,11 @@ pub fn show(ctx: &Context, grab: &mut Option<GrabResult>, intents: &mut Vec<UiIn
             {
                 intents.push(UiIntent::command(
                     "ocr.replaceLines",
-                    json!({ "lines": g.raw_lines }),
+                    if g.region.is_null() {
+                        json!({ "lines": g.raw_lines })
+                    } else {
+                        json!({ "lines": g.raw_lines, "region": g.region })
+                    },
                 ));
                 close = true;
             }

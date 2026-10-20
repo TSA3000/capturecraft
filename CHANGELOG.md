@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.24.4 (2026-10-20)
+
+- Fix: Replace as Editable Text froze the editor ("Not Responding") after a dragged Grab
+  Text: it read the whole capture again. `ocr.grabText` now returns its `region` and
+  `ocr.replaceLines` takes it, reusing Grab Text's analysis (one analysis for all lines).
+- Fix: the Grab Text tool draws a dashed rectangle while you drag.
+- Tests: Grab Text then Replace on a 26-line capture with the real models.
+
 ## v0.24.3 (2026-10-20)
 
 - Fix: Grab Text read no words in release builds. The archives, the NSIS installer and the

@@ -127,7 +127,7 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         menu_path: &["Image", "Grab Text"],
         shortcut: None,
         params: r##"{ region?: {x0, y0, x1, y1} (base px, default: whole capture) }
--> { text, recognized: bool, lines: [{ id, rect, text }] } (reading order, columns kept apart)"##,
+-> { text, recognized: bool, region, lines: [{ id, rect, text }] } (reading order, columns kept apart)"##,
         enabled: needs_analyzer,
         run: grab_text,
         journal: false,
@@ -150,7 +150,8 @@ pub(crate) static REGISTRY: &[CommandSpec] = &[
         label: "Replace as Editable Text",
         menu_path: &[],
         shortcut: None,
-        params: r##"{ lines: [{ rect: {x0, y0, x1, y1} (base px), text: string }] (as ocr.grabText returns them) }
+        params: r##"{ lines: [{ rect: {x0, y0, x1, y1} (base px), text: string }] (as ocr.grabText returns them),
+  region?: {x0, y0, x1, y1} (ocr.grabText's region, so its analysis is reused; default: whole capture) }
 -> { replaced: [{ id, rect }], skipped: [rects] } (one undo step; lines without text are skipped)"##,
         enabled: needs_analyzer,
         run: replace_lines,
@@ -1346,6 +1347,7 @@ fn grab_text(s: &mut Session, p: &Value) -> Result<Value> {
         "text": text,
         "recognized": recognized,
         "analyzer": analyzer(s)?.name(),
+        "region": rect_json(region),
         "lines": lines.iter().map(|e| json!({
             "id": e.id,
             "rect": rect_json(e.rect),
@@ -1374,11 +1376,18 @@ fn replace_lines(s: &mut Session, p: &Value) -> Result<Value> {
     #[serde(deny_unknown_fields)]
     struct P {
         lines: Vec<LineParam>,
+        #[serde(default)]
+        region: Option<Rect>,
     }
     let p: P = parse(REPLACE_LINES_ID, p)?;
     if p.lines.len() > MAX_SIMPLIFY_ELEMENTS {
         return Err(bad(REPLACE_LINES_ID, "too many lines"));
     }
+    // The analysis Grab Text made of the same region (cached while the
+    // pixels are unchanged): a second recogniser pass over the whole
+    // capture blocked the editor for seconds.
+    let full = edited(s)?.bounds();
+    let all = s.analysis(region_param(s, REPLACE_LINES_ID, p.region)?)?;
     let mut replaced = Vec::new();
     let mut skipped = Vec::new();
     for l in p.lines {
@@ -1386,7 +1395,15 @@ fn replace_lines(s: &mut Session, p: &Value) -> Result<Value> {
             skipped.push(rect_json(l.rect));
             continue;
         };
-        match replace_text(s, &json!({ "rect": rect_json(l.rect), "text": text })) {
+        let one = ReplaceParams {
+            object: None,
+            rect: Some(l.rect),
+            text,
+            font: None,
+            color: None,
+            heal: None,
+        };
+        match replace_one(s, one, full, &all) {
             Ok(v) => replaced.push(json!({ "id": v["id"], "rect": v["rect"] })),
             Err(EngineError::BadParams { .. }) => skipped.push(rect_json(l.rect)),
             Err(e) => return Err(e),
@@ -1431,9 +1448,14 @@ fn replace_text(s: &mut Session, p: &Value) -> Result<Value> {
     let p: ReplaceParams = parse(REPLACE_TEXT_ID, p)?;
     let full = edited(s)?.bounds();
     let all = s.analysis(full)?;
+    replace_one(s, p, full, &all)
+}
+
+/// Replaces one text element of `all` (the analysis of `full`).
+fn replace_one(s: &mut Session, p: ReplaceParams, full: Rect, all: &[UiElement]) -> Result<Value> {
     let e = match (p.object, p.rect) {
         (Some(id), None) => {
-            let e = element(REPLACE_TEXT_ID, &all, id)?;
+            let e = element(REPLACE_TEXT_ID, all, id)?;
             if e.kind != UiElementKind::Text {
                 return Err(bad(
                     REPLACE_TEXT_ID,
@@ -1479,7 +1501,7 @@ fn replace_text(s: &mut Session, p: &Value) -> Result<Value> {
     let healed = if p.heal.unwrap_or(true) {
         let hole = e.rect.inflate(1).intersect(&full);
         let skip = BTreeSet::from([e.id]);
-        heal_edited(s, &[hole], &protect_around(&all, hole, &skip))?
+        heal_edited(s, &[hole], &protect_around(all, hole, &skip))?
     } else {
         Vec::new()
     };
@@ -1814,16 +1836,30 @@ mod tests {
             font_px: 14.0,
             ..el(UiElementKind::Text, r, 0.9)
         };
-        let (a, _) = fake(vec![
+        let (a, analyses) = fake(vec![
             line(Rect::new(10, 10, 180, 26), "one"),
             line(Rect::new(10, 40, 180, 56), "two"),
+            line(Rect::new(10, 70, 180, 86), "three"),
         ]);
         s.set_analyzer(a);
-        let g = s.run(GRAB_TEXT_ID, &json!({})).unwrap();
+        let region = json!({ "x0": 0, "y0": 0, "x1": 300, "y1": 120 });
+        let g = s.run(GRAB_TEXT_ID, &json!({ "region": region })).unwrap();
+        assert_eq!(g["region"], region);
         let mut lines = g["lines"].clone();
         lines[1]["text"] = Value::Null;
-        let r = s.run(REPLACE_LINES_ID, &json!({ "lines": lines })).unwrap();
-        assert_eq!(r["replaced"].as_array().unwrap().len(), 1);
+        let before = analyses.load(std::sync::atomic::Ordering::Relaxed);
+        let r = s
+            .run(
+                REPLACE_LINES_ID,
+                &json!({ "lines": lines, "region": g["region"] }),
+            )
+            .unwrap();
+        assert_eq!(
+            analyses.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "Grab Text's analysis is reused"
+        );
+        assert_eq!(r["replaced"].as_array().unwrap().len(), 2);
         assert_eq!(r["skipped"].as_array().unwrap().len(), 1);
         let undo = s.active().unwrap().history_labels().0;
         assert_eq!(undo, ["Replace as Editable Text"]);
