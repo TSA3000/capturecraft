@@ -139,7 +139,7 @@ pub fn show(ctx: &Context, grab: &mut Option<GrabResult>, intents: &mut Vec<UiIn
                     "No text was found in this area.".to_string()
                 } else {
                     format!(
-                        "{n} line{} found, but this build cannot read them: the text recognition models are missing (cargo xtask models).",
+                        "{n} line{} found, but they cannot be read: the text recognition models are missing from the models folder beside CaptureCraft (reinstall it; a source build runs `cargo xtask models`).",
                         if n == 1 { "" } else { "s" }
                     )
                 })

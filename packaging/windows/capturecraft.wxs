@@ -17,7 +17,10 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="CaptureCraft" />
+        <Directory Id="INSTALLFOLDER" Name="CaptureCraft">
+          <!-- Grab Text's models; the app looks for them in models\ beside it. -->
+          <Directory Id="MODELSFOLDER" Name="models" />
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -62,6 +65,21 @@
       </Component>
       <Component Id="LicenseApache" Guid="*">
         <File Id="license_apache" Name="LICENSE-APACHE.txt" Source="$(var.Source)\LICENSE-APACHE" KeyPath="yes" />
+      </Component>
+      <Component Id="ModelDetection" Directory="MODELSFOLDER" Guid="*">
+        <File Source="$(var.Source)\models\text-detection.rten" KeyPath="yes" />
+      </Component>
+      <Component Id="ModelRecognition" Directory="MODELSFOLDER" Guid="*">
+        <File Source="$(var.Source)\models\text-recognition.rten" KeyPath="yes" />
+      </Component>
+      <Component Id="ModelDetectionLicence" Directory="MODELSFOLDER" Guid="*">
+        <File Source="$(var.Source)\models\text-detection.rten.LICENCE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="ModelRecognitionLicence" Directory="MODELSFOLDER" Guid="*">
+        <File Source="$(var.Source)\models\text-recognition.rten.LICENCE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="ModelAttribution" Directory="MODELSFOLDER" Guid="*">
+        <File Source="$(var.Source)\models\ATTRIBUTION.txt" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

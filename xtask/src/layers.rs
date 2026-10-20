@@ -22,7 +22,7 @@
 //!         │                    │
 //!  L1  photocraft-color ──▶ photocraft-raster                  blend math / 256² COW tiles
 //!         │
-//!  L0  photocraft-geom  photocraft-cms   [standalone: photocraft-codecs, photocraft-psd, pdfcraft-create]
+//!  L0  photocraft-geom  photocraft-cms   [standalone: photocraft-codecs, photocraft-psd, pdfcraft-create, pdfcraft-ocr]
 //! ```
 //!
 //! The photocraft crates keep their own relative order (photocraft's
@@ -74,6 +74,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("photocraft-psd", Class::Standalone),
     // PDF export of documentation guides (storytold/pdfcraft).
     ("pdfcraft-create", Class::Standalone),
+    // Grab Text's recogniser (PdfCraft's Scan & OCR).
+    ("pdfcraft-ocr", Class::Standalone),
     // L1 pixels
     ("photocraft-color", Class::Layer(1)),
     ("photocraft-raster", Class::Layer(1)),

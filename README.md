@@ -24,6 +24,7 @@ Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md) · history: [CHANGELOG.md](C
 # builds all three binaries
 cargo build --release
 cargo test -- --include-ignored   # includes the real screen-capture test
+cargo xtask models                 # Grab Text's models into assets/models (releases ship them)
 ```
 
 Linux build dependencies (Debian/Ubuntu):
@@ -157,7 +158,7 @@ Layout, top to bottom:
 | Magnify | Click to drop a 1.5×–4× lens (or drag its size); move the source ring afterwards |
 | Spotlight | Drag a rectangle or ellipse; everything around it is dimmed |
 | Crop | Adjust the frame over the canvas (handles, move, draw a new one, Alt from the centre); Enter or double-click crops, Esc resets |
-| Grab Text | Drag over text (a click reads the whole capture): the text appears in reading order or as on screen, to copy or to turn into editable text boxes |
+| Grab Text | Drag over text (a click reads the whole capture): the text appears in reading order or as on screen, to copy or to turn into editable text boxes. Reads the Latin alphabet, on device, with PdfCraft's recogniser (ocrs models, shipped in `models/`) |
 | Move | Select, Shift+click to add, drag to move; handles resize (Shift keeps the aspect, Alt from the centre), rotate (Shift snaps to 15°) and round corners |
 | Selection | Rectangle: drag to select part of the capture, drag inside it to move it, Delete to remove it; the hole is Transparent or Auto Fill |
 | Cut Out | Drag across the capture to remove a strip and close the gap (straight or torn seam) |
@@ -283,7 +284,7 @@ cargo run -p capturecraft-app --release   # binary: capturecraft-editor
 | `capturecraft-engine` | L5 | Command registry and session: every edit is an undoable command (`annotation.addStep`, `node.resize`, `node.rotate`, `canvas.setBackdrop`, `smart.simplify`, …) |
 | `capturecraft-compositor` | L4 | CPU reference compositor and wgpu compositor with pixel parity (≤ 2/255) |
 | `capturecraft-capture` | L6 | Capture backends, frozen-desktop hit testing, scrolling-capture stitcher |
-| `capturecraft-ocr` | L6 | UI segmentation, inpainting and text recognition for the smart tools |
+| `capturecraft-ocr` | L6 | UI segmentation, inpainting and text recognition for the smart tools (text via `pdfcraft-ocr`, PdfCraft's Scan & OCR recogniser) |
 | `capturecraft-ui-egui` | L7 | Capture HUD, crosshair overlay and the studio editor: toolbar, drawer, canvas, utility bar, filmstrip, vector icons (PhotoCraft themes) |
 | `capturecraft-app` | app | eframe + wgpu shell hosting the editor, the floating HUD and the overlay on one GPU device |
 
@@ -317,6 +318,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p capturecraft-compositor --features gpu --tests   # CPU/GPU parity
 cargo xtask layers
+cargo xtask models && cargo test -p capturecraft-ocr --test neural_tests -- --ignored   # real OCR (release CI)
 ```
 
 ## License

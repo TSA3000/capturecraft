@@ -1,3 +1,19 @@
+# v0.24.3
+
+## Changes
+
+- **Fix: Grab Text reads text again.** Up to v0.24.2 the downloads and installers left out
+  the text recognition models, so Grab Text found lines but could not read the words. They
+  are now installed in a `models` folder next to CaptureCraft (about 12 MB), and every
+  release is checked to read text before it is published.
+- Text recognition is now shared with PdfCraft's Scan & OCR (same engine, same models). It
+  reads the Latin alphabet and runs on your computer; nothing is uploaded.
+
+## Upgrading
+
+- Install over v0.24.2 (setup.exe or MSI), or unpack the new zip / tarball with its
+  `models` folder; nothing else to do.
+
 # v0.24.2
 
 ## Changes

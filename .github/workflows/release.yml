@@ -38,6 +38,10 @@ jobs:
       # The root package (CLI, capture window, tray) and capturecraft-app
       # (capturecraft-editor).
       - run: cargo build --release --target ${{ matrix.target }} -p capturecraft -p capturecraft-app
+      # Grab Text's models: fetched and checked (SHA-256) into assets/models,
+      # read back by the neural test, shipped in models/ beside the programs.
+      - run: cargo xtask models
+      - run: cargo test -p capturecraft-ocr --test neural_tests -- --ignored
 
       - name: Package archive
         shell: bash
@@ -46,6 +50,7 @@ jobs:
           mkdir "$NAME"
           BIN="target/${{ matrix.target }}/release"
           cp README.md LICENSE-MIT LICENSE-APACHE "$NAME/"
+          cp -R assets/models "$NAME/models"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp "$BIN/capturecraft.exe" "$BIN/capturecraft-tray.exe" \
                "$BIN/capturecraft-app.exe" "$BIN/capturecraft-editor.exe" "$NAME/"

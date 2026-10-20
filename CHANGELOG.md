@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.24.3 (2026-10-20)
+
+- Fix: Grab Text read no words in release builds. The archives, the NSIS installer and the
+  MSI now ship the text recognition models in `models/` beside the programs; the release
+  workflow fetches them (`cargo xtask models`) and checks that they read rendered text.
+- OCR: `capturecraft-ocr` reads text with `pdfcraft-ocr` (PdfCraft's Scan & OCR recogniser,
+  same ocrs models) instead of its own copy of the ocrs code.
+- New test `crates/ocr/tests/neural_tests.rs` (ignored without the models).
+- Grab Text's "models are missing" message no longer points users at `cargo`.
+
 ## v0.24.2 (2026-10-20)
 
 - License: MIT OR Apache-2.0 (as PhotoCraft) for the whole workspace, was Apache-2.0 for the

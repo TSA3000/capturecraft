@@ -13,7 +13,7 @@ default = ["neural"]
 # Text recognition with the ocrs models (`cargo xtask models`). Without the
 # feature, or without the models, the morphological detector still finds
 # text lines, buttons, icons and panels; only the words are not read.
-neural = ["dep:ocrs", "dep:rten"]
+neural = ["dep:pdfcraft-ocr"]
 
 [dependencies]
 capturecraft-engine = { workspace = true }
@@ -25,8 +25,11 @@ photocraft-algo = { workspace = true }
 rayon = { workspace = true }
 sha2 = "0.10.9"
 thiserror = { workspace = true }
-ocrs = { version = "0.13.1", default-features = false, features = ["rten"], optional = true }
-rten = { version = "0.26.0", default-features = false, features = ["rten_format"], optional = true }
+# PdfCraft's recogniser: ocrs + rten with the trained alphabet.
+pdfcraft-ocr = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Renders the text the neural test reads back.
+photocraft-doc = { workspace = true }
+photocraft-text = { workspace = true }

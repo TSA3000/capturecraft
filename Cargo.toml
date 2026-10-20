@@ -49,7 +49,7 @@ members = [".", "crates/*", "xtask"]
 
 [workspace.package]
 # The one CaptureCraft version: every crate (and Help › About) has it.
-version = "0.24.2"
+version = "0.24.3"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -76,6 +76,8 @@ photocraft-codecs = { git = "https://github.com/storytold/photocraft", tag = "v0
 # Multi-page PDF export (one capture per page).
 pdfcraft-create = { git = "https://github.com/storytold/pdfcraft", tag = "v0.9.0" }
 pdfcraft-cos = { git = "https://github.com/storytold/pdfcraft", tag = "v0.9.0" }
+# Text recognition (ocrs models) shared with PdfCraft's Scan & OCR.
+pdfcraft-ocr = { git = "https://github.com/storytold/pdfcraft", tag = "v0.9.0" }
 # Theme tokens (`theme::Tokens`) shared with PhotoCraft's editor.
 photocraft-ui-egui = { git = "https://github.com/storytold/photocraft", tag = "v0.9.0" }
 # The UI stack of photocraft v0.9.0; the compositor's wgpu is the major

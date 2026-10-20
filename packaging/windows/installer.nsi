@@ -54,6 +54,10 @@ Section "Install"
   Delete "$INSTDIR\LICENSE"
   File "${SOURCE}\LICENSE-MIT"
   File "${SOURCE}\LICENSE-APACHE"
+  ; Grab Text's models; the app looks for them in models\ beside it.
+  SetOutPath "$INSTDIR\models"
+  File /r "${SOURCE}\models\*"
+  SetOutPath "$INSTDIR"
 
   CreateDirectory "$SMPROGRAMS\${APP}"
   CreateShortCut "$SMPROGRAMS\${APP}\${APP}.lnk" "$INSTDIR\capturecraft-app.exe"
@@ -84,6 +88,7 @@ Section "Uninstall"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\LICENSE-MIT"
   Delete "$INSTDIR\LICENSE-APACHE"
+  RMDir /r "$INSTDIR\models"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
